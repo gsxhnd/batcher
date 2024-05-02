@@ -5,6 +5,7 @@ import (
 
 	"github.com/gsxhnd/batcher/batch_ffmpeg"
 	"github.com/urfave/cli/v2"
+	"go.uber.org/zap"
 )
 
 var (
@@ -92,7 +93,7 @@ var ffmpegBatchConvertCmd = &cli.Command{
 
 		vb, err := batch_ffmpeg.NewVideoBatch(&opt)
 		if err != nil {
-			// logger.Panicf("Create dest path error", zap.Error(err))
+			logger.Panic("Create dest path error", zap.Error(err))
 			return err
 		}
 		// logger.Debugf("video batcher init")
@@ -109,7 +110,7 @@ var ffmpegBatchConvertCmd = &cli.Command{
 				for _, c := range cmd {
 					cmdStr += c + " "
 				}
-				// logger.Infof("Cmd batch not execute,cmd: " + cmdStr)
+				logger.Info("Cmd batch not execute,cmd: " + cmdStr)
 			}
 			return nil
 		}
@@ -168,7 +169,7 @@ var ffmpegBatchAddSubCmd = &cli.Command{
 
 		vb, err := batch_ffmpeg.NewVideoBatch(&opt)
 		if err != nil {
-			// logger.Panicf("Create dest path error", zap.Error(err))
+			logger.Panic("Create dest path error", zap.Error(err))
 			return err
 		}
 
@@ -183,7 +184,7 @@ var ffmpegBatchAddSubCmd = &cli.Command{
 				for _, c := range cmd {
 					cmdStr += c + " "
 				}
-				// logger.Infof("Cmd batch not execute,cmd: " + cmdStr)
+				logger.Info("Cmd batch not execute,cmd: " + cmdStr)
 			}
 			return nil
 		}
@@ -219,7 +220,7 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 
 		vb, err := batch_ffmpeg.NewVideoBatch(&opt)
 		if err != nil {
-			// logger.Panicf("Create dest path error", zap.Error(err))
+			logger.Panic("Create dest path error", zap.Error(err))
 			return err
 		}
 
@@ -234,7 +235,7 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 				for _, c := range cmd {
 					cmdStr += c + " "
 				}
-				// logger.Infof("Cmd batch not execute,cmd: " + cmdStr)
+				logger.Info("Cmd batch not execute,cmd: " + cmdStr)
 			}
 			return nil
 		}

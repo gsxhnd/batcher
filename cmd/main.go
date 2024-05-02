@@ -3,17 +3,13 @@ package main
 import (
 	"os"
 
+	"github.com/gsxhnd/batcher/utils"
 	"github.com/urfave/cli/v2"
 )
 
 var (
 	RootCmd = cli.NewApp()
-	// logger  = utils.NewLogger(&utils.Config{
-	// 	Dev: true,
-	// 	LogConfig: utils.LogConfig{
-	// 		Level: "debug",
-	// 	},
-	// })
+	logger  = utils.NewLogger()
 )
 
 func init() {
