@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+tasks:
+  gen_test:
+    cmds:
+      - rm -rvf testdata/
+      - mkdir -p testdata/{1,2}
+      - touch ./testdata/{1,2}/{1,2}.{mkv,mp4,ass,ttf}
+      - ls -al ./testdata
+  clean:
+    cmds:
+      - go clean --cache
+      - rm -rvf build
+      - rm -rvf dist
+      - rm -rvf testdata/
