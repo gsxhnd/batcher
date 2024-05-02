@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-
 	"github.com/gsxhnd/batcher/batch_ffmpeg"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/zap"
@@ -100,7 +98,7 @@ var ffmpegBatchConvertCmd = &cli.Command{
 
 		cmds, err := vb.GetConvertBatch()
 		if err != nil {
-			// logger.Panicf("Get Convert Batch error", zap.Error(err))
+			logger.Panic("Get Convert Batch error", zap.Error(err))
 			return err
 		}
 
@@ -115,7 +113,7 @@ var ffmpegBatchConvertCmd = &cli.Command{
 			return nil
 		}
 
-		return vb.ExecuteBatch(os.Stdout, os.Stderr, cmds)
+		return vb.ExecuteBatch(cmds)
 	},
 }
 
@@ -189,7 +187,7 @@ var ffmpegBatchAddSubCmd = &cli.Command{
 			return nil
 		}
 
-		return vb.ExecuteBatch(os.Stdout, os.Stderr, cmds)
+		return vb.ExecuteBatch(cmds)
 	},
 }
 
@@ -240,6 +238,6 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 			return nil
 		}
 
-		return vb.ExecuteBatch(os.Stdout, os.Stderr, cmds)
+		return vb.ExecuteBatch(cmds)
 	},
 }

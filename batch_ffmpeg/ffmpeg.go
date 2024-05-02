@@ -2,7 +2,6 @@ package batch_ffmpeg
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,12 +33,11 @@ type VideoBatcher interface {
 	GetConvertBatch() ([][]string, error)      // 获取转换视频命令
 	GetAddFontsBatch() ([][]string, error)     // 获取添加字体命令
 	GetAddSubtittleBatch() ([][]string, error) // 获取添加字幕命令
-	ExecuteBatch(wOut, wError io.Writer, batchCmd [][]string) error
+	ExecuteBatch(batchCmd [][]string) error
 }
 
 type videoBatch struct {
 	option    *VideoBatchOption
-	cmdBatch  []string
 	cmdBatchs [][]string
 }
 
@@ -52,7 +50,6 @@ func NewVideoBatch(opt *VideoBatchOption) (VideoBatcher, error) {
 
 	return &videoBatch{
 		option:    opt,
-		cmdBatch:  make([]string, 0),
 		cmdBatchs: make([][]string, 0),
 	}, nil
 }
@@ -214,7 +211,7 @@ func (vb *videoBatch) GetAddSubtittleBatch() ([][]string, error) {
 	return vb.cmdBatchs, nil
 }
 
-func (vb *videoBatch) ExecuteBatch(wOut, wError io.Writer, cmdBatch [][]string) error {
+func (vb *videoBatch) ExecuteBatch(cmdBatch [][]string) error {
 	if !vb.option.Exec {
 		return nil
 	}
@@ -226,8 +223,8 @@ func (vb *videoBatch) ExecuteBatch(wOut, wError io.Writer, cmdBatch [][]string) 
 			cmd = exec.Command("ffmpeg", c...)
 		}
 
-		cmd.Stdout = wOut
-		cmd.Stderr = wError
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 		err := cmd.Run()
 		if err != nil {
 			return err
