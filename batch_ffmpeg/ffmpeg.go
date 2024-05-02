@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/emirpasic/gods/lists/arraylist"
+	"github.com/gsxhnd/batcher/utils"
 )
 
 type VideoBatchOption struct {
