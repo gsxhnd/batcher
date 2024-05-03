@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # This is an example .goreleaser.yml file with some sensible defaults.
 # Make sure to check the documentation at https://goreleaser.com
-project_name: garage
+project_name: batcher
 git:
   tag_sort: -version:creatordate
 report_sizes: true
@@ -13,7 +13,7 @@ before:
 
 builds:
   - id: cli
-    main: ./garage_cmd
+    main: ./cmd
     env:
       - CGO_ENABLED=0
     flags:
