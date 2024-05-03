@@ -2,7 +2,7 @@
 version: '3'
 
 tasks:
-  gen_test:
+  test:
     cmds:
       - rm -rvf testdata/
       - mkdir -p testdata/{1,2}

@@ -219,8 +219,10 @@ func (vb *videoBatch) ExecuteBatch(cmdBatch [][]string) error {
 	for _, c := range cmdBatch {
 		var cmd *exec.Cmd
 		switch runtime.GOOS {
-		case "linux":
+		default:
 			cmd = exec.Command("ffmpeg", c...)
+		case "windows":
+			cmd = exec.Command("ffmpeg.exe", c...)
 		}
 
 		cmd.Stdout = os.Stdout

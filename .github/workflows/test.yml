@@ -30,7 +30,7 @@ jobs:
           version: 3.x
 
       - name: Mock Test Data
-        run: task gen_test
+        run: task test
 
       - name: Test
         run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
