@@ -10,10 +10,10 @@ import (
 
 func NewLogger() *zap.Logger {
 	var core = zapcore.NewCore(zapcore.NewConsoleEncoder(zapcore.EncoderConfig{
-		MessageKey:  "msg",
-		LevelKey:    "level",
-		TimeKey:     "time",
-		CallerKey:   "caller",
+		MessageKey: "msg",
+		LevelKey:   "level",
+		TimeKey:    "time",
+		// CallerKey:   "caller",
 		EncodeLevel: zapcore.CapitalColorLevelEncoder,
 		EncodeTime: func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 			enc.AppendString(t.UTC().Format("2006-01-02T15:04:05.000000-07:00"))

@@ -15,7 +15,7 @@ var (
 
 	inputFormat = &cli.StringFlag{
 		Name:  "input_format",
-		Value: "mkv",
+		Value: "mp4",
 		Usage: "源视频后缀",
 	}
 
