@@ -142,7 +142,8 @@ func (vb *videoBatch) GetConvertBatch() ([][]string, error) {
 		cmd := []string{"-i"}
 		cmd = append(cmd, v)
 		if vb.option.Advance != "" {
-			cmd = append(cmd, vb.option.Advance)
+			adv := strings.Split(vb.option.Advance, " ")
+			cmd = append(cmd, adv...)
 		}
 		cmd = append(cmd, outputVideosMap[v])
 		vb.cmdBatchs = append(vb.cmdBatchs, cmd)
