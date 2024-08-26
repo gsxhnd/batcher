@@ -202,7 +202,12 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 		outputFormat,
 		advance,
 		exec,
-		inputFontsPath,
+		&cli.StringFlag{
+			Name:     "input_fonts_path",
+			Usage:    "添加的字体文件夹",
+			Value:    "fonts",
+			Required: true,
+		},
 	},
 	UsageText: "",
 	Action: func(ctx *cli.Context) error {
