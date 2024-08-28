@@ -200,7 +200,6 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 		inputFormat,
 		outputPath,
 		outputFormat,
-		advance,
 		exec,
 		&cli.StringFlag{
 			Name:     "input_fonts_path",
@@ -216,7 +215,6 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 			InputFormat:  ctx.String("input_format"),
 			OutputPath:   ctx.String("output_path"),
 			OutputFormat: ctx.String("output_format"),
-			Advance:      ctx.String("advance"),
 			Exec:         ctx.Bool("exec"),
 			FontsPath:    ctx.String("input_fonts_path"),
 		}
