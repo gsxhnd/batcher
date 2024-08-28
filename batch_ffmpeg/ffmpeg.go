@@ -32,7 +32,7 @@ type VideoBatcher interface {
 	GetFontsParams() ([]string, error)         // 获取字体列表
 	GetConvertBatch() ([][]string, error)      // 获取转换视频命令
 	GetAddFontsBatch() ([][]string, error)     // 获取添加字体命令
-	GetAddSubtittleBatch() ([][]string, error) // 获取添加字幕命令
+	GetAddSubtitleBatch() ([][]string, error) // 获取添加字幕命令
 	ExecuteBatch(batchCmd [][]string) error
 }
 
@@ -121,7 +121,7 @@ func (vb *videoBatch) GetFontsParams() ([]string, error) {
 	for i, v := range fontsList {
 		fontsCmdList = append(fontsCmdList,
 			"-attach",
-			filepath.Join(vb.option.FontsPath, v),
+			v,
 			fmt.Sprintf("-metadata:s:t:%v", i),
 			"mimetype=application/x-truetype-font",
 		)
@@ -177,7 +177,7 @@ func (vb *videoBatch) GetAddFontsBatch() ([][]string, error) {
 	return vb.cmdBatchs, nil
 }
 
-func (vb *videoBatch) GetAddSubtittleBatch() ([][]string, error) {
+func (vb *videoBatch) GetAddSubtitleBatch() ([][]string, error) {
 	videosList, err := vb.GetVideosList()
 	if err != nil {
 		return nil, err

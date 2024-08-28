@@ -96,14 +96,14 @@ var ffmpegBatchConvertCmd = &cli.Command{
 		}
 		// logger.Debugf("video batcher init")
 
-		cmds, err := vb.GetConvertBatch()
+		cmdList, err := vb.GetConvertBatch()
 		if err != nil {
 			logger.Panic("Get Convert Batch error", zap.Error(err))
 			return err
 		}
 
 		if !opt.Exec {
-			for _, cmd := range cmds {
+			for _, cmd := range cmdList {
 				var cmdStr = "ffmpeg "
 				for _, c := range cmd {
 					cmdStr += c + " "
@@ -113,7 +113,7 @@ var ffmpegBatchConvertCmd = &cli.Command{
 			return nil
 		}
 
-		return vb.ExecuteBatch(cmds)
+		return vb.ExecuteBatch(cmdList)
 	},
 }
 
@@ -171,13 +171,13 @@ var ffmpegBatchAddSubCmd = &cli.Command{
 			return err
 		}
 
-		cmds, err := vb.GetAddSubtittleBatch()
+		cmdList, err := vb.GetAddSubtitleBatch()
 		if err != nil {
 			return err
 		}
 
 		if !opt.Exec {
-			for _, cmd := range cmds {
+			for _, cmd := range cmdList {
 				var cmdStr = "ffmpeg "
 				for _, c := range cmd {
 					cmdStr += c + " "
@@ -187,7 +187,7 @@ var ffmpegBatchAddSubCmd = &cli.Command{
 			return nil
 		}
 
-		return vb.ExecuteBatch(cmds)
+		return vb.ExecuteBatch(cmdList)
 	},
 }
 
@@ -227,13 +227,13 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 			return err
 		}
 
-		cmds, err := vb.GetAddFontsBatch()
+		cmdList, err := vb.GetAddFontsBatch()
 		if err != nil {
 			return err
 		}
 
 		if !opt.Exec {
-			for _, cmd := range cmds {
+			for _, cmd := range cmdList {
 				var cmdStr = "ffmpeg "
 				for _, c := range cmd {
 					cmdStr += c + " "
@@ -243,6 +243,6 @@ var ffmpegBatchAddFontCmd = &cli.Command{
 			return nil
 		}
 
-		return vb.ExecuteBatch(cmds)
+		return vb.ExecuteBatch(cmdList)
 	},
 }
