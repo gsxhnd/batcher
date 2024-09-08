@@ -27,11 +27,11 @@ type VideoBatchOption struct {
 }
 
 type VideoBatcher interface {
-	GetVideosList() ([]string, error)          // 获取视频列表s
-	GetFontsList() ([]string, error)           // 获取字体列表
-	GetFontsParams() ([]string, error)         // 获取字体列表
-	GetConvertBatch() ([][]string, error)      // 获取转换视频命令
-	GetAddFontsBatch() ([][]string, error)     // 获取添加字体命令
+	GetVideosList() ([]string, error)         // 获取视频列表s
+	GetFontsList() ([]string, error)          // 获取字体列表
+	GetFontsParams() ([]string, error)        // 获取字体列表
+	GetConvertBatch() ([][]string, error)     // 获取转换视频命令
+	GetAddFontsBatch() ([][]string, error)    // 获取添加字体命令
 	GetAddSubtitleBatch() ([][]string, error) // 获取添加字幕命令
 	ExecuteBatch(batchCmd [][]string) error
 }
@@ -194,9 +194,9 @@ func (vb *videoBatch) GetAddSubtitleBatch() ([][]string, error) {
 		var cmd = []string{}
 		filename, _ := strings.CutSuffix(filepath.Base(v), filepath.Ext(v))
 		sourceSubtitle := filepath.Join(vb.option.InputPath, filename+"."+vb.option.InputSubSuffix)
-		cmd = append(cmd, "-i", fmt.Sprintf(`"%v"`, v))
+		cmd = append(cmd, "-i", fmt.Sprintf(`%v`, v))
 		cmd = append(cmd, "-sub_charenc", "UTF-8")
-		cmd = append(cmd, "-i", fmt.Sprintf(`"%v"`, sourceSubtitle), "-map", "0", "-map", "1")
+		cmd = append(cmd, "-i", fmt.Sprintf(`%v`, sourceSubtitle), "-map", "0", "-map", "1")
 		cmd = append(cmd, fmt.Sprintf("-metadata:s:s:%v", vb.option.InputSubNo))
 		cmd = append(cmd, fmt.Sprintf("language=%v", vb.option.InputSubLang))
 		cmd = append(cmd, fmt.Sprintf("-metadata:s:s:%v", vb.option.InputSubNo))
@@ -205,7 +205,7 @@ func (vb *videoBatch) GetAddSubtitleBatch() ([][]string, error) {
 		if fontsParams != nil {
 			cmd = append(cmd, fontsParams...)
 		}
-		cmd = append(cmd, fmt.Sprintf(`"%v"`, outputVideosMap[v]))
+		cmd = append(cmd, fmt.Sprintf(`%v`, outputVideosMap[v]))
 		vb.cmdBatchs = append(vb.cmdBatchs, cmd)
 	}
 
