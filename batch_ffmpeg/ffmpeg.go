@@ -200,7 +200,7 @@ func (vb *videoBatch) GetAddSubtitleBatch() ([][]string, error) {
 		cmd = append(cmd, fmt.Sprintf("-metadata:s:s:%v", vb.option.InputSubNo))
 		cmd = append(cmd, fmt.Sprintf("language=%v", vb.option.InputSubLang))
 		cmd = append(cmd, fmt.Sprintf("-metadata:s:s:%v", vb.option.InputSubNo))
-		cmd = append(cmd, fmt.Sprintf(`title="%v"`, vb.option.InputSubTitle))
+		cmd = append(cmd, fmt.Sprintf(`title=%v`, vb.option.InputSubTitle))
 		cmd = append(cmd, "-c", "copy")
 		if fontsParams != nil {
 			cmd = append(cmd, fontsParams...)
