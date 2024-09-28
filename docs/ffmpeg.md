@@ -86,7 +86,13 @@ garage ffmpeg-batch add-sub \
 推荐使用 [Lossless Cut](https://github.com/mifi/lossless-cut)软件
 
 ```shell
-ffmpeg -i input.wmv -ss 00:00:30.0 -c copy -t 00:00:10.0 output.wmv
+# -i input.mp4 指定输入视频文件。
+# -ss 00:00:00 从视频的开始位置查找，这里是从00:00:00开始。
+# -t 00:00:10 设置所需切割视频的时长，这里是10秒。
+# -c copy 复制编码以避免重编码，这会导致更快的处理速度。
+ffmpeg -i input.wmv -ss 00:00:30.0 -t 00:00:10.0 -c copy output.wmv
+
+ffmpeg -i .\11.mkv -ss 30 -c copy 111.mkv
 ```
 
 ```shell
