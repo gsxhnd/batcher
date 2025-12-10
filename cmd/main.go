@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 
+	renamefile "github.com/gsxhnd/batcher/batch/rename_file"
 	"github.com/gsxhnd/batcher/utils"
 	"github.com/urfave/cli/v2"
 )
@@ -18,6 +19,7 @@ func init() {
 	RootCmd.Flags = []cli.Flag{}
 	RootCmd.Commands = []*cli.Command{
 		ffmpegBatchCmd,
+		renamefile.RenameFileCmd,
 	}
 	// RootCmd.CommandNotFound = func(ctx *cli.Context, s string) {
 	// 	fmt.Println(s)
