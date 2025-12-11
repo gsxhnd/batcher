@@ -1,4 +1,4 @@
-package batch_ffmpeg
+package ffmpeg
 
 import (
 	"testing"
@@ -308,20 +308,3 @@ func Test_videoBatch_filterOutput(t *testing.T) {
 	}
 }
 
-func Test_videoBatch_ExecuteBatch(t *testing.T) {
-	tests := []struct {
-		name string
-	}{
-		{"test"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// var a = []string{"-i", "../testdata/1/1.mp4", "", "../data/1.mkv"}
-
-			// cmd := exec.Command("ffmpeg", a...)
-			// cmd.Stdout = os.Stdout
-			// cmd.Stderr = os.Stdout
-			// cmd.Run()
-		})
-	}
-}

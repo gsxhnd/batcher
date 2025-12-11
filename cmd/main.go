@@ -1,33 +1,24 @@
 package main
 
 import (
+	"context"
 	"os"
 
+	"github.com/gsxhnd/batcher/batch/ffmpeg"
 	renamefile "github.com/gsxhnd/batcher/batch/rename_file"
-	"github.com/gsxhnd/batcher/utils"
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 )
-
-var (
-	RootCmd = cli.NewApp()
-	logger  = utils.NewLogger()
-)
-
-func init() {
-	RootCmd.HideVersion = true
-	RootCmd.Usage = "命令行工具"
-	RootCmd.Flags = []cli.Flag{}
-	RootCmd.Commands = []*cli.Command{
-		ffmpegBatchCmd,
-		renamefile.RenameFileCmd,
-	}
-	// RootCmd.CommandNotFound = func(ctx *cli.Context, s string) {
-	// 	fmt.Println(s)
-	// }
-}
 
 func main() {
-	err := RootCmd.Run(os.Args)
+	cmd := &cli.Command{
+		HideVersion: true,
+		Usage:       "命令行工具",
+		Commands: []*cli.Command{
+			ffmpeg.FfmpegBatchCmd,
+			renamefile.RenameFileCmd,
+		},
+	}
+	err := cmd.Run(context.Background(), os.Args)
 	if err != nil {
 		panic(err)
 	}

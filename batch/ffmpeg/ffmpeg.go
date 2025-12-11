@@ -1,4 +1,4 @@
-package batch_ffmpeg
+package ffmpeg
 
 import (
 	"fmt"
@@ -23,11 +23,10 @@ type VideoBatchOption struct {
 	InputSubTitle  string
 	InputSubLang   string
 	Advance        string
-	Exec           bool
 }
 
 type VideoBatcher interface {
-	GetVideosList() ([]string, error)         // 获取视频列表s
+	GetVideosList() ([]string, error)         // 获取视频列表
 	GetFontsList() ([]string, error)          // 获取字体列表
 	GetFontsParams() ([]string, error)        // 获取字体列表
 	GetConvertBatch() ([][]string, error)     // 获取转换视频命令
@@ -213,10 +212,6 @@ func (vb *videoBatch) GetAddSubtitleBatch() ([][]string, error) {
 }
 
 func (vb *videoBatch) ExecuteBatch(cmdBatch [][]string) error {
-	if !vb.option.Exec {
-		return nil
-	}
-
 	for _, c := range cmdBatch {
 		var cmd *exec.Cmd
 		switch runtime.GOOS {
