@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,10 +26,11 @@ func TestNewVideoBatch(t *testing.T) {
 		opt     *VideoBatchOption
 		wantErr bool
 	}{
-		{"test_succ", &VideoBatchOption{
+		{"test_success", &VideoBatchOption{
 			OutputPath: "../testdata",
 		}, false},
-		{"test_fail", &VideoBatchOption{}, true},
+		{"test_nil_option", nil, true},
+		{"test_empty_output", &VideoBatchOption{}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,8 +59,7 @@ func Test_videoBatch_GetVideosList(t *testing.T) {
 	}{
 		{"test_mkv", args{InputPath: "../testdata", InputFormat: "mkv"}, correctMkvVideos, false},
 		{"test_mp4", args{InputPath: "../testdata", InputFormat: "mp4"}, correctMp4Videos, false},
-		{"test_err", args{InputPath: "../111", InputFormat: "mp4"}, []string{}, true},
-		{"test_err", args{InputPath: "../111", InputFormat: "mp4"}, []string{}, true},
+		{"test_not_exist_path", args{InputPath: "../111", InputFormat: "mp4"}, []string{}, true},
 	}
 
 	for _, tt := range tests {
@@ -77,7 +78,7 @@ func Test_videoBatch_GetVideosList(t *testing.T) {
 				assert.NotNil(t, err)
 			} else {
 				assert.Nil(t, err)
-				assert.Equal(t, videosList, tt.want)
+				assert.Equal(t, tt.want, videosList)
 			}
 		})
 	}
@@ -100,8 +101,8 @@ func Test_videoBatch_GetFontsList(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"test_succ", args{FontsPath: "../testdata"}, correctFonts, false},
-		{"test_err", args{FontsPath: "../111"}, nil, true},
+		{"test_success", args{FontsPath: "../testdata"}, correctFonts, false},
+		{"test_not_exist", args{FontsPath: "../111"}, nil, true},
 	}
 
 	for _, tt := range tests {
@@ -140,8 +141,8 @@ func Test_videoBatch_GetFontsParams(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"test_succ", args{FontsPath: "../testdata"}, correctFontsCmd, false},
-		{"test_err", args{FontsPath: "../111"}, nil, true},
+		{"test_success", args{FontsPath: "../testdata"}, correctFontsCmd, false},
+		{"test_not_exist", args{FontsPath: "../111"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -181,8 +182,8 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 		want    [][]string
 		wantErr bool
 	}{
-		{"test_succ", args{InputPath: "../testdata", InputFormat: "mp4", OutputPath: "../testdata/output", OutputFormat: "mkv"}, correctConvertBatch, false},
-		{"test_fail", args{InputPath: "../111", InputFormat: "mp4", OutputPath: "../testdata/output", OutputFormat: "mkv"}, nil, true},
+		{"test_success", args{InputPath: "../testdata", InputFormat: "mp4", OutputPath: "../testdata/output", OutputFormat: "mkv"}, correctConvertBatch, false},
+		{"test_not_exist", args{InputPath: "../111", InputFormat: "mp4", OutputPath: "../testdata/output", OutputFormat: "mkv"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -209,20 +210,20 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 }
 
 var correctAddFontsCmdBatch = func() [][]string {
-	var a = [][]string{
+	a := [][]string{
 		{"-i", "../testdata/1/1.mkv", "-c", "copy"},
 		{"-i", "../testdata/1/2.mkv", "-c", "copy"},
 		{"-i", "../testdata/2/1.mkv", "-c", "copy"},
 		{"-i", "../testdata/2/2.mkv", "-c", "copy"},
 	}
 
-	var b = []string{
+	b := []string{
 		"../testdata/output/1.mkv",
 		"../testdata/output/2.mkv",
 		"../testdata/output/1-1.mkv",
 		"../testdata/output/2-1.mkv",
 	}
-	var c = [][]string{}
+	var c [][]string
 	for i, v := range a {
 		v = append(v, correctFontsCmd...)
 		v = append(v, b[i])
@@ -245,8 +246,8 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 		want    [][]string
 		wantErr bool
 	}{
-		{"test_succ", args{InputPath: "../testdata", InputFormat: "mkv", FontsPath: "../testdata", OutputPath: "../testdata/output"}, correctAddFontsCmdBatch(), false},
-		{"test_fail", args{InputPath: "../111", InputFormat: "mkv", OutputPath: "../testdata/output", OutputFormat: "mkv"}, nil, true},
+		{"test_success", args{InputPath: "../testdata", InputFormat: "mkv", FontsPath: "../testdata", OutputPath: "../testdata/output"}, correctAddFontsCmdBatch(), false},
+		{"test_not_exist", args{InputPath: "../111", InputFormat: "mkv", OutputPath: "../testdata/output", OutputFormat: "mkv"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -308,3 +309,48 @@ func Test_videoBatch_filterOutput(t *testing.T) {
 	}
 }
 
+func TestFormatCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"simple", []string{"-i", "input.mp4"}, "ffmpeg -i input.mp4"},
+		{"empty", []string{}, "ffmpeg "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatCommand(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func Test_videoBatch_ExecuteBatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		workers  int
+		cmdBatch [][]string
+		wantErr  bool
+	}{
+		{"empty_batch", 1, [][]string{}, false},
+		{"single_worker", 1, [][]string{{"-version"}}, false},
+		{"multi_workers", 2, [][]string{{"-version"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vb := &videoBatch{
+				option: &VideoBatchOption{
+					Workers: tt.workers,
+				},
+			}
+
+			err := vb.ExecuteBatch(context.Background(), tt.cmdBatch)
+			if tt.wantErr {
+				assert.NotNil(t, err)
+			} else {
+				assert.Nil(t, err)
+			}
+		})
+	}
+}

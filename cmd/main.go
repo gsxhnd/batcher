@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/gsxhnd/batcher/batch/ffmpeg"
@@ -18,8 +19,10 @@ func main() {
 			renamefile.RenameFileCmd,
 		},
 	}
-	err := cmd.Run(context.Background(), os.Args)
-	if err != nil {
-		panic(err)
+
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
+		// 使用 fmt.Fprintf 输出错误信息，而不是 panic
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		os.Exit(1)
 	}
 }

@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/urfave/cli/v3"
 	"go.uber.org/zap"
@@ -19,9 +20,10 @@ var addSubCmd = &cli.Command{
 		outputFormat,
 		advance,
 		inputFontsPath,
+		workers,
 		&cli.StringFlag{
 			Name:  "input_sub_suffix",
-			Value: ".ass",
+			Value: "ass",
 			Usage: "添加的字幕后缀",
 		},
 		&cli.IntFlag{
@@ -41,7 +43,7 @@ var addSubCmd = &cli.Command{
 		},
 	},
 	Action: func(ctx context.Context, c *cli.Command) error {
-		var opt = VideoBatchOption{
+		opt := &VideoBatchOption{
 			InputPath:      c.String("input_path"),
 			InputFormat:    c.String("input_format"),
 			OutputPath:     c.String("output_path"),
@@ -51,30 +53,35 @@ var addSubCmd = &cli.Command{
 			InputSubTitle:  c.String("input_sub_title"),
 			InputSubLang:   c.String("input_sub_lang"),
 			FontsPath:      c.String("input_fonts_path"),
+			Workers:        c.Int("workers"),
 		}
 
-		vb, err := NewVideoBatch(&opt)
+		vb, err := NewVideoBatch(opt)
 		if err != nil {
-			logger.Panic("Create dest path error", zap.Error(err))
-			return err
+			logger.Error("创建批处理失败", zap.Error(err))
+			return fmt.Errorf("create video batch: %w", err)
 		}
 
 		cmdList, err := vb.GetAddSubtitleBatch()
 		if err != nil {
-			return err
+			logger.Error("获取字幕命令失败", zap.Error(err))
+			return fmt.Errorf("get subtitle batch: %w", err)
 		}
 
-		if c.Bool("dry_run") {
+		if c.Bool("dry-run") {
 			for _, cmd := range cmdList {
-				var cmdStr = "ffmpeg "
-				for _, c := range cmd {
-					cmdStr += c + " "
-				}
-				logger.Info("Cmd batch not execute,cmd: " + cmdStr)
+				logger.Info("预览命令: " + FormatCommand(cmd))
 			}
 			return nil
-		} else {
-			return vb.ExecuteBatch(cmdList)
 		}
+
+		logger.Info("开始执行字幕添加批处理", zap.Int("count", len(cmdList)))
+		if err := vb.ExecuteBatch(ctx, cmdList); err != nil {
+			logger.Error("执行字幕添加失败", zap.Error(err))
+			return fmt.Errorf("execute batch: %w", err)
+		}
+		logger.Info("字幕添加批处理完成")
+
+		return nil
 	},
 }

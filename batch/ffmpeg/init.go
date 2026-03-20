@@ -47,9 +47,18 @@ var (
 		Usage:    "添加的字体文件夹",
 		Required: false,
 	}
+
+	workers = &cli.IntFlag{
+		Name:  "workers",
+		Value: 1,
+		Usage: "并发工作数，默认为1（串行执行）",
+	}
 )
 
+// logger 是包级别的共享日志实例
 var logger = utils.NewLogger()
+
+// FfmpegBatchCmd 是 ffmpeg 批处理命令的入口
 var FfmpegBatchCmd = &cli.Command{
 	Name:        "ffmpeg",
 	Description: "ffmpeg视频批处理工具，支持视频格式转换、字幕添加和字体添加",

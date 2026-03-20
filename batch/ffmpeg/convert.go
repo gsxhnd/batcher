@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/urfave/cli/v3"
 	"go.uber.org/zap"
@@ -17,47 +18,46 @@ var convertCmd = &cli.Command{
 		outputFormat,
 		advance,
 		dryRun,
+		workers,
 	},
 	Usage:     "视频转换批处理",
 	UsageText: "",
 	Action: func(ctx context.Context, c *cli.Command) error {
-		var opt = VideoBatchOption{
+		opt := &VideoBatchOption{
 			InputPath:    c.String("input_path"),
 			InputFormat:  c.String("input_format"),
 			OutputPath:   c.String("output_path"),
 			OutputFormat: c.String("output_format"),
 			Advance:      c.String("advance"),
+			Workers:      c.Int("workers"),
 		}
-		// logger.Infof("Source videos directory: " + opt.InputPath)
-		// logger.Infof("Source videos format: " + opt.InputFormat)
-		// logger.Infof("Target video's font paths: " + opt.FontsPath)
-		// logger.Infof("Dest video directory: " + opt.OutputPath)
-		// logger.Infof("Dest video format: " + opt.OutputFormat)
 
-		vb, err := NewVideoBatch(&opt)
+		vb, err := NewVideoBatch(opt)
 		if err != nil {
-			logger.Panic("Create dest path error", zap.Error(err))
-			return err
+			logger.Error("创建批处理失败", zap.Error(err))
+			return fmt.Errorf("create video batch: %w", err)
 		}
-		// logger.Debugf("video batcher init")
 
 		cmdList, err := vb.GetConvertBatch()
 		if err != nil {
-			logger.Panic("Get Convert Batch error", zap.Error(err))
-			return err
+			logger.Error("获取转换命令失败", zap.Error(err))
+			return fmt.Errorf("get convert batch: %w", err)
 		}
 
-		if c.Bool("dry_run") {
+		if c.Bool("dry-run") {
 			for _, cmd := range cmdList {
-				var cmdStr = "ffmpeg "
-				for _, c := range cmd {
-					cmdStr += c + " "
-				}
-				logger.Info("Cmd batch not execute,cmd: " + cmdStr)
+				logger.Info("预览命令: " + FormatCommand(cmd))
 			}
 			return nil
-		} else {
-			return vb.ExecuteBatch(cmdList)
 		}
+
+		logger.Info("开始执行转换批处理", zap.Int("count", len(cmdList)))
+		if err := vb.ExecuteBatch(ctx, cmdList); err != nil {
+			logger.Error("执行转换失败", zap.Error(err))
+			return fmt.Errorf("execute batch: %w", err)
+		}
+		logger.Info("转换批处理完成")
+
+		return nil
 	},
 }
