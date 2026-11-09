@@ -3,8 +3,11 @@
 version: 2
 project_name: batcher
 git:
-  # 按 git version sort 排序 tag，保证取到最新的 tag
-  tag_sort: version
+  # 版本号排序 tag，保证取到最新的 tag。
+  # 注意必须用版本比较 key，写 "version" 会导致 git 报
+  # unknown field name 错误，GoReleaser 会把这种失败误报成
+  # "git doesn't contain any tags"。
+  tag_sort: -version:refname
 report_sizes: true
 
 before:
