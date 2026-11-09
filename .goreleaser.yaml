@@ -30,21 +30,16 @@ builds:
       - linux
       - darwin
       - windows
-      - freebsd
     goarch:
       - amd64
       - arm64
+      # 32 位 x86 只保留 Windows
       - "386"
-      - arm
-    goarm:
-      - "6"
-      - "7"
-    # Go 至少 1.15 起不再支持 darwin/386，darwin/arm 也从未被 Go 支持
     ignore:
-      - goos: darwin
+      - goos: linux
         goarch: "386"
       - goos: darwin
-        goarch: arm
+        goarch: "386"
 
 archives:
   - formats: [tar.gz]
@@ -55,7 +50,6 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
     # use zip for windows archives
     format_overrides:
       - goos: windows
