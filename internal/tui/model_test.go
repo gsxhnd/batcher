@@ -91,8 +91,7 @@ func TestSaveSubEditRejectsBadLanguage(t *testing.T) {
 	assert.Equal(t, phaseSubEdit, m.phase)
 }
 
-// setPresetEdit 在编辑表单中填入名称与参数（按 presetFieldDefs 的顺序）。
-// 字段值直接写入输入框，焦点停在最后一项，随后按 Enter 即可提交。
+// setPresetEdit 在预设编辑表单中填入名称与参数，焦点停在最后一项，随后按 Enter 即可提交。
 func setPresetEdit(m *model, name, args string) {
 	m.mgrFields[0].input.SetValue(name)
 	m.mgrFields[1].input.SetValue(args)
@@ -132,7 +131,8 @@ func TestPresetsAddEditDuplicateAndDelete(t *testing.T) {
 	assert.NotEmpty(t, m.mgrErr)
 	press(&m, "esc")
 
-	m.mgrCursor = 1
+	m.builtins = presets.Builtins()
+	m.mgrCursor = m.advanceUserOffset() + 1 // 第二条自定义预设
 	press(&m, "e")
 	assert.Equal(t, "", m.mgrFields[0].Value(), "编辑应回填名称")
 	assert.Equal(t, "-c:v h264", m.mgrFields[1].Value(), "编辑应回填参数")
@@ -143,7 +143,7 @@ func TestPresetsAddEditDuplicateAndDelete(t *testing.T) {
 		{Name: "H.264", Args: "-c:v hevc"},
 	}, m.presets)
 
-	m.mgrCursor = 0
+	m.mgrCursor = m.advanceUserOffset() // 第一条自定义预设
 	press(&m, "d")
 	press(&m, "d")
 	assert.Equal(t, []presets.Preset{{Name: "H.264", Args: "-c:v hevc"}}, m.presets, "自定义预设应在二次确认后删除")
@@ -155,6 +155,8 @@ func TestPresetsAddEditDuplicateAndDelete(t *testing.T) {
 func TestPresetEditTabMovesBetweenFields(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
+	m.builtins = presets.Builtins()
+	m.mgrCursor = m.advanceUserOffset() // 跳过内置预设，a 视为空白新增
 	m.phase = phasePresets
 	press(&m, "a")
 	require.Equal(t, 0, m.mgrFocus)
@@ -171,18 +173,19 @@ func TestPresetsReorder(t *testing.T) {
 	isolatePresets(t)
 	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
 	m := newModel()
+	m.builtins = presets.Builtins()
 	m.ops = ffmpeg.Selection{Convert: true}
 	m.phase = phaseAdvance
 	press(&m, "p")
+	m.mgrCursor = m.advanceUserOffset() // 移到第一条自定义预设
 
-	press(&m, "down")
 	press(&m, "J")
-	assert.Equal(t, []presets.Preset{{Args: "a"}, {Args: "c"}, {Args: "b"}}, m.presets)
-	assert.Equal(t, 2, m.mgrCursor, "移动后光标跟随条目")
+	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, m.presets)
+	assert.Equal(t, m.advanceUserOffset()+1, m.mgrCursor, "移动后光标跟随条目")
 
 	loaded, err := presets.Load()
 	require.NoError(t, err)
-	assert.Equal(t, []presets.Preset{{Args: "a"}, {Args: "c"}, {Args: "b"}}, loaded, "顺序应持久化")
+	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, loaded, "顺序应持久化")
 }
 
 func TestPresetsEscReturnsToAdvancePage(t *testing.T) {
@@ -301,9 +304,11 @@ func TestPresetMgrDeleteDoubleConfirmAndCancel(t *testing.T) {
 	isolatePresets(t)
 	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
 	m := newModel()
+	m.builtins = presets.Builtins()
 	m.phase = phaseFeature
 	press(&m, "p")
 	require.Equal(t, phasePresets, m.phase)
+	m.mgrCursor = m.advanceUserOffset() // 移到第一条自定义预设
 
 	press(&m, "d")
 	assert.Equal(t, []presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}, m.presets, "第一次按 d 不应删除")
@@ -316,9 +321,50 @@ func TestPresetMgrDeleteDoubleConfirmAndCancel(t *testing.T) {
 	press(&m, "p")
 	require.Equal(t, phasePresets, m.phase)
 	assert.Equal(t, -1, m.delPendingIdx, "重新进入管理页应重置确认状态")
+
+	m.mgrCursor = m.advanceUserOffset()
 	press(&m, "d")
 	press(&m, "d")
 	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "c"}}, m.presets)
+}
+
+func TestPresetMgrCopyBuiltinToCustom(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	require.NotEmpty(t, m.builtins)
+	m.phase = phaseFeature
+
+	press(&m, "p")
+	require.Equal(t, phasePresets, m.phase)
+	m.mgrCursor = 1 // 选中第二条内置预设
+
+	press(&m, "a")
+	require.Equal(t, phasePresetEdit, m.phase)
+	assert.Equal(t, m.builtins[1].Name, m.mgrFields[0].Value(), "复制时名称预填为内置预设名")
+	assert.Equal(t, m.builtins[1].Args, m.mgrFields[1].Value(), "复制时参数预填为内置预设参数")
+	assert.Equal(t, 0, m.mgrFocus, "焦点从名称字段开始")
+
+	press(&m, "tab") // 焦点移到参数字段，再 Enter 提交
+	press(&m, "enter")
+	require.Equal(t, phasePresets, m.phase)
+	assert.Equal(t, []presets.Preset{{Name: m.builtins[1].Name, Args: m.builtins[1].Args}}, m.presets, "复制后应成为自定义预设")
+	assert.Equal(t, m.advanceUserOffset(), m.mgrCursor, "保存后光标应指向新自定义预设")
+}
+
+func TestPresetMgrGuardsBuiltins(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.builtins = presets.Builtins()
+	m.phase = phasePresets
+	m.mgrCursor = 0 // 内置条目
+
+	press(&m, "d")
+	assert.Empty(t, m.presets, "内置预设不应被删除引导")
+	assert.NotEmpty(t, m.statusMsg, "内置条目按 d 应提示不可删除")
+
+	press(&m, "e")
+	assert.Equal(t, phasePresets, m.phase, "内置条目不应进入编辑页")
+	assert.NotEmpty(t, m.statusMsg, "内置条目按 e 应提示只读")
 }
 
 func TestPresetsLoadLegacyFileInManager(t *testing.T) {

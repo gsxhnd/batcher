@@ -152,9 +152,7 @@ func (m *model) openPresets(from phase) tea.Cmd {
 	m.mgrReturn = from
 	m.mgrErr = ""
 	m.delPendingIdx = -1
-	if m.mgrCursor >= len(m.presets) {
-		m.mgrCursor = max(len(m.presets)-1, 0)
-	}
+	m.mgrCursor = min(m.mgrCursor, max(m.mgrCount()-1, 0))
 	m.phase = phasePresets
 	return nil
 }
@@ -168,41 +166,58 @@ func (m *model) updatePresets(msg tea.Msg) tea.Cmd {
 	if s != "d" && s != "x" {
 		m.delPendingIdx = -1 // 任何其他按键都取消删除确认
 	}
-	n := len(m.presets)
+	// 光标与转码页一致：0..len(builtins)-1 为内置条目，之后为自定义条目。
+	total := m.mgrCount()
+	offset := m.advanceUserOffset()
+	onBuiltin := m.mgrCursor < offset
 	switch s {
 	case "up", "k":
-		if n > 0 {
-			m.mgrCursor = (m.mgrCursor - 1 + n) % n
+		if total > 0 {
+			m.mgrCursor = (m.mgrCursor - 1 + total) % total
 		}
 	case "down", "j":
-		if n > 0 {
-			m.mgrCursor = (m.mgrCursor + 1) % n
+		if total > 0 {
+			m.mgrCursor = (m.mgrCursor + 1) % total
 		}
 	case "a", "n":
+		// 选中内置条目时复制一份到自定义预设，随后可微调；否则新增空白条目。
+		if onBuiltin {
+			b := m.builtins[m.mgrCursor]
+			return m.openPresetEditWith(-1, presets.Preset{Name: b.Name, Args: b.Args})
+		}
 		return m.openPresetEditWith(-1, presets.Preset{})
 	case "e", "enter":
-		if n > 0 {
-			return m.openPresetEditWith(m.mgrCursor, m.presets[m.mgrCursor])
+		if onBuiltin {
+			m.statusMsg = "内置预设只读，按 a 可复制为自定义预设后再编辑"
+		} else if len(m.presets) > 0 {
+			return m.openPresetEditWith(m.userIndex(), m.presets[m.userIndex()])
 		}
 	case "d", "x":
-		if n > 0 {
-			if m.delPendingIdx != m.mgrCursor {
+		if onBuiltin {
+			m.statusMsg = "内置预设不可删除，自定义预设可在参数管理页创建"
+		} else if len(m.presets) > 0 {
+			idx := m.userIndex()
+			if m.delPendingIdx != idx {
 				// 第一次按 d：进入待确认状态，再次按 d/x 才真正删除。
-				m.delPendingIdx = m.mgrCursor
-				m.statusMsg = fmt.Sprintf("将删除自定义预设 %d，再次按 d 确认（其他任意键取消）", m.mgrCursor+1)
+				m.delPendingIdx = idx
+				m.statusMsg = fmt.Sprintf("将删除自定义预设 %d，再次按 d 确认（其他任意键取消）", idx+1)
 			} else {
 				m.delPendingIdx = -1
-				m.presets = append(m.presets[:m.mgrCursor], m.presets[m.mgrCursor+1:]...)
-				if m.mgrCursor >= len(m.presets) && m.mgrCursor > 0 {
+				m.presets = append(m.presets[:idx], m.presets[idx+1:]...)
+				if m.mgrCursor >= m.mgrCount() && m.mgrCursor > 0 {
 					m.mgrCursor--
 				}
 				m.persistPresets("已删除")
 			}
 		}
 	case "K", "shift+up":
-		m.movePreset(-1)
+		if !onBuiltin {
+			m.movePreset(-1)
+		}
 	case "J", "shift+down":
-		m.movePreset(1)
+		if !onBuiltin {
+			m.movePreset(1)
+		}
 	case "esc":
 		m.phase = m.mgrReturn
 		return m.afterPresetsBack()
@@ -212,22 +227,25 @@ func (m *model) updatePresets(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+// userIndex 返回当前光标对应的自定义预设下标（光标位于内置段时结果无意义，调用方需先判断）。
+func (m *model) userIndex() int {
+	return m.mgrCursor - m.advanceUserOffset()
+}
+
 // movePreset 把当前自定义预设上移（-1）或下移（+1），并保存顺序。
 func (m *model) movePreset(delta int) {
-	to := m.mgrCursor + delta
+	idx := m.userIndex()
+	to := idx + delta
 	if len(m.presets) < 2 || to < 0 || to >= len(m.presets) {
 		return
 	}
-	m.presets[m.mgrCursor], m.presets[to] = m.presets[to], m.presets[m.mgrCursor]
-	m.mgrCursor = to
+	m.presets[idx], m.presets[to] = m.presets[to], m.presets[idx]
+	m.mgrCursor = m.advanceUserOffset() + to
 	m.persistPresets("已调整顺序")
 }
 
 // persistPresets 写入用户预设文件，并以 action 作为成功提示前缀。
 func (m *model) persistPresets(action string) {
-	if m.mgrCursor >= len(m.presets) {
-		m.mgrCursor = max(len(m.presets)-1, 0)
-	}
 	if err := presets.Save(m.presets); err != nil {
 		m.statusMsg = "× 保存预设失败: " + err.Error()
 		return
@@ -308,11 +326,11 @@ func (m *model) savePresetEdit() tea.Cmd {
 	}
 	if m.mgrEditIndex >= 0 && m.mgrEditIndex < len(m.presets) {
 		m.presets[m.mgrEditIndex] = entry
-		m.mgrCursor = m.mgrEditIndex
+		m.mgrCursor = m.advanceUserOffset() + m.mgrEditIndex
 		m.persistPresets("已更新")
 	} else {
 		m.presets = append(m.presets, entry)
-		m.mgrCursor = len(m.presets) - 1
+		m.mgrCursor = m.mgrCount() - 1
 		m.persistPresets("已新增")
 	}
 	m.mgrErr = ""

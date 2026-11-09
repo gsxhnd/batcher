@@ -169,6 +169,11 @@ func (m model) presetCount() int {
 	return len(m.builtins) + len(m.presets) + 1
 }
 
+// mgrCount 返回管理页列表长度：内置 + 自定义（管理页没有手动输入项）。
+func (m model) mgrCount() int {
+	return len(m.builtins) + len(m.presets)
+}
+
 // presetHintText 返回用户预设文件路径，用于状态提示。
 func presetHintText() string {
 	path, err := presets.FilePath()

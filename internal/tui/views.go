@@ -204,12 +204,15 @@ func (m model) advanceView() string {
 func (m model) presetsView() string {
 	var b strings.Builder
 	b.WriteString(taskTitleStyle.Render("转码参数预设管理") + "\n")
-	b.WriteString(subtitleStyle.Render("内置预设只读提供参考；自定义预设支持 a 新增，e/Enter 编辑，d 删除，shift+↑/↓ 调整顺序") + "\n\n")
+	b.WriteString(subtitleStyle.Render("↑/↓ 选择；a 新增（选中内置预设时复制为自定义）；e/Enter 编辑，d 删除，shift+↑/↓ 调整顺序") + "\n\n")
 
-	// 内置预设（只读展示）
+	// 内置预设：只读，但可被光标选中以复制为自定义预设。
 	b.WriteString("  " + sectionStyle.Render("内置预设") + "\n")
 	for i, bp := range m.builtins {
-		b.WriteString(fmt.Sprintf("    %2d. %s\n", i+1, normalStyle.Render(bp.Args)+descStyle.Render("  "+bp.Name)))
+		focused := i == m.mgrCursor
+		line := fmt.Sprintf("%s%2d. %s", cursorMark(focused), i+1, itemStyle(focused).Render(bp.Name))
+		line += "  " + descStyle.Render(bp.Args)
+		b.WriteString(line + "\n")
 	}
 
 	// 用户自定义预设：每条占一行，名称在前、参数在后，名称为空时只显示参数。
@@ -217,8 +220,9 @@ func (m model) presetsView() string {
 	if len(m.presets) == 0 {
 		b.WriteString("    " + descStyle.Render("暂无自定义预设，按 a 新增一条") + "\n")
 	}
+	offset := m.advanceUserOffset()
 	for i, p := range m.presets {
-		focused := i == m.mgrCursor
+		focused := offset+i == m.mgrCursor
 		line := fmt.Sprintf("%s%2d. %s", cursorMark(focused), i+1, itemStyle(focused).Render(presetTitle(p)))
 		if p.Name != "" {
 			line += "  " + descStyle.Render(p.Args)
