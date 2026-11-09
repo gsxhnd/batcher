@@ -60,9 +60,9 @@ func (m model) currentStep() string {
 	}
 }
 
-// header 顶部标题栏：左侧应用徽标，右侧显示流程步骤并高亮当前步骤。
+// header 顶部标题栏：左侧应用徽标（发布版本时会带版本号），右侧显示流程步骤并高亮当前步骤。
 func (m model) header() string {
-	left := appBadgeStyle.Render("batcher")
+	left := appBadgeStyle.Render("batcher" + badgeVersion())
 	if m.phase == phasePresets || m.phase == phasePresetEdit {
 		right := stepActiveStyle.Render("转码参数管理") + " "
 		gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 1)

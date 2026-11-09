@@ -1,9 +1,10 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
-# This is an example .goreleaser.yml file with some sensible defaults.
 # Make sure to check the documentation at https://goreleaser.com
+version: 2
 project_name: batcher
 git:
-  tag_sort: -version:creatordate
+  # 按 git version sort 排序 tag，保证取到最新的 tag
+  tag_sort: version
 report_sizes: true
 
 before:
@@ -16,29 +17,34 @@ builds:
     env:
       - CGO_ENABLED=0
     flags:
-      - -v
       - -trimpath
     ldflags:
       - -s -w
-      - -X "{{.ModulePath}}/src/cmd.tag={{.Tag}}"
-      - -X "{{.ModulePath}}/src/cmd.buildDate={{.Now}}"
-      - -X "{{.ModulePath}}/src/cmd.gitCommit={{.FullCommit}}"
+      - -X "{{.ModulePath}}/internal/tui.version={{.Tag}}"
+      - -X "{{.ModulePath}}/internal/tui.buildDate={{.Now}}"
+      - -X "{{.ModulePath}}/internal/tui.gitCommit={{.FullCommit}}"
     goos:
       - linux
-      - freebsd
-      - windows
       - darwin
+      - windows
+      - freebsd
     goarch:
       - amd64
+      - arm64
       - "386"
       - arm
-      - arm64
     goarm:
       - "6"
       - "7"
+    # Go 至少 1.15 起不再支持 darwin/386，darwin/arm 也从未被 Go 支持
+    ignore:
+      - goos: darwin
+        goarch: "386"
+      - goos: darwin
+        goarch: arm
 
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
     # this name template makes the OS and Arch compatible with the results of uname.
     name_template: >-
       {{ .ProjectName }}_
@@ -50,7 +56,7 @@ archives:
     # use zip for windows archives
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - "LICENSE"
       - "CHANGELOG.md"
@@ -58,7 +64,7 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
@@ -67,7 +73,9 @@ changelog:
       - '^docs:'
       - '^test:'
 
-# The lines beneath this are called `modelines`. See `:help modeline`
-# Feel free to remove those if you don't want/use them.
-# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
-# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+release:
+  # 预发布 tag（如 v0.0.5-rc.1）会被 GoReleaser 自动标记为 prerelease，
+  # 这里显式声明，便于从 tag 名判断。
+  mode: replace
+  prerelease:
+    auto: true
