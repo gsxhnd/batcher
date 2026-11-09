@@ -18,11 +18,13 @@ go run ./cmd/batcher                    # 本地启动 TUI（需终端，CI 无�
 
 - `internal/ffmpeg`：核心包，不含 UI 和预设。**`Plan`/`Preview*` 只生成命令字符串、无副作用；只有 `ExecuteBatch` 真正起 ffmpeg 进程**。命令生成集中在 `batcher.go`（单一操作）和 `combined.go`（组合操作：转码+字幕+字体必须拼进同一条 ffmpeg 命令，不要拆成多条）。
 - `internal/presets`：转码参数预设。`builtin.go` 是代码内置预设（只读）；用户预设存 **可执行文件所在目录下的 `presets/advance_presets.json`**（不是 ~/.config 也不是 ~/.batcher），保存时才创建目录。
-- `internal/tui`：按职责分三个文件 —— `model.go`（状态/消息/事件分发）、`pages.go`（各页面按键逻辑）、`views.go`（全部渲染）。页面跳转靠 `phase` 常量和 `afterAdvance`/`formBackPhase` 的分流顺序互相呼应，改流程时两边要同步。
+- `internal/tui`：按职责分文件 —— `model.go`（状态/消息/事件分发）、`panels.go`（各面板按键逻辑）、`modal.go`（弹窗：预设/字幕编辑与删除确认）、`fields.go`（表单字段构建与校验）、`views.go`（全部渲染）、`styles.go`（样式）。**没有 `phase` 状态机和向导式跳转**：布局是左右分栏（左侧 [1]-[5] 面板，右侧为焦点面板的内容），状态由 `focus`（当前面板）+ `editing`（表单输入态）+ `modal`（弹窗）+ `running`（执行中）组合表达。按键分发顺序是固定优先级：弹窗 > 表单编辑 > 执行中查看 > 全局键（1-5/tab/表单中的 x/q）> 焦点面板；新增交互必须遵守这个顺序，编辑态和弹窗里的按键必须被吞掉，否则 `j/k/x/1-5` 会泄漏成全局快捷键。
+- 命令预览是实时的：任何配置变化调 `schedulePlan` 防抖生成（`planMsg.seq` 丢弃过期结果）；执行期间锁定配置不生成。改某个面板的配置时记得调 `schedulePlan`。
+- 左侧面板布局：`panelHeights` 让未聚焦面板折叠为 2 行、聚焦面板占满剩余空间，五行内容行数总和必须等于 `bodyH()-10`（有回归测试 `TestPanelHeightsFillBody`）。侧栏列表一律走 `windowRows` 滚动窗口保证光标行可见。`drawBox` 手绘边框时任何样式串里的 `\n` 必须放在 `Render()` 之外，顶边 `fill = innerW - 标题宽`（不要多减），否则线框错位（有 `TestDrawBoxWidthsAligned`/`TestRenderRowsUniform` 拦截）。
 
 ## 预设相关的坑
 
-- TUI 中预设列表顺序是 `内置 → 自定义 → 手动输入`，`presetCursor` 对这三段连续编号（见 `updateAdvance`）。内置条目只读：删除/编辑/排序只作用于自定义段（下标偏移 `advanceUserOffset()`）。
+- TUI 中预设列表顺序是 `内置 → 自定义 → 手动输入`，`presetCursor` 对这三段连续编号（见 `updatePresetsPanel`）。内置条目只读：删除/编辑/排序只作用于自定义段（下标偏移 `presetUserOffset()`）。
 - 测试放预设文件用 `t.Setenv("BATCHER_PRESETS_DIR", t.TempDir())`（见 `internal/tui/model_test.go` 的 `isolatePresets`）；`internal/presets` 测试则替换 `executablePath` 包变量注入假 exe 路径。**不要让任何测试真正读写 exe 同目录的 presets/**。
 
 ## 测试约定

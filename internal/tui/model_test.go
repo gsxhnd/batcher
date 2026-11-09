@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -25,6 +23,14 @@ func press(m *model, s string) {
 		key = tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "esc":
 		key = tea.KeyPressMsg{Code: tea.KeyEsc}
+	case "space":
+		key = tea.KeyPressMsg{Code: tea.KeySpace}
+	case "tab":
+		key = tea.KeyPressMsg{Code: tea.KeyTab}
+	case "up":
+		key = tea.KeyPressMsg{Code: tea.KeyUp}
+	case "down":
+		key = tea.KeyPressMsg{Code: tea.KeyDown}
 	default:
 		key = tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
 	}
@@ -32,39 +38,359 @@ func press(m *model, s string) {
 	*m = next.(model)
 }
 
-func TestFormBackReturnsToSubtitlePage(t *testing.T) {
+func TestPanelSwitchSkipsDisabledPanels(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{} // 未勾选任何操作：预设/字幕面板不可用
+
+	press(&m, "2")
+	assert.Equal(t, panelOps, m.focus, "未勾选转码时不能进入预设面板")
+	assert.NotEmpty(t, m.statusMsg, "应提示面板不可用的原因")
+
+	press(&m, "3")
+	assert.Equal(t, panelOps, m.focus, "未勾选字幕时不能进入字幕面板")
+
+	press(&m, "4")
+	assert.Equal(t, panelForm, m.focus, "参数面板始终可用")
+
+	press(&m, "5")
+	assert.Equal(t, panelRun, m.focus, "任务面板始终可用")
+}
+
+func TestTabCyclesToNextEnabledPanel(t *testing.T) {
+	isolatePresets(t)
+	m := newModel() // 默认聚焦 [1] 操作
+
+	press(&m, "tab")
+	assert.Equal(t, panelForm, m.focus, "预设/字幕不可用时应跳到参数面板")
+
+	press(&m, "tab")
+	assert.Equal(t, panelRun, m.focus)
+
+	press(&m, "tab")
+	assert.Equal(t, panelOps, m.focus, "循环回到第一个面板")
+}
+
+func TestToggleConvertEnablesAndRebuildsForm(t *testing.T) {
+	isolatePresets(t)
+	require.NoError(t, presets.Save([]presets.Preset{{Name: "画质", Args: "-c:v h265"}}))
 	m := newModel()
 	m.ops = ffmpeg.Selection{AddSubtitle: true}
-	m.subs = []ffmpeg.SubtitleOption{{Suffix: "ass", Lang: "chi"}}
-	m.phase = phaseSubs
+	m.rebuildFields()
+	require.False(t, slicesAny(m.fields, "advance"), "未勾选转码时不应有高级参数字段")
+
+	press(&m, "2") // 未勾选转码，不可进入
+	assert.Equal(t, panelOps, m.focus)
+
+	press(&m, "space") // 第一个操作为视频转码
+	require.True(t, m.ops.Convert)
+	require.True(t, slicesAny(m.fields, "advance"), "勾选转码后应出现高级参数字段")
+
+	press(&m, "2")
+	assert.Equal(t, panelPresets, m.focus, "勾选转码后预设面板可用")
+
+	press(&m, "enter") // 选择第一个内置预设
+	advance, ok := findField(&m.fields, "advance")
+	require.True(t, ok)
+	assert.Equal(t, m.builtins[0].Args, m.manualAdvance)
+	assert.Equal(t, m.builtins[0].Args, advance.input.Value(), "选中的预设参数应同步到主表单")
+
+	press(&m, "1")     // 回到操作面板
+	press(&m, "space") // 再按一次取消转码
+	assert.False(t, m.ops.Convert)
+	assert.False(t, slicesAny(m.fields, "advance"), "取消转码后应移除高级参数字段")
+
+	press(&m, "2")
+	assert.Equal(t, panelOps, m.focus, "取消转码后预设面板不可用，不能进入")
+}
+
+// TestPresetModalAddEditDuplicate 验证预设的新增/编辑全部在弹窗内完成。
+func TestPresetModalAddEditDuplicate(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.focus = panelPresets
+
+	press(&m, "a")
+	require.NotNil(t, m.modal, "按 a 应打开新增弹窗")
+	require.Equal(t, 2, len(m.modal.fields), "弹窗应包含名称与参数两个字段")
+	fill := func(name, args string) {
+		m.modal.fields[0].input.SetValue(name)
+		m.modal.fields[1].input.SetValue(args)
+		m.modal.focus = 1
+	}
+
+	fill("  H.265 画质  ", "  -c:v   h265 -crf 20 ")
+	press(&m, "enter")
+	require.Nil(t, m.modal, "保存成功后应关闭弹窗")
+	assert.Equal(t, []presets.Preset{{Name: "H.265 画质", Args: "-c:v h265 -crf 20"}}, m.presets,
+		"名称去首尾空白，参数规范化空白")
+
+	press(&m, "a")
+	fill("", "-c:v h264")
+	press(&m, "enter")
+	assert.Equal(t, []presets.Preset{
+		{Name: "H.265 画质", Args: "-c:v h265 -crf 20"},
+		{Name: "", Args: "-c:v h264"},
+	}, m.presets, "名称可留空")
+
+	press(&m, "a")
+	fill("重复", "-c:v h265 -crf 20")
+	press(&m, "enter")
+	require.NotNil(t, m.modal, "参数重复应留在弹窗内修改")
+	assert.NotEmpty(t, m.modal.err)
+	press(&m, "esc")
+	assert.Nil(t, m.modal, "esc 应取消弹窗")
+
+	// 编辑第二条自定义预设
+	m.presetCursor = m.presetUserOffset() + 1
+	press(&m, "e")
+	require.NotNil(t, m.modal)
+	m.modal.fields[0].input.SetValue("H.264")
+	m.modal.fields[1].input.SetValue("-c:v hevc")
+	m.modal.focus = 1
+	press(&m, "enter")
+	assert.Equal(t, []presets.Preset{
+		{Name: "H.265 画质", Args: "-c:v h265 -crf 20"},
+		{Name: "H.264", Args: "-c:v hevc"},
+	}, m.presets)
+}
+
+// TestPresetDeleteUsesConfirmModal 验证删除改为确认弹窗交互。
+func TestPresetDeleteUsesConfirmModal(t *testing.T) {
+	isolatePresets(t)
+	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}}))
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.focus = panelPresets
+	m.presetCursor = m.presetUserOffset()
+	m.manualAdvance = "a" // 删除当前选中预设时应同步清空主表单
+
+	press(&m, "d")
+	require.NotNil(t, m.modal, "第一次按 d 应弹确认窗")
+	assert.Equal(t, modalConfirm, m.modal.kind)
+
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	assert.Len(t, m.presets, 2, "esc 取消删除")
+
+	press(&m, "d")
+	press(&m, "enter")
+	assert.Equal(t, []presets.Preset{{Args: "b"}}, m.presets, "enter 确认后删除")
+	assert.Equal(t, "", m.manualAdvance, "删除当前选中预设后应清空已选参数")
+
+	// 其他按键不应误触发弹窗内的确认
+	m.modal = nil
+	press(&m, "d")
+	press(&m, "j")
+	assert.NotNil(t, m.modal, "确认弹窗内按无关键应保持打开")
+}
+
+func TestPresetReorderPersists(t *testing.T) {
+	isolatePresets(t)
+	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.focus = panelPresets
+	m.presetCursor = m.presetUserOffset()
+
+	press(&m, "J")
+	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, m.presets)
+	assert.Equal(t, m.presetUserOffset()+1, m.presetCursor, "移动后光标跟随条目")
+
+	loaded, err := presets.Load()
+	require.NoError(t, err)
+	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, loaded, "顺序应持久化")
+}
+
+func TestPresetGuardsBuiltins(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.focus = panelPresets
+	m.presetCursor = 0 // 内置条目
+
+	press(&m, "d")
+	assert.Empty(t, m.presets, "内置预设不可删除")
+	assert.NotEmpty(t, m.statusMsg)
+
+	press(&m, "e")
+	assert.Nil(t, m.modal, "内置条目不进入编辑弹窗")
+	assert.NotEmpty(t, m.statusMsg, "内置条目按 e 应提示只读")
+}
+
+func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.focus = panelPresets
+	require.NotEmpty(t, m.builtins)
+
+	press(&m, "a")
+	require.NotNil(t, m.modal, "选中内置预设按 a 应打开复制弹窗")
+	assert.Equal(t, m.builtins[0].Name, m.modal.fields[0].input.Value(), "名称预填内置预设名")
+	assert.Equal(t, m.builtins[0].Args, m.modal.fields[1].input.Value(), "参数预填内置预设参数")
+
+	m.modal.focus = 1
+	press(&m, "enter")
+	require.Nil(t, m.modal)
+	assert.Equal(t, []presets.Preset{{Name: m.builtins[0].Name, Args: m.builtins[0].Args}}, m.presets,
+		"复制后成为自定义预设")
+}
+
+// TestModalSwallowsGlobalKeys 弹窗打开时全局快捷键不应生效。
+func TestModalSwallowsGlobalKeys(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.focus = panelPresets
+
+	press(&m, "a")
+	require.NotNil(t, m.modal)
+	press(&m, "1")
+	require.NotNil(t, m.modal, "数字键不应触发面板切换")
+	press(&m, "x")
+	require.NotNil(t, m.modal, "x 不应触发执行")
+	assert.False(t, m.running)
+	assert.Equal(t, panelPresets, m.focus, "弹窗期间焦点不变")
+}
+
+// TestSublistModalCRUD 验证字幕面板的增删改在弹窗内完成。
+func TestSublistModalCRUD(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{AddSubtitle: true}
+	m.focus = panelSubs
+
+	press(&m, "n")
+	require.NotNil(t, m.modal)
+	m.modal.fields[0].input.SetValue("ass")
+	m.modal.fields[1].input.SetValue("zh") // 非法语言码
+	m.modal.fields[2].input.SetValue("中文")
+	m.modal.focus = 2
+	press(&m, "enter")
+	require.NotNil(t, m.modal, "非法语言码应留在弹窗")
+	assert.NotEmpty(t, m.modal.fields[1].err)
+	assert.Nil(t, findSub(m.subs, "ass"), "不应保存非法条目")
+
+	m.modal.fields[1].input.SetValue("chi")
+	press(&m, "enter")
+	assert.Nil(t, m.modal)
+	require.Len(t, m.subs, 1)
+	assert.Equal(t, ffmpeg.SubtitleOption{Suffix: "ass", Lang: "chi", Title: "中文"}, m.subs[0])
+
+	press(&m, "e")
+	require.NotNil(t, m.modal, "e 应打开编辑弹窗并回填")
+	assert.Equal(t, "ass", m.modal.fields[0].input.Value())
+	press(&m, "esc")
+
+	press(&m, "d")
+	require.NotNil(t, m.modal, "删除应弹确认窗")
+	press(&m, "enter")
+	assert.Empty(t, m.subs, "确认后删除")
+}
+
+func TestFormEditingSwallowsGlobalKeys(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.rebuildFields()
+	m.focus = panelForm
 
 	press(&m, "enter")
-	require.Equal(t, phaseForm, m.phase)
+	require.True(t, m.editing, "enter 应进入编辑态")
+
+	m.fields[0].input.SetValue("") // 清掉默认值，便于断言输入
+	press(&m, "1")
+	assert.Equal(t, panelForm, m.focus, "编辑态下数字键应输入而不切换面板")
+	assert.Equal(t, "1", m.fields[0].input.Value(), "字符应输入到字段里")
 
 	press(&m, "esc")
-	assert.Equal(t, phaseSubs, m.phase, "esc 应返回字幕列表而不是第一页")
+	assert.False(t, m.editing, "esc 应退出编辑态")
+	press(&m, "1")
+	assert.Equal(t, panelOps, m.focus, "退出编辑态后全局快捷键恢复生效")
 }
 
-func TestFormBackWithConvertAndSubtitle(t *testing.T) {
+func TestTryStartRunValidation(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true, AddSubtitle: true}
-	m.subs = []ffmpeg.SubtitleOption{{Suffix: "ass", Lang: "chi"}}
-	m.openForm()
+	// 未勾选任何操作
+	press(&m, "x")
+	assert.NotEmpty(t, m.featErr, "未勾选操作应提示")
+	assert.Equal(t, panelOps, m.focus)
+	assert.False(t, m.running)
 
-	press(&m, "esc")
-	assert.Equal(t, phaseSubs, m.phase, "表单 esc 应回到字幕列表")
+	// 勾选添加字体但未填字体目录
+	m.ops = ffmpeg.Selection{AddFonts: true}
+	m.rebuildFields()
+	press(&m, "x")
+	assert.Equal(t, panelForm, m.focus, "校验失败应跳到参数面板")
+	assert.NotEmpty(t, m.statusMsg)
+	assert.False(t, m.running)
 
-	press(&m, "esc")
-	assert.Equal(t, phaseAdvance, m.phase, "字幕列表 esc 应回到转码页")
-}
-
-func TestSubtitleListBackGoesToFeatureWithoutConvert(t *testing.T) {
-	m := newModel()
+	// 勾选添加字幕但字幕列表为空
 	m.ops = ffmpeg.Selection{AddSubtitle: true}
-	m.phase = phaseSubs
+	m.rebuildFields()
+	press(&m, "x")
+	assert.Equal(t, panelSubs, m.focus, "字幕为空应跳到字幕面板")
+	assert.False(t, m.running)
+}
 
-	press(&m, "esc")
-	assert.Equal(t, phaseFeature, m.phase)
+// TestPlanMsgStaleDiscard 验证过期 Plan 结果被丢弃。
+func TestPlanMsgStaleDiscard(t *testing.T) {
+	m := newModel()
+	m.planSeq = 3
+	m.planLoading = true
+
+	next, _ := m.Update(planMsg{seq: 2, cmds: [][]string{{"-i", "a.mkv", "o.mkv"}}})
+	m = next.(model)
+	assert.False(t, m.previewDone, "过期结果不应生效")
+	assert.Nil(t, m.files)
+
+	next, _ = m.Update(planMsg{seq: 3, cmds: [][]string{{"-i", "a.mkv", "o.mkv"}}})
+	m = next.(model)
+	assert.True(t, m.previewDone)
+	require.Len(t, m.files, 1)
+}
+
+func TestFormEscDoesNotQuitAndFocusKept(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.focus = panelForm
+
+	press(&m, "up")
+	assert.Equal(t, panelForm, m.focus, "方向键只移动字段焦点的显示")
+	press(&m, "5")
+	assert.Equal(t, panelRun, m.focus)
+}
+
+func TestSetFocusLeavesRunStopsFollow(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.focus = panelRun
+	m.fileFollow = true
+	m.running = false
+
+	m.setFocus(panelOps)
+	assert.Equal(t, panelOps, m.focus)
+	assert.False(t, m.fileFollow, "离开任务面板应取消自动跟随")
+}
+
+func TestRunLockedFocusDuringExecution(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.running = true
+	m.focus = panelRun
+
+	press(&m, "1")
+	assert.Equal(t, panelRun, m.focus, "执行中不允许切换面板")
+
+	// q 取消执行但不退出（cancel 已设置才会真正取消）
+	var canceled bool
+	m.cancel = func() { canceled = true }
+	press(&m, "q")
+	assert.True(t, canceled, "执行中按 q 应发送取消请求")
+	assert.True(t, m.running, "取消是异步的，界面保持执行态直到结束")
 }
 
 func TestIsISO639Code(t *testing.T) {
@@ -78,305 +404,31 @@ func TestIsISO639Code(t *testing.T) {
 	}
 }
 
-func TestSaveSubEditRejectsBadLanguage(t *testing.T) {
-	m := newModel()
-	m.ops = ffmpeg.Selection{AddSubtitle: true}
-	m.openSubEdit(-1)
-	m.subFields[0].input.SetValue("ass")
-	m.subFields[1].input.SetValue("zh")
+// ---------- 辅助 ----------
 
-	m.saveSubEdit()
-	assert.Empty(t, m.subs, "非法语言码不应保存")
-	assert.NotEmpty(t, m.subFields[1].err)
-	assert.Equal(t, phaseSubEdit, m.phase)
+func slicesAny(fields []field, key string) bool {
+	for _, f := range fields {
+		if f.def.key == key {
+			return true
+		}
+	}
+	return false
 }
 
-// setPresetEdit 在预设编辑表单中填入名称与参数，焦点停在最后一项，随后按 Enter 即可提交。
-func setPresetEdit(m *model, name, args string) {
-	m.mgrFields[0].input.SetValue(name)
-	m.mgrFields[1].input.SetValue(args)
-	m.mgrFocus = len(m.mgrFields) - 1
+func findField(fields *[]field, key string) (*field, bool) {
+	for i := range *fields {
+		if (*fields)[i].def.key == key {
+			return &(*fields)[i], true
+		}
+	}
+	return nil, false
 }
 
-func TestPresetsAddEditDuplicateAndDelete(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
-	m.phase = phaseFeature
-
-	press(&m, "p")
-	require.Equal(t, phasePresets, m.phase)
-	assert.Equal(t, phaseFeature, m.mgrReturn)
-
-	press(&m, "a")
-	require.Equal(t, phasePresetEdit, m.phase)
-	require.Len(t, m.mgrFields, 2, "编辑表单应包含名称与参数两个字段")
-	setPresetEdit(&m, "  H.265 画质  ", "  -c:v   h265 -crf 20 ")
-	press(&m, "enter")
-	require.Equal(t, phasePresets, m.phase)
-	assert.Equal(t, []presets.Preset{{Name: "H.265 画质", Args: "-c:v h265 -crf 20"}}, m.presets, "名称去首尾空白，参数规范化空白")
-
-	press(&m, "a")
-	setPresetEdit(&m, "", "-c:v h264")
-	press(&m, "enter")
-	assert.Equal(t, []presets.Preset{
-		{Name: "H.265 画质", Args: "-c:v h265 -crf 20"},
-		{Name: "", Args: "-c:v h264"},
-	}, m.presets, "名称可留空")
-
-	press(&m, "a")
-	setPresetEdit(&m, "重复", "-c:v h265 -crf 20")
-	press(&m, "enter")
-	assert.Equal(t, phasePresetEdit, m.phase, "参数重复应拒绝")
-	assert.NotEmpty(t, m.mgrErr)
-	press(&m, "esc")
-
-	m.builtins = presets.Builtins()
-	m.mgrCursor = m.advanceUserOffset() + 1 // 第二条自定义预设
-	press(&m, "e")
-	assert.Equal(t, "", m.mgrFields[0].Value(), "编辑应回填名称")
-	assert.Equal(t, "-c:v h264", m.mgrFields[1].Value(), "编辑应回填参数")
-	setPresetEdit(&m, "H.264", "-c:v hevc")
-	press(&m, "enter")
-	assert.Equal(t, []presets.Preset{
-		{Name: "H.265 画质", Args: "-c:v h265 -crf 20"},
-		{Name: "H.264", Args: "-c:v hevc"},
-	}, m.presets)
-
-	m.mgrCursor = m.advanceUserOffset() // 第一条自定义预设
-	press(&m, "d")
-	press(&m, "d")
-	assert.Equal(t, []presets.Preset{{Name: "H.264", Args: "-c:v hevc"}}, m.presets, "自定义预设应在二次确认后删除")
-
-	press(&m, "esc")
-	assert.Equal(t, phaseFeature, m.phase, "esc 应回到打开它的操作页")
-}
-
-func TestPresetEditTabMovesBetweenFields(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.builtins = presets.Builtins()
-	m.mgrCursor = m.advanceUserOffset() // 跳过内置预设，a 视为空白新增
-	m.phase = phasePresets
-	press(&m, "a")
-	require.Equal(t, 0, m.mgrFocus)
-
-	press(&m, "tab")
-	assert.Equal(t, 1, m.mgrFocus)
-	press(&m, "enter")
-	assert.Equal(t, 1, m.mgrFocus, "最后一项回车提交，焦点不再前进")
-	assert.NotEmpty(t, m.mgrErr, "参数为空时应停留在编辑页并提示")
-	assert.Equal(t, phasePresetEdit, m.phase)
-}
-
-func TestPresetsReorder(t *testing.T) {
-	isolatePresets(t)
-	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
-	m := newModel()
-	m.builtins = presets.Builtins()
-	m.ops = ffmpeg.Selection{Convert: true}
-	m.phase = phaseAdvance
-	press(&m, "p")
-	m.mgrCursor = m.advanceUserOffset() // 移到第一条自定义预设
-
-	press(&m, "J")
-	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, m.presets)
-	assert.Equal(t, m.advanceUserOffset()+1, m.mgrCursor, "移动后光标跟随条目")
-
-	loaded, err := presets.Load()
-	require.NoError(t, err)
-	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, loaded, "顺序应持久化")
-}
-
-func TestPresetsEscReturnsToAdvancePage(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
-	m.phase = phaseAdvance
-	press(&m, "p")
-	press(&m, "esc")
-	assert.Equal(t, phaseAdvance, m.phase)
-}
-
-func TestAdvancePageSelectsBuiltinPreset(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
-	m.phase = phaseFeature
-	press(&m, "enter")
-	require.Equal(t, phaseAdvance, m.phase)
-	require.NotEmpty(t, m.builtins, "应有内置预设")
-
-	press(&m, "enter")
-	assert.Equal(t, m.builtins[0].Args, m.manualAdvance, "默认选中第一条内置预设")
-
-	// 回到转码参数页，光标移到手动输入项并继续，不改变高级参数
-	m.phase = phaseAdvance
-	m.presetCursor = m.presetCount() - 1
-	press(&m, "enter")
-	assert.Equal(t, "", m.manualAdvance, "手动输入参数应为空")
-}
-
-func TestAdvancePageSelectsCustomPresetArgs(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
-	m.builtins = presets.Builtins()
-	m.presets = []presets.Preset{{Name: "我的预设", Args: "-c:v hevc -crf 22"}}
-	m.phase = phaseAdvance
-	m.presetCursor = m.advanceUserOffset()
-
-	press(&m, "enter")
-	assert.Equal(t, "-c:v hevc -crf 22", m.manualAdvance, "选中自定义预设应使用其参数")
-}
-
-func TestAdvancePageDeleteGuardsBuiltins(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.builtins = presets.Builtins()
-	m.presets = []presets.Preset{{Args: "-c copy 2"}}
-	m.phase = phaseAdvance
-	m.presetCursor = 0 // 选中第一条内置预设
-
-	press(&m, "d")
-	assert.NotEmpty(t, m.statusMsg, "内置预设删除应提示不可删除")
-	assert.Equal(t, []presets.Preset{{Args: "-c copy 2"}}, m.presets, "内置条目不应影响自定义列表")
-
-	// 光标跨过内置区删除自定义条目（需按两次 d 确认）
-	m.presetCursor = len(m.builtins)
-	press(&m, "d")
-	assert.Equal(t, []presets.Preset{{Args: "-c copy 2"}}, m.presets, "第一次按 d 只进入待确认状态")
-	press(&m, "d")
-	assert.Empty(t, m.presets, "第二次按 d 才应删除")
-}
-
-func TestAdvancePageCopyBuiltinToCustom(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.builtins = presets.Builtins()
-	m.phase = phaseAdvance
-	m.presetCursor = 0
-
-	press(&m, "a")
-	require.Equal(t, phasePresetEdit, m.phase)
-	assert.Equal(t, m.builtins[0].Name, m.mgrFields[0].Value(), "复制时名称预填为内置预设名")
-	assert.Equal(t, m.builtins[0].Args, m.mgrFields[1].Value(), "复制时参数预填为内置预设参数")
-
-	press(&m, "tab")
-	press(&m, "enter")
-	require.Equal(t, phasePresets, m.phase)
-	assert.Equal(t, []presets.Preset{{Name: m.builtins[0].Name, Args: m.builtins[0].Args}}, m.presets, "复制后应成为自定义预设")
-}
-
-func TestPresetDeleteRequiresDoubleConfirm(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.builtins = presets.Builtins()
-	m.presets = []presets.Preset{{Args: "-c:v h264"}, {Args: "-c:v h265"}}
-	m.phase = phaseAdvance
-	m.presetCursor = len(m.builtins) // 第一条自定义预设
-
-	both := []presets.Preset{{Args: "-c:v h264"}, {Args: "-c:v h265"}}
-	press(&m, "d")
-	assert.Equal(t, both, m.presets, "第一次按 d 不应删除")
-	assert.NotEmpty(t, m.statusMsg, "第一次按 d 应给出确认提示")
-	assert.Equal(t, 0, m.delPendingIdx, "应记录待删除项")
-
-	// 其他任意键取消确认
-	press(&m, "up")
-	assert.Equal(t, -1, m.delPendingIdx, "其他按键应取消删除确认")
-	press(&m, "down")
-	press(&m, "d")
-	assert.Equal(t, both, m.presets, "取消后单次 d 不应删除")
-
-	// 连续两次 d 执行删除
-	press(&m, "d")
-	assert.Equal(t, []presets.Preset{{Args: "-c:v h265"}}, m.presets, "第二次 d 完成删除")
-	assert.Equal(t, -1, m.delPendingIdx, "删除后应清理待确认状态")
-
-	// 对剩余条目可重新进入待确认
-	press(&m, "d")
-	assert.Equal(t, 0, m.delPendingIdx, "删除后可以对剩余条目重新确认")
-	assert.Equal(t, []presets.Preset{{Args: "-c:v h265"}}, m.presets)
-}
-
-func TestPresetMgrDeleteDoubleConfirmAndCancel(t *testing.T) {
-	isolatePresets(t)
-	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
-	m := newModel()
-	m.builtins = presets.Builtins()
-	m.phase = phaseFeature
-	press(&m, "p")
-	require.Equal(t, phasePresets, m.phase)
-	m.mgrCursor = m.advanceUserOffset() // 移到第一条自定义预设
-
-	press(&m, "d")
-	assert.Equal(t, []presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}, m.presets, "第一次按 d 不应删除")
-	assert.Equal(t, 0, m.delPendingIdx)
-
-	// esc 直接返回，同样取消确认
-	press(&m, "esc")
-	require.Equal(t, phaseFeature, m.phase)
-
-	press(&m, "p")
-	require.Equal(t, phasePresets, m.phase)
-	assert.Equal(t, -1, m.delPendingIdx, "重新进入管理页应重置确认状态")
-
-	m.mgrCursor = m.advanceUserOffset()
-	press(&m, "d")
-	press(&m, "d")
-	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "c"}}, m.presets)
-}
-
-func TestPresetMgrCopyBuiltinToCustom(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	require.NotEmpty(t, m.builtins)
-	m.phase = phaseFeature
-
-	press(&m, "p")
-	require.Equal(t, phasePresets, m.phase)
-	m.mgrCursor = 1 // 选中第二条内置预设
-
-	press(&m, "a")
-	require.Equal(t, phasePresetEdit, m.phase)
-	assert.Equal(t, m.builtins[1].Name, m.mgrFields[0].Value(), "复制时名称预填为内置预设名")
-	assert.Equal(t, m.builtins[1].Args, m.mgrFields[1].Value(), "复制时参数预填为内置预设参数")
-	assert.Equal(t, 0, m.mgrFocus, "焦点从名称字段开始")
-
-	press(&m, "tab") // 焦点移到参数字段，再 Enter 提交
-	press(&m, "enter")
-	require.Equal(t, phasePresets, m.phase)
-	assert.Equal(t, []presets.Preset{{Name: m.builtins[1].Name, Args: m.builtins[1].Args}}, m.presets, "复制后应成为自定义预设")
-	assert.Equal(t, m.advanceUserOffset(), m.mgrCursor, "保存后光标应指向新自定义预设")
-}
-
-func TestPresetMgrGuardsBuiltins(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.builtins = presets.Builtins()
-	m.phase = phasePresets
-	m.mgrCursor = 0 // 内置条目
-
-	press(&m, "d")
-	assert.Empty(t, m.presets, "内置预设不应被删除引导")
-	assert.NotEmpty(t, m.statusMsg, "内置条目按 d 应提示不可删除")
-
-	press(&m, "e")
-	assert.Equal(t, phasePresets, m.phase, "内置条目不应进入编辑页")
-	assert.NotEmpty(t, m.statusMsg, "内置条目按 e 应提示只读")
-}
-
-func TestPresetsLoadLegacyFileInManager(t *testing.T) {
-	isolatePresets(t)
-	dir, err := presets.Dir()
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, presets.PresetFile), []byte(`["-c copy"]`), 0o644))
-
-	m := newModel()
-	m.phase = phaseFeature
-	press(&m, "p")
-	require.Equal(t, phasePresets, m.phase)
-	require.Equal(t, []presets.Preset{{Args: "-c copy"}}, m.presets, "旧版参数列表应可直接显示与管理")
+func findSub(subs []ffmpeg.SubtitleOption, suffix string) *ffmpeg.SubtitleOption {
+	for i := range subs {
+		if subs[i].Suffix == suffix {
+			return &subs[i]
+		}
+	}
+	return nil
 }

@@ -6,6 +6,8 @@ import (
 
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/stretchr/testify/assert"
+	"time"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,23 +25,24 @@ func TestBuildFileItemsExtractsInputAndOutput(t *testing.T) {
 
 func TestPlanMsgBuildsFileList(t *testing.T) {
 	m := newModel()
-	m.previewDone = false
+	m.planSeq = 1
 
-	next, _ := m.Update(planMsg{cmds: [][]string{
+	next, _ := m.Update(planMsg{seq: 1, cmds: [][]string{
 		{"-i", "a.mkv", "-c", "copy", "o/a.mkv"},
 		{"-i", "b.mkv", "-c", "copy", "o/b.mkv"},
-	}, err: nil})
+	}})
 	m = next.(model)
 
 	assert.True(t, m.previewDone)
 	require.Len(t, m.files, 2)
-	assert.Equal(t, 0, m.fileCursor, "进入预览时应选中“全部”")
+	assert.Equal(t, 0, m.fileCursor, "进入任务面板应选中“全部”")
 	assert.Contains(t, m.previewSummary, "共生成 2 条命令")
 }
 
 func TestPlanMsgWithErrorKeepsEmptyFiles(t *testing.T) {
 	m := newModel()
-	next, _ := m.Update(planMsg{err: assert.AnError})
+	m.planSeq = 1
+	next, _ := m.Update(planMsg{seq: 1, err: assert.AnError})
 	m = next.(model)
 
 	assert.True(t, m.previewDone)
@@ -54,7 +57,7 @@ func TestHandleEventRoutesByFile(t *testing.T) {
 		{input: "b.mkv", cmd: "ffmpeg -i b.mkv o/b.mkv"},
 	}
 	m.fileFollow = true
-	m.phase = phaseRunning
+	m.running = true
 
 	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventBatchStart, Total: 2})
 	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandStart, Index: 0, Total: 2, Command: "ffmpeg -i a.mkv"})
@@ -77,7 +80,7 @@ func TestHandleEventRoutesByFile(t *testing.T) {
 
 func TestMoveFilePaneBoundsAndFollow(t *testing.T) {
 	m := newModel()
-	m.phase = phaseRunning
+	m.running = true
 	m.files = []fileItem{
 		{input: "a.mkv"}, {input: "b.mkv"}, {input: "c.mkv"},
 	}
@@ -101,4 +104,36 @@ func TestMoveFilePaneBoundsAndFollow(t *testing.T) {
 	press(&m, "f")
 	assert.Equal(t, 2, m.fileCursor, "f 应回到正在执行的文件")
 	assert.True(t, m.fileFollow)
+}
+
+// TestSchedulePlanDebounce 验证防抖序号与执行锁。
+func TestSchedulePlanDebounce(t *testing.T) {
+	m := newModel()
+	m.planSeq = 0
+
+	cmd := m.schedulePlan(planDebounceDelay)
+	require.NotNil(t, cmd, "配置变化应安排重新生成")
+	assert.Equal(t, 1, m.planSeq)
+	assert.True(t, m.planLoading)
+
+	// 执行中不再触发。
+	m.running = true
+	cmd = m.schedulePlan(planDebounceDelay)
+	assert.Nil(t, cmd, "执行中不应安排生成")
+	assert.Equal(t, 1, m.planSeq, "执行中序号不变")
+}
+
+// TestDoneMsgUnlocks 验证执行结束时解锁并保留配置以便重跑。
+func TestDoneMsgUnlocks(t *testing.T) {
+	m := newModel()
+	m.running = true
+	m.total = 2
+	m.done = 2
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.startAt = time.Now().Add(-time.Second)
+
+	next, _ := m.Update(doneMsg{err: nil})
+	m = next.(model)
+	assert.False(t, m.running, "执行结束应解锁")
+	assert.NotEmpty(t, m.statusMsg)
 }

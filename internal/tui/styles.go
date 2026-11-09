@@ -60,19 +60,8 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("39"))
 
-	stepDoneStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("82"))
-
 	stepTodoStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240"))
-
-	stepSepStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("238"))
-
-	panelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("238")).
-			Padding(0, 1)
 
 	dividerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("236"))
@@ -87,12 +76,12 @@ var (
 	helpSepStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("238"))
 
+	sectionTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("74"))
+
 	logLineInfoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	logLineDoneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	logLineFailedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	logLineDefaultStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-
-	sectionStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("74"))
 )
