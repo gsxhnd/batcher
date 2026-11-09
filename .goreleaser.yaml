@@ -77,5 +77,4 @@ release:
   # 预发布 tag（如 v0.0.5-rc.1）会被 GoReleaser 自动标记为 prerelease，
   # 这里显式声明，便于从 tag 名判断。
   mode: replace
-  prerelease:
-    auto: true
+  prerelease: auto
