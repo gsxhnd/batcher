@@ -2,6 +2,8 @@ name: Test
 
 on:
   push:
+    branches:
+      - main
     paths-ignore:
       - "docs/**"
       - "README.md"
@@ -19,6 +21,12 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version
 
       - name: Test
         run: go test -v -coverprofile=coverage.out -covermode=atomic ./internal/... ./cmd/batcher/...
