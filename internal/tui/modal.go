@@ -74,6 +74,7 @@ func (m *model) openSubModal(index int) tea.Cmd {
 		nf := newField(def)
 		nf.applySubDefaults()
 		nf.input.SetValue(values[def.key])
+		nf.checked = entry.Default // bool 字段从条目读取勾选状态
 		fields = append(fields, nf)
 	}
 	title := "新增字幕轨道"
@@ -142,6 +143,7 @@ func helpText() string {
 	section("[3] 字幕轨道")
 	row("n", "新增字幕（弹窗）")
 	row("e / enter", "编辑选中的字幕")
+	row("t", "标记/取消默认字幕流（-disposition default）")
 	row("d", "删除字幕（弹窗确认）")
 	section("[4] 参数")
 	row("enter", "进入编辑 / 下一项；esc 完成")
@@ -151,8 +153,10 @@ func helpText() string {
 	row("↑/↓", "在“全部”与单个文件之间切换")
 	row("enter / x", "开始执行")
 	row("f", "跳回正在执行的文件（执行中）")
-	row("pgup/pgdn", "滚动命令/日志")
+	row("y", "复制当前正在查看/执行的完整命令到剪贴板")
+	row("pgup/pgdn/滚轮", "滚动命令/日志（向上滚动暂停跟随新输出）")
 	section("执行中")
+	row("完整命令", "固定显示在主体内容最上方，长命令自动折行")
 	row("↑/↓", "切换查看文件")
 	row("q", "取消当前批处理（界面保留）")
 	return strings.TrimPrefix(b.String(), "\n")
@@ -178,6 +182,20 @@ func (m model) modalView() string {
 			lbl := labelStyle.Render(f.def.label)
 			if i == md.focus {
 				lbl = labelFocusedStyle.Render(f.def.label)
+			}
+			if f.def.kind == fieldBool {
+				// 勾选型字段渲染为复选框，space 切换，不吃文本输入。
+				mark := uncheckedStyle.Render("[ ]")
+				if f.checked {
+					mark = checkedStyle.Render("[✔]")
+				}
+				light := descStyle
+				if i == md.focus {
+					light = normalStyle
+				}
+				b.WriteString("  " + lbl + " " + mark + " " + light.Render(boolHint()))
+				b.WriteString("\n")
+				continue
 			}
 			b.WriteString("  " + lbl + " " + f.input.View() + "\n")
 			if f.err != "" {
@@ -244,8 +262,16 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		md.focus++
 		return focusField(md.fields, md.focus)
 	default:
+		f := &md.fields[md.focus]
+		if f.def.kind == fieldBool {
+			// 勾选型字段：space 切换状态，其余按键吞掉不进入文本输入。
+			if key.String() == " " || key.String() == "space" {
+				f.checked = !f.checked
+			}
+			return nil
+		}
 		var cmd tea.Cmd
-		md.fields[md.focus].input, cmd = md.fields[md.focus].input.Update(msg)
+		f.input, cmd = f.input.Update(msg)
 		return cmd
 	}
 }
@@ -325,7 +351,12 @@ func (m *model) saveSubModal() tea.Cmd {
 		md.fields[1].err = "需为 ISO 639-2 三字母码，如 chi / eng / jpn"
 		return focusField(md.fields, 1)
 	}
-	entry := ffmpeg.SubtitleOption{Suffix: suffix, Lang: lang, Title: title}
+	entry := ffmpeg.SubtitleOption{
+		Suffix:  suffix,
+		Lang:    lang,
+		Title:   title,
+		Default: md.fields[3].Checked(),
+	}
 	if md.editIndex >= 0 && md.editIndex < len(m.subs) {
 		m.subs[md.editIndex] = entry
 	} else {

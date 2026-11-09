@@ -47,6 +47,9 @@ type SubtitleOption struct {
 	Suffix string `json:"suffix"` // 字幕扩展名，如 ass / srt
 	Lang   string `json:"lang"`   // 语言缩写，如 chi / eng
 	Title  string `json:"title"`  // 字幕轨道标题
+	// Default 标记该轨道为默认字幕流（mkv 中生成 -disposition:s:<n> default；
+	// 其余轨道显式置 0，避免输出中出现多重默认轨道）。
+	Default bool `json:"default,omitempty"`
 }
 
 // makeDir 创建目录；路径已存在且为目录时直接成功。

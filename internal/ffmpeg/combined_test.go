@@ -213,6 +213,60 @@ func Test_videoBatch_GetCombinedBatch_MultiSubtitle(t *testing.T) {
 	assert.False(t, contains(cmd, []string{"language=jpn"}))
 }
 
+// Test_videoBatch_GetCombinedBatch_SubtitleDisposition 验证默认字幕轨道的 disposition 输出：
+// 勾选默认轨道的置 default，其余字幕流显式置 0；全部未勾选时不生成 disposition 参数。
+func Test_videoBatch_GetCombinedBatch_SubtitleDisposition(t *testing.T) {
+	// 布置临时目录：1.mp4 + 两条字幕（带语言标记命名）
+	tmp := t.TempDir()
+	writeFile(t, filepath.Join(tmp, "1.mp4"), "video")
+	writeFile(t, filepath.Join(tmp, "1.chi.ass"), "sub1")
+	writeFile(t, filepath.Join(tmp, "1.eng.ass"), "sub2")
+
+	buildOpts := func(subs []SubtitleOption) *VideoBatchOption {
+		return &VideoBatchOption{
+			InputPath:    tmp,
+			InputFormat:  "mp4",
+			OutputPath:   t.TempDir(), // 仅为生成命令，不真正写出
+			OutputFormat: "mkv",
+			InputSubNo:   1,
+			Subtitles:    subs,
+		}
+	}
+
+	t.Run("标记默认轨道", func(t *testing.T) {
+		opt := buildOpts([]SubtitleOption{
+			{Suffix: "chi.ass", Lang: "chi", Title: "简体中文"},
+			{Suffix: "eng.ass", Lang: "eng", Title: "English", Default: true},
+		})
+		viewer, err := NewVideoBatch(opt)
+		require.NoError(t, err)
+		b := viewer.(*videoBatch)
+
+		cmds, err := b.GetCombinedBatch(Selection{AddSubtitle: true})
+		assert.NoError(t, err)
+		require.Len(t, cmds, 1)
+		cmd := cmds[0]
+		assert.True(t, contains(cmd, []string{"-disposition:s:1", "0"}), "未勾选的流应显式置 0")
+		assert.True(t, contains(cmd, []string{"-disposition:s:2", "default"}), "勾选的流应为默认轨道")
+	})
+
+	t.Run("未标记默认轨道", func(t *testing.T) {
+		opt := buildOpts([]SubtitleOption{
+			{Suffix: "chi.ass", Lang: "chi", Title: "简体中文"},
+			{Suffix: "eng.ass", Lang: "eng", Title: "English"},
+		})
+		viewer, err := NewVideoBatch(opt)
+		require.NoError(t, err)
+		b := viewer.(*videoBatch)
+
+		cmds, err := b.GetCombinedBatch(Selection{AddSubtitle: true})
+		assert.NoError(t, err)
+		for _, cmd := range cmds {
+			assert.False(t, contains(cmd, []string{"-disposition"}), "未勾选默认时不应输出 disposition")
+		}
+	})
+}
+
 func Test_videoBatch_matchSubtitle(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, "1.mp4"), "video")

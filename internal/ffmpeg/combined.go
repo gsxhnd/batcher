@@ -125,7 +125,8 @@ func (vb *videoBatch) subtitleInputs() ([]subtitleInput, error) {
 }
 
 // subtitleArgs 生成单个视频的字幕参数：每条字幕作为独立输入（-sub_charenc 紧跟对应的 -i），
-// 再映射视频自身的全部流与各字幕流，最后写入字幕语言与标题元数据。
+// 再映射视频自身的全部流与各字幕流，最后写入字幕语言与标题元数据；
+// 勾选了默认字幕流时追加 -disposition:s:<n> 设置默认轨道。
 func (vb *videoBatch) subtitleArgs(subs []subtitleInput, names []string, base string) []string {
 	var args []string
 	for _, sub := range subs {
@@ -144,6 +145,24 @@ func (vb *videoBatch) subtitleArgs(subs []subtitleInput, names []string, base st
 			fmt.Sprintf("-metadata:s:s:%d", sub.streamNo),
 			fmt.Sprintf("title=%s", sub.Title),
 		)
+	}
+	// 默认轨道：勾选了默认字幕时输出 disposition（默认轨道为 default，其余显式置 0，
+	// 避免输出中出现多重默认轨道）；未勾选时不额外生成参数，命令保持兼容。
+	hasDefault := false
+	for _, sub := range subs {
+		if sub.Default {
+			hasDefault = true
+			break
+		}
+	}
+	if hasDefault {
+		for _, sub := range subs {
+			flag := "0"
+			if sub.Default {
+				flag = "default"
+			}
+			args = append(args, fmt.Sprintf("-disposition:s:%d", sub.streamNo), flag)
+		}
 	}
 	return args
 }

@@ -31,6 +31,12 @@ func press(m *model, s string) {
 		key = tea.KeyPressMsg{Code: tea.KeyUp}
 	case "down":
 		key = tea.KeyPressMsg{Code: tea.KeyDown}
+	case "pgup":
+		key = tea.KeyPressMsg{Code: tea.KeyPgUp}
+	case "pgdown":
+		key = tea.KeyPressMsg{Code: tea.KeyPgDown}
+	case "end":
+		key = tea.KeyPressMsg{Code: tea.KeyEnd}
 	default:
 		key = tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
 	}
@@ -267,7 +273,7 @@ func TestSublistModalCRUD(t *testing.T) {
 	m.modal.fields[0].input.SetValue("ass")
 	m.modal.fields[1].input.SetValue("zh") // 非法语言码
 	m.modal.fields[2].input.SetValue("中文")
-	m.modal.focus = 2
+	m.modal.focus = 3 // 最后一个字段（默认字幕流）后按 enter 保存
 	press(&m, "enter")
 	require.NotNil(t, m.modal, "非法语言码应留在弹窗")
 	assert.NotEmpty(t, m.modal.fields[1].err)
@@ -288,6 +294,46 @@ func TestSublistModalCRUD(t *testing.T) {
 	require.NotNil(t, m.modal, "删除应弹确认窗")
 	press(&m, "enter")
 	assert.Empty(t, m.subs, "确认后删除")
+}
+
+// TestSubModalDefaultTrack 验证弹窗内默认字幕流可勾选，且面板 3 按 t 可切换。
+func TestSubModalDefaultTrack(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{AddSubtitle: true}
+	m.focus = panelSubs
+
+	press(&m, "n")
+	require.NotNil(t, m.modal)
+	require.Len(t, m.modal.fields, 4, "弹窗应包含后缀/语言/标题/默认轨道四个字段")
+	m.modal.fields[0].input.SetValue("chi.ass")
+	m.modal.fields[1].input.SetValue("chi")
+	m.modal.fields[2].input.SetValue("简体中文")
+	m.modal.focus = 3
+	require.False(t, m.modal.fields[3].Checked(), "默认轨道初始未勾选")
+
+	press(&m, "space")
+	require.True(t, m.modal.fields[3].Checked(), "space 应勾选默认轨道")
+	press(&m, "space")
+	require.False(t, m.modal.fields[3].Checked(), "再按 space 应取消勾选")
+	press(&m, "space")
+	press(&m, "enter") // 保存
+
+	assert.Nil(t, m.modal)
+	require.Len(t, m.subs, 1)
+	assert.True(t, m.subs[0].Default, "保存后应写入默认轨道标记")
+
+	// 面板 3 按 t 切换默认标记
+	press(&m, "t")
+	assert.False(t, m.subs[0].Default, "t 应取消默认标记")
+	press(&m, "t")
+	assert.True(t, m.subs[0].Default, "t 应重新标记默认")
+
+	// 再编辑一条时勾选状态应回填
+	press(&m, "e")
+	require.NotNil(t, m.modal)
+	assert.True(t, m.modal.fields[3].Checked(), "编辑弹窗应回填默认标记")
+	press(&m, "esc")
 }
 
 func TestFormEditingSwallowsGlobalKeys(t *testing.T) {

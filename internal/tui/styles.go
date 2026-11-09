@@ -84,4 +84,7 @@ var (
 	logLineDoneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	logLineFailedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	logLineDefaultStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	// cmdPinStyle 执行中置顶完整 CLI 命令的高亮样式（橙色加粗，与日志区分）。
+	cmdPinStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 )

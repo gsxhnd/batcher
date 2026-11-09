@@ -15,9 +15,11 @@ import (
 
 // View 实现 tea.Model，将整页内容放入备用屏幕缓冲（全屏模式）。
 // 弹窗打开时通过图层叠加覆盖在主界面上。
+// 开启鼠标滚轮事件，用于任务面板命令/日志的滚动查看。
 func (m model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
@@ -217,6 +219,9 @@ func (m model) subsPane(h int) string {
 	for i, sub := range m.subs {
 		focused := i == m.subCursor
 		line := fmt.Sprintf("%d. .%s  %s", i+1, sub.Suffix, sub.Lang)
+		if sub.Default {
+			line += " " + checkedStyle.Render("[默认]")
+		}
 		rows = append(rows, cursorMark(focused)+itemStyle(focused).Render(line))
 	}
 	return sidebarRows(rows, m.subCursor, h)
@@ -327,9 +332,16 @@ func (m model) subsBody() string {
 	} else {
 		for i, sub := range m.subs {
 			focused := i == m.subCursor
-			b.WriteString(fmt.Sprintf("%s%d. %s  语言: %s  标题: %s\n", cursorMark(focused), i+1,
-				itemStyle(focused).Render("."+sub.Suffix), sub.Lang, sub.Title))
+			line := fmt.Sprintf("%s%d. %s  语言: %s  标题: %s  默认: ", cursorMark(focused), i+1,
+				itemStyle(focused).Render("."+sub.Suffix), sub.Lang, sub.Title)
+			if sub.Default {
+				line += checkedStyle.Render("是")
+			} else {
+				line += normalStyle.Render("否")
+			}
+			b.WriteString(line + "\n")
 		}
+		b.WriteString("  " + descStyle.Render("按 t 切换默认字幕流；播放器会默认加载 default 轨道") + "\n")
 	}
 	return statusSuffix(m.statusMsg) + b.String()
 }
@@ -369,10 +381,12 @@ func (m model) formBody() string {
 	return statusSuffix(m.statusMsg) + b.String()
 }
 
-// runBody 任务面板：命令预览（浏览态）或进度与日志（执行中）。
+// runBody 任务面板：命令预览（浏览态）或置顶命令 + 进度与日志（执行中）。
 func (m model) runBody() string {
 	var b strings.Builder
 	if m.running {
+		// 主体内容最上方固定显示当前任务的完整 CLI 命令（不随日志滚动）。
+		b.WriteString(m.pinnedCmdBlock())
 		if m.total > 0 {
 			b.WriteString("  " + m.bar.View() + "\n")
 			b.WriteString(m.progressHint() + "\n")
@@ -424,6 +438,49 @@ func (m model) progressHint() string {
 	}
 	hint = subtitleStyle.Render(hint)
 	return "  " + ansi.Truncate(hint, max(m.rightW-2, 10), "…")
+}
+
+// pinnedCmdText 返回执行中任务面板置顶显示的完整 ffmpeg 命令：
+// 优先当前正在执行的任务（EventCommandStart 传入），其后是最近启动的任务。
+func (m model) pinnedCmdText() string {
+	if m.current != "" {
+		return m.current
+	}
+	if idx := m.runIdx; idx >= 0 && idx < len(m.files) {
+		return m.files[idx].cmd
+	}
+	return ""
+}
+
+// pinnedCmdBlock 渲染执行中固定在主体内容最上方的完整 CLI 命令块：
+// 一行说明 + 按宽度折行的命令原文，长命令不会被截断。
+func (m model) pinnedCmdBlock() string {
+	cmd := m.pinnedCmdText()
+	var b strings.Builder
+	b.WriteString("  " + descStyle.Render("固定 · 当前任务完整命令（y 复制）") + "\n")
+	if cmd == "" {
+		b.WriteString("  " + subtitleStyle.Render("等待任务开始…") + "\n")
+	} else {
+		b.WriteString("  " + wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)) + "\n")
+	}
+	return b.String()
+}
+
+// runPinH 置顶命令块占用的行数（说明行 + 折行后的命令），与 pinnedCmdBlock 一致。
+func (m model) runPinH() int {
+	cmd := m.pinnedCmdText()
+	if cmd == "" {
+		return 2
+	}
+	return 1 + len(strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n"))
+}
+
+// runBarH 执行中进度条/提示占用的行数。
+func (m model) runBarH() int {
+	if m.total > 0 {
+		return 2
+	}
+	return 1
 }
 
 // truncate 截断到指定显示宽度。
@@ -566,21 +623,24 @@ func (m model) footer() string {
 			hints = []string{"enter 确认", "esc 取消", "? 快捷键"}
 		default:
 			hints = []string{"↑/↓/Tab 切换", "enter 下一项/保存", "esc 取消", "? 快捷键"}
+			if m.modal.kind == modalSub {
+				hints = []string{"↑/↓/Tab 切换", "enter 下一项/保存", "space 切换默认轨道", "esc 取消"}
+			}
 		}
 	case m.editing:
 		hints = []string{"↑/↓/Tab 切换", "enter 下一项", "esc 完成", "ctrl+s 另存预设"}
 	case m.running:
-		hints = []string{"↑/↓ 切换文件", "f 跟随当前", "pgup/pgdn 滚动", "q 取消执行"}
+		hints = []string{"↑/↓ 切换文件", "f 跟随当前", "pgup/pgdn/滚轮 滚动", "y 复制当前命令", "q 取消执行"}
 	case m.focus == panelOps:
 		hints = []string{"space 勾选", "2-4 配置面板", "? 快捷键", "x 执行", "q 退出"}
 	case m.focus == panelPresets:
 		hints = []string{"↑/↓ 选择", "enter 使用", "n 新增", "e 编辑", "d 删除", "? 快捷键"}
 	case m.focus == panelSubs:
-		hints = []string{"↑/↓ 选择", "n 新增", "e 编辑", "d 删除", "? 快捷键"}
+		hints = []string{"↑/↓ 选择", "n 新增", "e 编辑", "t 切换默认轨道", "d 删除", "? 快捷键"}
 	case m.focus == panelForm:
 		hints = []string{"↑/↓ 选择字段", "enter 编辑", "ctrl+s 另存预设", "? 快捷键"}
 	case m.focus == panelRun:
-		hints = []string{"↑/↓ 切换文件", "enter/x 执行", "? 快捷键", "q 退出"}
+		hints = []string{"↑/↓ 切换文件", "enter/x 执行", "y 复制命令", "pgup/pgdn 滚动", "? 快捷键", "q 退出"}
 	default:
 		hints = []string{"1-5/tab 切面板", "? 快捷键", "q 退出"}
 	}

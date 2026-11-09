@@ -124,22 +124,23 @@ type model struct {
 	rightW     int  // 右侧内容区宽度
 
 	// 执行
-	running  bool
-	opt      *ffmpeg.VideoBatchOption
-	total    int
-	done     int
-	failed   int
-	current  string
-	logs     []string
-	logVp    viewport.Model
-	bar      progress.Model
-	startAt  time.Time     // 开始执行时间（用于显示耗时）
-	elapsed  time.Duration // 批处理总耗时（结束时记录）
-	cancel   context.CancelFunc
-	evCh     chan ffmpeg.Event
-	doneCh   chan error
-	eventing bool
-	runErr   error
+	running   bool
+	opt       *ffmpeg.VideoBatchOption
+	total     int
+	done      int
+	failed    int
+	current   string
+	logs      []string
+	logVp     viewport.Model
+	bar       progress.Model
+	startAt   time.Time     // 开始执行时间（用于显示耗时）
+	elapsed   time.Duration // 批处理总耗时（结束时记录）
+	logFollow bool          // 日志是否贴底跟随最新输出（用户向上滚动后暂停）
+	cancel    context.CancelFunc
+	evCh      chan ffmpeg.Event
+	doneCh    chan error
+	eventing  bool
+	runErr    error
 }
 
 func newModel() model {
@@ -388,6 +389,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+
+	case tea.MouseWheelMsg:
+		// 鼠标滚轮：任务面板滚动命令/日志，帮助弹窗滚动帮助文本，其余面板忽略。
+		var cmd tea.Cmd
+		switch {
+		case m.modal != nil && m.modal.kind == modalHelp:
+			m.modal.vp, cmd = m.modal.vp.Update(msg)
+		case m.focus == panelRun && m.running:
+			m.logVp, cmd = m.logVp.Update(msg)
+			m.logFollow = m.logVp.AtBottom()
+		case m.focus == panelRun && m.previewDone && m.planErr == nil:
+			m.vp, cmd = m.vp.Update(msg)
+		}
+		return m, cmd
 	}
 
 	if key, ok := msg.(tea.KeyPressMsg); ok {
@@ -508,6 +523,10 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 	if m.total > 0 {
 		cmd = m.bar.SetPercent(float64(m.done+m.failed) / float64(m.total))
 	}
+	// 当前命令变化时置顶固定区域行数会变，日志视口高度需同步重算。
+	if m.running {
+		m.refreshRunHeights()
+	}
 	m.syncLogPane()
 	return cmd
 }
@@ -541,9 +560,13 @@ func (m model) summaryText(cmds [][]string) string {
 	if m.ops.AddSubtitle {
 		suffixes := make([]string, 0, len(m.subs))
 		for _, s := range m.subs {
-			suffixes = append(suffixes, s.Suffix)
+			tok := "." + s.Suffix
+			if s.Default {
+				tok = "(默认)" + tok
+			}
+			suffixes = append(suffixes, tok)
 		}
-		fmt.Fprintf(&b, "字幕（%d 条）：.%s\n", len(m.subs), strings.Join(suffixes, " / ."))
+		fmt.Fprintf(&b, "字幕（%d 条）：%s\n", len(m.subs), strings.Join(suffixes, " / "))
 	}
 	b.WriteString("按 x 开始执行；↑/↓ 切换文件查看对应命令。\n\n")
 	for i, c := range cmds {
@@ -634,7 +657,40 @@ func (m *model) resizePanes() {
 
 	m.vp.SetWidth(max(m.rightW-2, 10))
 	m.logVp.SetWidth(max(m.rightW-2, 10))
+	m.vp.SetHeight(max(m.bodyH()-2, 3))
+	m.logVp.SetHeight(max(m.bodyH()-2, 3))
 	m.bar.SetWidth(max(m.rightW-4, 10))
+	// 视口实际高度按视图构成重算（预览头部/置顶命令/进度条占用的行数）。
+	m.refreshRunHeights()
+}
+
+// previewHeadH 预览态命令区中位于视口之前的行数，runBody 的上方信息须与此保持一致。
+func (m model) previewHeadH() int {
+	if !m.previewDone || m.planErr != nil {
+		return 1 // 加载提示或失败说明各占 1-2 行，视口未显示
+	}
+	if m.total == 0 {
+		return 0 // 首次预览直接渲染视口
+	}
+	h := 3 // 上次执行结果行 + 提示行 + "\n\n" 空行
+	if m.runErr != nil {
+		h++
+	}
+	if m.statusMsg != "" {
+		h += 2 // statusSuffix 追加在视口之后的提示块
+	}
+	return h
+}
+
+// refreshRunHeights 按当前视图构成设置预览/日志视口高度：
+// 执行中给置顶命令与进度条留出固定行数，日志占满剩余空间。
+func (m *model) refreshRunHeights() {
+	inner := max(m.bodyH()-2, 2)
+	if m.running {
+		m.logVp.SetHeight(max(inner-m.runPinH()-m.runBarH(), 2))
+		return
+	}
+	m.vp.SetHeight(max(inner-m.previewHeadH(), 1))
 }
 
 // panelHeights 返回左侧五个面板的内容行数分配（面板边框每格占 2 行）。
@@ -697,7 +753,8 @@ func (m *model) syncPreview() {
 	m.vp.SetContent(wrapText(m.previewContent(), m.rightW-2))
 }
 
-// syncLogPane 按左侧选中项刷新右侧日志视图并贴底，跟随最新输出。
+// syncLogPane 按左侧选中项刷新右侧日志视图。logFollow 为真时贴底跟随最新输出；
+// 用户向上滚动查看历史后暂停跟随，回到底部再自动恢复。
 func (m *model) syncLogPane() {
 	var lines []string
 	switch idx := m.fileCursor - 1; {
@@ -708,7 +765,9 @@ func (m *model) syncLogPane() {
 		lines = m.files[idx].logs
 	}
 	m.logVp.SetContent(wrapText(strings.Join(lines, "\n"), m.rightW-2))
-	m.logVp.GotoBottom()
+	if m.logFollow {
+		m.logVp.GotoBottom()
+	}
 }
 
 // quitCleanup 退出前取消仍在执行的批处理。

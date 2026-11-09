@@ -192,6 +192,14 @@ func (m *model) updateSubsPanel(msg tea.Msg) tea.Cmd {
 		}
 		m.statusMsg = "字幕列表为空"
 		return nil
+	case "t":
+		// t（toggle）：把当前字幕标记/取消为默认字幕流（-disposition default）。
+		if len(m.subs) > 0 {
+			m.subs[m.subCursor].Default = !m.subs[m.subCursor].Default
+			return m.schedulePlan(planDebounceDelay)
+		}
+		m.statusMsg = "字幕列表为空"
+		return nil
 	}
 	return nil
 }
@@ -310,6 +318,7 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		if m.runIdx >= 0 && m.runIdx < len(m.files) && m.files[m.runIdx].state == fileRunning {
 			m.fileFollow = true
 			m.fileCursor = m.runIdx + 1
+			m.logFollow = true
 			m.syncLogPane()
 		}
 		return nil
@@ -318,20 +327,62 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 			return m.tryStartRun()
 		}
 		return nil
-	case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
 		if m.running {
 			var cmd tea.Cmd
-			m.logVp, cmd = m.logVp.Update(msg)
+			m.logVp, cmd = m.logVp.Update(msg) // 视口自带 pgup/pgdn/半页滚动键位
+			// 手动滚动后按是否处于底部决定是否继续跟随新输出。
+			m.logFollow = m.logVp.AtBottom()
 			return cmd
 		}
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return cmd
+	case "home":
+		if m.running {
+			m.logVp.GotoTop()
+			m.logFollow = m.logVp.AtBottom()
+			return nil
+		}
+		m.vp.GotoTop()
+		return nil
+	case "end":
+		if m.running {
+			m.logVp.GotoBottom()
+			m.logFollow = true
+			return nil
+		}
+		m.vp.GotoBottom()
+		return nil
+	case "y":
+		// y（yank）：复制当前正在查看/执行的完整命令到剪贴板（OSC52）。
+		return m.copyShownCommand()
 	}
 	return nil
 }
 
 // ---------- 执行 ----------
+
+// copyShownCommand 把任务面板正在展示的命令复制到系统剪贴板：
+// 执行中固定区显示的是当前任务的完整 CLI，预览态复制所选文件的命令。
+// 通过 OSC52 终端转义序列写入，无需外部依赖；由终端负责转贴到系统剪贴板。
+func (m *model) copyShownCommand() tea.Cmd {
+	if m.running {
+		cmd := m.pinnedCmdText()
+		if cmd == "" {
+			m.statusMsg = "× 尚无命令可复制，等待任务开始"
+			return nil
+		}
+		m.statusMsg = "✔ 已复制当前任务的完整命令到剪贴板"
+		return tea.SetClipboard(cmd)
+	}
+	if !m.previewDone || m.planErr != nil || len(m.previewContent()) == 0 {
+		m.statusMsg = "× 命令尚未生成，无法复制"
+		return nil
+	}
+	m.statusMsg = "✔ 已复制所选命令到剪贴板"
+	return tea.SetClipboard(m.previewContent())
+}
 
 // tryStartRun 校验配置并启动执行：失败时把焦点跳到出错的面板并给出提示。
 func (m *model) tryStartRun() tea.Cmd {
@@ -378,7 +429,9 @@ func (m *model) startRun() tea.Cmd {
 	m.startAt = time.Now()
 	m.elapsed = 0
 	m.running = true
+	m.logFollow = true
 	m.setFocus(panelRun)
+	m.refreshRunHeights()
 	m.syncLogPane()
 	m.logVp.GotoBottom()
 	return startBatchCmd(ctx, m.opt, m.ops, m.evCh, m.doneCh)

@@ -15,6 +15,7 @@ type fieldKind int
 const (
 	fieldString fieldKind = iota
 	fieldInt
+	fieldBool // 勾选型字段：不吃文本输入，space 切换勾选状态
 )
 
 // fieldDef 描述一个表单项映射到 VideoBatchOption 的哪个配置。
@@ -48,6 +49,7 @@ var subFieldDefs = []fieldDef{
 	{key: "sub_suffix", label: "字幕后缀"},
 	{key: "sub_lang", label: "语言缩写"},
 	{key: "sub_title", label: "轨道标题"},
+	{key: "sub_default", label: "默认字幕流", kind: fieldBool},
 }
 
 // presetFieldDefs 是单条转码参数预设的编辑字段。
@@ -58,9 +60,10 @@ var presetFieldDefs = []fieldDef{
 
 // field 保存表单项的运行时状态。
 type field struct {
-	def   fieldDef
-	input textinput.Model
-	err   string
+	def     fieldDef
+	input   textinput.Model
+	err     string
+	checked bool // bool 字段（fieldBool）的勾选状态
 }
 
 // newField 构建一个可编辑的表单项，默认提示文字为字段标签。
@@ -70,6 +73,9 @@ func newField(def fieldDef) field {
 	ti.CharLimit = 512
 	return field{def: def, input: ti}
 }
+
+// Checked 返回 bool 字段的勾选状态；非 bool 字段恒为 false。
+func (f *field) Checked() bool { return f.def.kind == fieldBool && f.checked }
 
 // applyDefaults 按配置默认值填充字段，并设置该字段的提示文字。
 func (f *field) applyDefaults(d *ffmpeg.VideoBatchOption) {
@@ -102,6 +108,9 @@ func (f *field) applySubDefaults() {
 		f.input.Placeholder = "简体中文"
 	}
 }
+
+// boolHint 返回 bool 字段旁边的操作提示文字。
+func boolHint() string { return descStyle.Render("（space 勾选/取消）") }
 
 // applyPresetDefaults 设置转码参数预设编辑字段的提示文字。
 func (f *field) applyPresetDefaults() {
