@@ -91,4 +91,8 @@ var (
 	logLineDoneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	logLineFailedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	logLineDefaultStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	sectionStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("74"))
 )

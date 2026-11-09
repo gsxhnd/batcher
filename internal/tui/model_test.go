@@ -5,14 +5,15 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// isolateHome 把 HOME 指向临时目录，避免测试读写真实的 ~/.batcher 预设文件。
-func isolateHome(t *testing.T) {
+// isolatePresets 把自定义预设目录指向临时文件夹，避免测试读写真实预设文件。
+func isolatePresets(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BATCHER_PRESETS_DIR", t.TempDir())
 }
 
 func press(m *model, s string) {
@@ -89,7 +90,7 @@ func TestSaveSubEditRejectsBadLanguage(t *testing.T) {
 }
 
 func TestPresetsAddEditDuplicateAndDelete(t *testing.T) {
-	isolateHome(t)
+	isolatePresets(t)
 	m := newModel()
 	m.ops = ffmpeg.Selection{Convert: true}
 	m.phase = phaseFeature
@@ -125,15 +126,16 @@ func TestPresetsAddEditDuplicateAndDelete(t *testing.T) {
 
 	m.mgrCursor = 0
 	press(&m, "d")
-	assert.Equal(t, []string{"-c:v hevc"}, m.presets)
+	press(&m, "d")
+	assert.Equal(t, []string{"-c:v hevc"}, m.presets, "自定义预设应在二次确认后删除")
 
 	press(&m, "esc")
 	assert.Equal(t, phaseFeature, m.phase, "esc 应回到打开它的操作页")
 }
 
 func TestPresetsReorder(t *testing.T) {
-	isolateHome(t)
-	require.NoError(t, ffmpeg.SaveAdvancePresets([]string{"a", "b", "c"}))
+	isolatePresets(t)
+	require.NoError(t, presets.Save([]string{"a", "b", "c"}))
 	m := newModel()
 	m.ops = ffmpeg.Selection{Convert: true}
 	m.phase = phaseAdvance
@@ -144,17 +146,127 @@ func TestPresetsReorder(t *testing.T) {
 	assert.Equal(t, []string{"a", "c", "b"}, m.presets)
 	assert.Equal(t, 2, m.mgrCursor, "移动后光标跟随条目")
 
-	loaded, err := ffmpeg.LoadAdvancePresets()
+	loaded, err := presets.Load()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "c", "b"}, loaded, "顺序应持久化")
 }
 
 func TestPresetsEscReturnsToAdvancePage(t *testing.T) {
-	isolateHome(t)
+	isolatePresets(t)
 	m := newModel()
 	m.ops = ffmpeg.Selection{Convert: true}
 	m.phase = phaseAdvance
 	press(&m, "p")
 	press(&m, "esc")
 	assert.Equal(t, phaseAdvance, m.phase)
+}
+
+func TestAdvancePageSelectsBuiltinPreset(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = ffmpeg.Selection{Convert: true}
+	m.phase = phaseFeature
+	press(&m, "enter")
+	require.Equal(t, phaseAdvance, m.phase)
+	require.NotEmpty(t, m.builtins, "应有内置预设")
+
+	press(&m, "enter")
+	assert.Equal(t, m.builtins[0].Args, m.manualAdvance, "默认选中第一条内置预设")
+
+	// 回到转码参数页，光标移到手动输入项并继续，不改变高级参数
+	m.phase = phaseAdvance
+	m.presetCursor = m.presetCount() - 1
+	press(&m, "enter")
+	assert.Equal(t, "", m.manualAdvance, "手动输入参数应为空")
+}
+
+func TestAdvancePageDeleteGuardsBuiltins(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.builtins = presets.Builtins()
+	m.presets = []string{"-c copy 2"}
+	m.phase = phaseAdvance
+	m.presetCursor = 0 // 选中第一条内置预设
+
+	press(&m, "d")
+	assert.NotEmpty(t, m.statusMsg, "内置预设删除应提示不可删除")
+	assert.Equal(t, []string{"-c copy 2"}, m.presets, "内置条目不应影响自定义列表")
+
+	// 光标跨过内置区删除自定义条目（需按两次 d 确认）
+	m.presetCursor = len(m.builtins)
+	press(&m, "d")
+	assert.Equal(t, []string{"-c copy 2"}, m.presets, "第一次按 d 只进入待确认状态")
+	press(&m, "d")
+	assert.Empty(t, m.presets, "第二次按 d 才应删除")
+}
+
+func TestAdvancePageCopyBuiltinToCustom(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.builtins = presets.Builtins()
+	m.phase = phaseAdvance
+	m.presetCursor = 0
+
+	press(&m, "a")
+	require.Equal(t, phasePresetEdit, m.phase)
+	assert.Equal(t, m.builtins[0].Args, m.mgrInput.Value(), "应预填内置预设参数")
+
+	press(&m, "enter")
+	require.Equal(t, phasePresets, m.phase)
+	assert.Equal(t, []string{m.builtins[0].Args}, m.presets, "复制后应成为自定义预设")
+}
+
+func TestPresetDeleteRequiresDoubleConfirm(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.builtins = presets.Builtins()
+	m.presets = []string{"-c:v h264", "-c:v h265"}
+	m.phase = phaseAdvance
+	m.presetCursor = len(m.builtins) // 第一条自定义预设
+
+	press(&m, "d")
+	assert.Equal(t, []string{"-c:v h264", "-c:v h265"}, m.presets, "第一次按 d 不应删除")
+	assert.NotEmpty(t, m.statusMsg, "第一次按 d 应给出确认提示")
+	assert.Equal(t, 0, m.delPendingIdx, "应记录待删除项")
+
+	// 其他任意键取消确认
+	press(&m, "up")
+	assert.Equal(t, -1, m.delPendingIdx, "其他按键应取消删除确认")
+	press(&m, "down")
+	press(&m, "d")
+	assert.Equal(t, []string{"-c:v h264", "-c:v h265"}, m.presets, "取消后单次 d 不应删除")
+
+	// 连续两次 d 执行删除
+	press(&m, "d")
+	assert.Equal(t, []string{"-c:v h265"}, m.presets, "第二次 d 完成删除")
+	assert.Equal(t, -1, m.delPendingIdx, "删除后应清理待确认状态")
+
+	// 对剩余条目可重新进入待确认
+	press(&m, "d")
+	assert.Equal(t, 0, m.delPendingIdx, "删除后可以对剩余条目重新确认")
+	assert.Equal(t, []string{"-c:v h265"}, m.presets)
+}
+
+func TestPresetMgrDeleteDoubleConfirmAndCancel(t *testing.T) {
+	isolatePresets(t)
+	require.NoError(t, presets.Save([]string{"a", "b", "c"}))
+	m := newModel()
+	m.phase = phaseFeature
+	press(&m, "p")
+	require.Equal(t, phasePresets, m.phase)
+
+	press(&m, "d")
+	assert.Equal(t, []string{"a", "b", "c"}, m.presets, "第一次按 d 不应删除")
+	assert.Equal(t, 0, m.delPendingIdx)
+
+	// esc 直接返回，同样取消确认
+	press(&m, "esc")
+	require.Equal(t, phaseFeature, m.phase)
+
+	press(&m, "p")
+	require.Equal(t, phasePresets, m.phase)
+	assert.Equal(t, -1, m.delPendingIdx, "重新进入管理页应重置确认状态")
+	press(&m, "d")
+	press(&m, "d")
+	assert.Equal(t, []string{"b", "c"}, m.presets)
 }

@@ -2,22 +2,94 @@ package ffmpeg
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-var correctMp4Videos = []string{
-	"../../testdata/1/1.mp4",
-	"../../testdata/1/2.mp4",
-	"../../testdata/2/1.mp4",
-	"../../testdata/2/2.mp4",
+// fixtureData 描述临时占位测试文件。
+//
+// 这些文件不是真实媒体文件：ffmpeg 包的测试只校验“按文件名/后缀生成的命令”，
+// 不会真正执行转码，因此内容为空即可。它们在 t.TempDir() 内生成、测试结束自动清理，
+// 无需用 taskfile 或手工命令预先创建 testdata。
+type fixtureData struct {
+	root string // 输入根目录，含 1/ 2/ 两个子目录
+	dir1 string // 子目录 1，也用作字体目录
+	dir2 string // 子目录 2
+	out  string // 输出目录
+
+	mp4s  []string // 1/1.mp4, 1/2.mp4, 2/1.mp4, 2/2.mp4
+	mkvs  []string // 1/1.mkv, 1/2.mkv, 2/1.mkv, 2/2.mkv
+	fonts []string // 1/1.ttf, 1/2.ttf, 2/1.ttf, 2/2.ttf
 }
-var correctMkvVideos = []string{
-	"../../testdata/1/1.mkv",
-	"../../testdata/1/2.mkv",
-	"../../testdata/2/1.mkv",
-	"../../testdata/2/2.mkv",
+
+// newFixture 在临时目录生成占位测试文件：
+//
+//	root/1/{1,2}.{mkv,mp4,ass,ttf}
+//	root/2/{1,2}.{mkv,mp4,ass,ttf}
+func newFixture(t *testing.T) fixtureData {
+	t.Helper()
+	root := t.TempDir()
+	fx := fixtureData{
+		root: root,
+		dir1: filepath.Join(root, "1"),
+		dir2: filepath.Join(root, "2"),
+		out:  filepath.Join(root, "output"),
+	}
+	names := []string{"1.mkv", "1.mp4", "1.ass", "1.ttf", "2.mkv", "2.mp4", "2.ass", "2.ttf"}
+	for _, dir := range []string{fx.dir1, fx.dir2} {
+		require.NoError(t, os.MkdirAll(dir, 0o755), "create fixture dir")
+		for _, n := range names {
+			writeFile(t, filepath.Join(dir, n), "")
+		}
+	}
+	fx.mp4s = []string{
+		filepath.Join(fx.dir1, "1.mp4"), filepath.Join(fx.dir1, "2.mp4"),
+		filepath.Join(fx.dir2, "1.mp4"), filepath.Join(fx.dir2, "2.mp4"),
+	}
+	fx.mkvs = []string{
+		filepath.Join(fx.dir1, "1.mkv"), filepath.Join(fx.dir1, "2.mkv"),
+		filepath.Join(fx.dir2, "1.mkv"), filepath.Join(fx.dir2, "2.mkv"),
+	}
+	fx.fonts = []string{
+		filepath.Join(fx.dir1, "1.ttf"), filepath.Join(fx.dir1, "2.ttf"),
+		filepath.Join(fx.dir2, "1.ttf"), filepath.Join(fx.dir2, "2.ttf"),
+	}
+	return fx
+}
+
+// attachCmd 生成 fonts 字体列表对应的 -attach 参数段期望值。
+func attachCmd(fonts []string) []string {
+	cmd := make([]string, 0, len(fonts)*4)
+	for i, fontPath := range fonts {
+		cmd = append(cmd,
+			"-attach", fontPath,
+			fmt.Sprintf("-metadata:s:t:%d", i),
+			"mimetype=application/x-truetype-font",
+		)
+	}
+	return cmd
+}
+
+// outputs 生成输出路径期望值：1.mkv / 2.mkv / 1-1.mkv / 2-1.mkv（重名附加序号）。
+func outputs(fx fixtureData, ext string) []string {
+	return []string{
+		filepath.Join(fx.out, "1."+ext),
+		filepath.Join(fx.out, "2."+ext),
+		filepath.Join(fx.out, "1-1."+ext),
+		filepath.Join(fx.out, "2-1."+ext),
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }
 
 func TestNewVideoBatch(t *testing.T) {
@@ -27,7 +99,7 @@ func TestNewVideoBatch(t *testing.T) {
 		wantErr bool
 	}{
 		{"test_success", &VideoBatchOption{
-			OutputPath: "../../testdata",
+			OutputPath: t.TempDir(),
 		}, false},
 		{"test_nil_option", nil, true},
 		{"test_empty_output", &VideoBatchOption{}, true},
@@ -51,14 +123,15 @@ func Test_videoBatch_GetVideosList(t *testing.T) {
 		InputFormat string
 	}
 
+	fx := newFixture(t)
 	tests := []struct {
 		name    string
 		args    args
 		want    []string
 		wantErr bool
 	}{
-		{"test_mkv", args{InputPath: "../../testdata", InputFormat: "mkv"}, correctMkvVideos, false},
-		{"test_mp4", args{InputPath: "../../testdata", InputFormat: "mp4"}, correctMp4Videos, false},
+		{"test_mkv", args{InputPath: fx.root, InputFormat: "mkv"}, fx.mkvs, false},
+		{"test_mp4", args{InputPath: fx.root, InputFormat: "mp4"}, fx.mp4s, false},
 		{"test_not_exist_path", args{InputPath: "../111", InputFormat: "mp4"}, []string{}, true},
 	}
 
@@ -72,7 +145,6 @@ func Test_videoBatch_GetVideosList(t *testing.T) {
 			}
 
 			videosList, err := vb.GetVideosList()
-			t.Log(videosList)
 
 			if tt.wantErr {
 				assert.NotNil(t, err)
@@ -84,24 +156,18 @@ func Test_videoBatch_GetVideosList(t *testing.T) {
 	}
 }
 
-var correctFonts = []string{
-	"../../testdata/1/1.ttf",
-	"../../testdata/1/2.ttf",
-	"../../testdata/2/1.ttf",
-	"../../testdata/2/2.ttf",
-}
-
 func Test_videoBatch_GetFontsList(t *testing.T) {
 	type args struct {
 		FontsPath string
 	}
+	fx := newFixture(t)
 	tests := []struct {
 		name    string
 		args    args
 		want    []string
 		wantErr bool
 	}{
-		{"test_success", args{FontsPath: "../../testdata"}, correctFonts, false},
+		{"test_success", args{FontsPath: fx.root}, fx.fonts, false},
 		{"test_not_exist", args{FontsPath: "../111"}, nil, true},
 	}
 
@@ -124,24 +190,18 @@ func Test_videoBatch_GetFontsList(t *testing.T) {
 	}
 }
 
-var correctFontsCmd = []string{
-	"-attach", "../../testdata/1/1.ttf", "-metadata:s:t:0", "mimetype=application/x-truetype-font",
-	"-attach", "../../testdata/1/2.ttf", "-metadata:s:t:1", "mimetype=application/x-truetype-font",
-	"-attach", "../../testdata/2/1.ttf", "-metadata:s:t:2", "mimetype=application/x-truetype-font",
-	"-attach", "../../testdata/2/2.ttf", "-metadata:s:t:3", "mimetype=application/x-truetype-font",
-}
-
 func Test_videoBatch_GetFontsParams(t *testing.T) {
 	type args struct {
 		FontsPath string
 	}
+	fx := newFixture(t)
 	tests := []struct {
 		name    string
 		args    args
 		want    []string
 		wantErr bool
 	}{
-		{"test_success", args{FontsPath: "../../testdata"}, correctFontsCmd, false},
+		{"test_success", args{FontsPath: fx.root}, attachCmd(fx.fonts), false},
 		{"test_not_exist", args{FontsPath: "../111"}, nil, true},
 	}
 	for _, tt := range tests {
@@ -153,20 +213,15 @@ func Test_videoBatch_GetFontsParams(t *testing.T) {
 			}
 
 			got, err := vb.GetFontsParams()
+
+			assert.Equal(t, tt.want, got)
 			if tt.wantErr {
 				assert.NotNil(t, err)
-				return
+			} else {
+				assert.Nil(t, err)
 			}
-			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-var correctConvertBatch = [][]string{
-	{"-i", "../../testdata/1/1.mp4", "../../testdata/output/1.mkv"},
-	{"-i", "../../testdata/1/2.mp4", "../../testdata/output/2.mkv"},
-	{"-i", "../../testdata/2/1.mp4", "../../testdata/output/1-1.mkv"},
-	{"-i", "../../testdata/2/2.mp4", "../../testdata/output/2-1.mkv"},
 }
 
 func Test_videoBatch_GetConvertBatch(t *testing.T) {
@@ -176,14 +231,24 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 		OutputPath   string
 		OutputFormat string
 	}
+	fx := newFixture(t)
+	want := func(fx fixtureData) [][]string {
+		outs := outputs(fx, "mkv")
+		return [][]string{
+			{"-i", fx.mp4s[0], outs[0]},
+			{"-i", fx.mp4s[1], outs[1]},
+			{"-i", fx.mp4s[2], outs[2]},
+			{"-i", fx.mp4s[3], outs[3]},
+		}
+	}
 	tests := []struct {
 		name    string
 		args    args
 		want    [][]string
 		wantErr bool
 	}{
-		{"test_success", args{InputPath: "../../testdata", InputFormat: "mp4", OutputPath: "../../testdata/output", OutputFormat: "mkv"}, correctConvertBatch, false},
-		{"test_not_exist", args{InputPath: "../111", InputFormat: "mp4", OutputPath: "../../testdata/output", OutputFormat: "mkv"}, nil, true},
+		{"test_success", args{InputPath: fx.root, InputFormat: "mp4", OutputPath: fx.out, OutputFormat: "mkv"}, want(fx), false},
+		{"test_not_exist", args{InputPath: "../111", InputFormat: "mp4", OutputPath: fx.out, OutputFormat: "mkv"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -197,7 +262,6 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 			}
 
 			got, err := vb.GetConvertBatch()
-			t.Log(got)
 
 			if tt.wantErr {
 				assert.NotNil(t, err)
@@ -209,29 +273,6 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 	}
 }
 
-var correctAddFontsCmdBatch = func() [][]string {
-	a := [][]string{
-		{"-i", "../../testdata/1/1.mkv", "-c", "copy"},
-		{"-i", "../../testdata/1/2.mkv", "-c", "copy"},
-		{"-i", "../../testdata/2/1.mkv", "-c", "copy"},
-		{"-i", "../../testdata/2/2.mkv", "-c", "copy"},
-	}
-
-	b := []string{
-		"../../testdata/output/1.mkv",
-		"../../testdata/output/2.mkv",
-		"../../testdata/output/1-1.mkv",
-		"../../testdata/output/2-1.mkv",
-	}
-	var c [][]string
-	for i, v := range a {
-		v = append(v, correctFontsCmd...)
-		v = append(v, b[i])
-		c = append(c, v)
-	}
-	return c
-}
-
 func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 	type args struct {
 		InputPath    string
@@ -240,14 +281,26 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 		OutputFormat string
 		FontsPath    string
 	}
+	fx := newFixture(t)
+	want := func(fx fixtureData) [][]string {
+		outs := outputs(fx, "mkv")
+		var cmds [][]string
+		for i, videoPath := range fx.mkvs {
+			cmd := []string{"-i", videoPath, "-c", "copy"}
+			cmd = append(cmd, attachCmd(fx.fonts)...)
+			cmd = append(cmd, outs[i])
+			cmds = append(cmds, cmd)
+		}
+		return cmds
+	}
 	tests := []struct {
 		name    string
 		args    args
 		want    [][]string
 		wantErr bool
 	}{
-		{"test_success", args{InputPath: "../../testdata", InputFormat: "mkv", FontsPath: "../../testdata", OutputPath: "../../testdata/output"}, correctAddFontsCmdBatch(), false},
-		{"test_not_exist", args{InputPath: "../111", InputFormat: "mkv", OutputPath: "../../testdata/output", OutputFormat: "mkv"}, nil, true},
+		{"test_success", args{InputPath: fx.root, InputFormat: "mkv", FontsPath: fx.root, OutputPath: fx.out, OutputFormat: "mkv"}, want(fx), false},
+		{"test_not_exist", args{InputPath: "../111", InputFormat: "mkv", OutputPath: fx.out, OutputFormat: "mkv"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -256,7 +309,7 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 					InputPath:    tt.args.InputPath,
 					InputFormat:  tt.args.InputFormat,
 					OutputPath:   tt.args.OutputPath,
-					OutputFormat: tt.args.InputFormat,
+					OutputFormat: tt.args.OutputFormat,
 					FontsPath:    tt.args.FontsPath,
 				},
 			}
@@ -272,26 +325,25 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 	}
 }
 
-var correctMp4FilterOutput = map[string]string{
-	"../../testdata/1/1.mp4": "../output/1.mkv",
-	"../../testdata/1/2.mp4": "../output/2.mkv",
-	"../../testdata/2/1.mp4": "../output/1-1.mkv",
-	"../../testdata/2/2.mp4": "../output/2-1.mkv",
-}
-
 func Test_videoBatch_filterOutput(t *testing.T) {
 	type args struct {
 		outPath   string
 		outFormat string
 	}
 
+	fx := newFixture(t)
 	tests := []struct {
 		name      string
 		inputPath []string
 		args      args
 		want      map[string]string
 	}{
-		{"test", correctMp4Videos, args{outPath: "../output", outFormat: "mkv"}, correctMp4FilterOutput},
+		{"test", fx.mp4s, args{outPath: "../output", outFormat: "mkv"}, map[string]string{
+			fx.mp4s[0]: filepath.Join("../output", "1.mkv"),
+			fx.mp4s[1]: filepath.Join("../output", "2.mkv"),
+			fx.mp4s[2]: filepath.Join("../output", "1-1.mkv"),
+			fx.mp4s[3]: filepath.Join("../output", "2-1.mkv"),
+		}},
 	}
 
 	for _, tt := range tests {

@@ -1,13 +1,12 @@
 package ffmpeg
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // buildSelection 构造指定组合的 Selection。
@@ -15,12 +14,14 @@ func buildSelection(convert, sub, fonts bool) Selection {
 	return Selection{Convert: convert, AddSubtitle: sub, AddFonts: fonts}
 }
 
-// cleanupOut 测试结束移除 NewVideoBatch 创建的输出目录。
-func cleanupOut(t *testing.T) {
-	t.Helper()
-	t.Cleanup(func() {
-		_ = os.RemoveAll("../../testdata/out")
-	})
+// fixtureOption 基于 fixture 目录构造一个组合流程的批处理选项。
+func fixtureOption(fx fixtureData) *VideoBatchOption {
+	return &VideoBatchOption{
+		InputPath:    fx.root,
+		InputFormat:  "mp4",
+		OutputPath:   fx.out + "/", // 保持与真实配置一致的末尾斜杠
+		OutputFormat: "mkv",
+	}
 }
 
 func TestSelection_String(t *testing.T) {
@@ -32,6 +33,7 @@ func TestSelection_String(t *testing.T) {
 
 // Test_videoBatch_GetCombinedBatch_Single 验证单一操作委托给既有批处理，命令保持不变。
 func Test_videoBatch_GetCombinedBatch_Single(t *testing.T) {
+	fx := newFixture(t)
 	cases := []struct {
 		name string
 		sel  Selection
@@ -42,13 +44,7 @@ func Test_videoBatch_GetCombinedBatch_Single(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cleanupOut(t)
-			opt := &VideoBatchOption{
-				InputPath:    "../../testdata",
-				InputFormat:  "mp4",
-				OutputPath:   "../../testdata/out/",
-				OutputFormat: "mkv",
-			}
+			opt := fixtureOption(fx)
 			vb, err := NewVideoBatch(opt)
 			assert.NoError(t, err)
 			expected, err := planSingle(t, opt, c.sel)
@@ -79,20 +75,16 @@ func planSingle(t *testing.T, opt *VideoBatchOption, sel Selection) ([][]string,
 }
 
 func Test_videoBatch_GetCombinedBatch(t *testing.T) {
-	cleanupOut(t)
+	fx := newFixture(t)
 	baseOpt := func() *VideoBatchOption {
-		return &VideoBatchOption{
-			InputPath:      "../../testdata",
-			InputFormat:    "mp4",
-			OutputPath:     "../../testdata/out/",
-			OutputFormat:   "mkv",
-			FontsPath:      "../../testdata/1",
-			InputSubSuffix: "ass",
-			InputSubNo:     0,
-			InputSubLang:   "chi",
-			InputSubTitle:  "Chinese",
-			Advance:        "-c:v h265 -crf 20",
-		}
+		opt := fixtureOption(fx)
+		opt.FontsPath = fx.dir1
+		opt.InputSubSuffix = "ass"
+		opt.InputSubNo = 0
+		opt.InputSubLang = "chi"
+		opt.InputSubTitle = "Chinese"
+		opt.Advance = "-c:v h265 -crf 20"
+		return opt
 	}
 
 	// add_sub + add_fonts（未转码）：一条命令同时带字幕参数、字体参数和 -c copy
@@ -104,13 +96,13 @@ func Test_videoBatch_GetCombinedBatch(t *testing.T) {
 
 		cmds, err := b.GetCombinedBatch(buildSelection(false, true, true))
 		assert.NoError(t, err)
-		assert.Len(t, cmds, len(correctMp4Videos))
+		assert.Len(t, cmds, len(fx.mp4s))
 
 		for _, cmd := range cmds {
 			assert.True(t, contains(cmd, []string{"-map", "0", "-map", "1"}))
 			assert.True(t, contains(cmd, []string{"-c", "copy"}))
 			assert.True(t, contains(cmd, []string{"-attach"}))
-			assert.True(t, strings.HasPrefix(cmd[len(cmd)-1], "../../testdata/out/"))
+			assert.True(t, strings.HasPrefix(cmd[len(cmd)-1], fx.out+string(filepath.Separator)))
 		}
 	})
 
@@ -123,7 +115,7 @@ func Test_videoBatch_GetCombinedBatch(t *testing.T) {
 
 		cmds, err := b.GetCombinedBatch(buildSelection(true, true, true))
 		assert.NoError(t, err)
-		assert.Len(t, cmds, len(correctMp4Videos))
+		assert.Len(t, cmds, len(fx.mp4s))
 
 		for _, cmd := range cmds {
 			assert.True(t, contains(cmd, []string{"-c:v", "h265", "-crf", "20"}))
@@ -144,7 +136,7 @@ func Test_videoBatch_GetCombinedBatch(t *testing.T) {
 
 		cmds, err := b.GetCombinedBatch(buildSelection(true, true, false))
 		assert.NoError(t, err)
-		assert.Len(t, cmds, len(correctMp4Videos))
+		assert.Len(t, cmds, len(fx.mp4s))
 		for _, cmd := range cmds {
 			assert.False(t, contains(cmd, []string{"-attach"}))
 		}
@@ -152,13 +144,8 @@ func Test_videoBatch_GetCombinedBatch(t *testing.T) {
 }
 
 func TestPlanCombined_Errors(t *testing.T) {
-	cleanupOut(t)
-	opt := &VideoBatchOption{
-		InputPath:    "../../testdata",
-		InputFormat:  "mp4",
-		OutputPath:   "../../testdata/out/",
-		OutputFormat: "mkv",
-	}
+	fx := newFixture(t)
+	opt := fixtureOption(fx)
 	_, _, err := PlanCombined(opt, Selection{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "至少需要选择一个操作")
@@ -168,25 +155,20 @@ func TestPlanCombined_Errors(t *testing.T) {
 }
 
 func TestPreviewCombined(t *testing.T) {
-	cleanupOut(t)
-	opt := &VideoBatchOption{
-		InputPath:    "../../testdata",
-		InputFormat:  "mp4",
-		OutputPath:   "../../testdata/out/",
-		OutputFormat: "mkv",
-		Advance:      "-c:v h265",
-	}
+	fx := newFixture(t)
+	opt := fixtureOption(fx)
+	opt.Advance = "-c:v h265"
+
 	lines, err := PreviewCombined(opt, buildSelection(true, false, false))
 	assert.NoError(t, err)
-	assert.Len(t, lines, len(correctMp4Videos))
+	assert.Len(t, lines, len(fx.mp4s))
 	for _, l := range lines {
-		assert.True(t, strings.HasPrefix(l, "ffmpeg -i "), fmt.Sprintf("bad line: %s", l))
+		assert.True(t, strings.HasPrefix(l, "ffmpeg -i "), "bad line: %s", l)
 		assert.Contains(t, l, "-c:v")
 	}
 }
 
 func Test_videoBatch_GetCombinedBatch_MultiSubtitle(t *testing.T) {
-	cleanupOut(t)
 	// 布置一个临时目录：1.mp4 + 两条字幕（带语言标记命名）
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, "1.mp4"), "video")
@@ -207,7 +189,7 @@ func Test_videoBatch_GetCombinedBatch_MultiSubtitle(t *testing.T) {
 		},
 	}
 	viewer, err := NewVideoBatch(opt)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	b := viewer.(*videoBatch)
 
 	cmds, err := b.GetCombinedBatch(Selection{AddSubtitle: true})
@@ -252,40 +234,6 @@ func Test_videoBatch_matchSubtitle(t *testing.T) {
 	assert.Equal(t, filepath.Join(tmp, "1.chi.ass"), vb.matchSubtitle(names, "1", "ass"))
 	// 未命中回退旧版约定路径
 	assert.Equal(t, filepath.Join(tmp, "3.ass"), vb.matchSubtitle(names, "3", "ass"))
-}
-
-func TestAdvancePresets(t *testing.T) {
-	home := t.TempDir()
-
-	presets, err := loadAdvancePresets(home)
-	assert.NoError(t, err)
-	assert.Empty(t, presets)
-
-	// 保存并回读
-	want := []string{"-c:v h265 -crf 20 -c:a copy", "-c:v libx264 -preset fast"}
-	assert.NoError(t, saveAdvancePresets(home, want))
-	got, err := loadAdvancePresets(home)
-	assert.NoError(t, err)
-	assert.Equal(t, want, got)
-
-	// 追加去重 + 空白规范化
-	upserted := UpsertPreset(got, "  -c:v   h265  -crf 20  -c:a copy ")
-	assert.Equal(t, got, upserted)
-	upserted = UpsertPreset(got, "-c:v nvenc -cq 23")
-	assert.Len(t, upserted, 3)
-	assert.NoError(t, saveAdvancePresets(home, upserted))
-	assert.NoError(t, saveAdvancePresets(home, append(upserted, "", "  ")))
-
-	final, err := loadAdvancePresets(home)
-	assert.NoError(t, err)
-	assert.Equal(t, upserted, final)
-}
-
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
 }
 
 func contains(haystack, needle []string) bool {

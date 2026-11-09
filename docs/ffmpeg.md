@@ -1,100 +1,62 @@
-# 视频批量处理
+# ffmpeg 参数速查
 
 > 系统环境中需要预先安装 ffmpeg
 
-使用 FFMPEG 对多个视频快速转码或其他操作
+batcher 中勾选"视频转码"后填写/选择的"高级自定义参数"会原样传给 ffmpeg。以下是常用组合参考。
 
-- [x] convert 批量视频转码
-- [x] add_sub 批量视频添加字幕
-- [x] add_fonts 批量视频添加字体
+## CPU 编码（libx264 / libx265）
 
 ```shell
-# 子命令
-convert    batch video convert other format
-add_sub    batch video add one suffix subtittle
-add_fonts  batch video add fonts from dir
+# h264 通用（速度与质量均衡）
+ffmpeg -i INPUT.mp4 -c:v libx264 -preset fast -crf 23 OUTPUT.mkv
+# h264 高质量（慢）
+ffmpeg -i INPUT.mp4 -c:v libx264 -preset slow -crf 18 OUTPUT.mkv
+# h265 CPU 10bit 转码
+ffmpeg -i INPUT.mp4 -c:v libx265 -preset fast -crf 24 -pix_fmt yuv420p10le OUTPUT.mkv
 ```
 
-## 视频转码
+crf 取值：x264 约 0-51（默认 23，越小质量越高）；x265 默认 28。
+
+## NVIDIA 硬件加速（NVENC）
 
 ```shell
-# 硬件加速 https://trac.ffmpeg.org/wiki/HWAccelIntro#VideoToolbox
-# h264 转码
-ffmpeg.exe -i input.mp4 -c:v h264_nvenc output.mkv
-# h265 cpu 10bit 转码
-ffmpeg -i INPUT.mp4 -c:v libx265 -crf 20 -pix_fmt yuv420p10le OUTPUT.mkv
-# h265 nvida加速 10bit 转码
+# h264
+ffmpeg -i INPUT.mp4 -c:v h264_nvenc -preset fast -cq 23 OUTPUT.mkv
+# h265（含 10bit）
 ffmpeg -i INPUT.mp4 -c:v hevc_nvenc -pix_fmt p010le -rc vbr -cq:v 27 OUTPUT.mkv
-# h264/h265 apple silicon 硬件加速转码
-# q:v 1-100 1 lowest, 100 highest
-ffmpeg -i INPUT.mp4 -c:v h264_videotoolbox  -pix_fmt yuv444p -cq:v 27 OUTPUT.mkv
-ffmpeg -i INPUT.mp4 -c:v hevc_videotoolbox  -pix_fmt yuv444p -cq:v 27 OUTPUT.mkv
 ```
+
+## Apple Silicon 硬件加速（VideoToolbox）
 
 ```shell
-$ ffmpeg-batch convert --help
-
---input_path <>               input directory path
---input_format <>             input directory path [default: mp4]
---output_path <>              output directory path [default: ./dest]
---output_format <>            output directory path [default: mkv]
---advance <>                  advance string
---exec                        exec command
+# q:v 1-100，1 最低、100 最高
+ffmpeg -i INPUT.mp4 -c:v h264_videotoolbox -q:v 65 OUTPUT.mkv
+ffmpeg -i INPUT.mp4 -c:v hevc_videotoolbox -q:v 65 OUTPUT.mkv
 ```
 
-## 字幕添加
-
-添加字幕文件替换掉已有字幕， 只支持插入单条字幕。
+## 无损封装
 
 ```shell
-## ffmpeg 对应命令
-ffmpeg.exe -i INPUT -c copy  -i INPUT.ass -sub_charenc UTF-8  -c copy -map 0 -map -0:s -map 1 -metadata:s:s:0 language=chi -metadata:s:s:0 title="jp&sc" OUTPUT
+# 仅更换容器，全部流直接拷贝
+ffmpeg -i INPUT.mp4 -c copy OUTPUT.mkv
 ```
+
+## 添加字幕
 
 ```shell
-## garage 对应命令
-$ garage ffmpeg-batch add-sub
-
---input_path <FILE>               input directory path
---input_format <FILE Extension>   input directory path [default: mkv]
---sub_suffix <FILE>               sub suffix and extension [default: ass]
---sub_number <FILE>               sub number [default: 0]
---output_path <FILE>              output directory path [default: ./dest]
---output_format <FILE Extension>  output directory path [default: mkv]
---advance <>                      advance string
---exec                            exec command
+ffmpeg -i INPUT -c copy -i INPUT.ass -sub_charenc UTF-8 -c copy -map 0 -map 1 \
+  -metadata:s:s:0 language=chi -metadata:s:s:0 title="简体中文" OUTPUT
 ```
+
+batcher 组合流程会为每条字幕追加独立输入并自动递增字幕流序号（`-metadata:s:s:<n>`）。
 
 ## 添加多个字体
 
 ```shell
-## ffmpeg 对应命令
-ffmpeg.exe -i INPUT -c copy -attach INPUT_FONT -metadata:s:t:0 mimetype=application/x-truetype-font
-
-## garage 对应命令
-garage ffmpeg-batch add-sub \
---input-path="queue" \
---input-type=".mkv" \
---input-sub-suffix=".ass" \
---input-fonts-path="fonts" \
---output-path="result/" \
---exec=true
+ffmpeg -i INPUT -c copy -attach INPUT_FONT -metadata:s:t:0 mimetype=application/x-truetype-font OUTPUT
 ```
 
-## 切割视频 && 导出字幕文件
+## 相关工具
 
-推荐使用 [Lossless Cut](https://github.com/mifi/lossless-cut)软件
-
-```shell
-# -i input.mp4 指定输入视频文件。
-# -ss 00:00:00 从视频的开始位置查找，这里是从00:00:00开始。
-# -t 00:00:10 设置所需切割视频的时长，这里是10秒。
-# -c copy 复制编码以避免重编码，这会导致更快的处理速度。
-ffmpeg -i input.wmv -ss 00:00:30.0 -t 00:00:10.0 -c copy output.wmv
-
-ffmpeg -i .\11.mkv -ss 30 -c copy 111.mkv
-```
-
-```shell
-ffmpeg -i input.mkv -map 0:s:0 subs.ass
-```
+- 视频切割 && 导出字幕推荐 [Lossless Cut](https://github.com/mifi/lossless-cut)。
+- 导出字幕文件：`ffmpeg -i input.mkv -map 0:s:0 subs.ass`。

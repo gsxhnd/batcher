@@ -4,27 +4,30 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/presets"
 )
 
 type phase int
 
 const (
 	phaseFeature    phase = iota // 勾选要执行的操作
-	phaseAdvance                 // 转码高级参数预设管理
+	phaseAdvance                 // 转码参数选择（内置/自定义预设）
 	phaseSubs                    // 字幕列表管理
 	phaseSubEdit                 // 单条字幕编辑
 	phaseForm                    // 填写主参数
 	phasePreview                 // 预览命令
 	phaseRunning                 // 执行中
 	phaseResult                  // 结果
-	phasePresets                 // 转码参数管理列表
+	phasePresets                 // 转码参数管理列表（自定义预设）
 	phasePresetEdit              // 单条转码参数编辑
 )
 
@@ -50,9 +53,26 @@ var features = []feature{
 }
 
 var featureDescs = map[string]string{
-	"视频转码": "按“高级自定义参数 + 输出后缀”转码；参数可在下一步选择/保存常用预设",
+	"视频转码": "按“自定义参数 + 输出后缀”转码；参数可在下一步选择/保存常用预设",
 	"添加字幕": "把源目录下匹配视频名的字幕文件封装进视频，支持多条字幕",
 	"添加字体": "把字体文件夹中的字体文件内嵌到视频（mkv 附带流）",
+}
+
+// 文件任务的执行状态（左侧列表标记用）。
+const (
+	filePending = ""        // 待执行
+	fileRunning = "running" // 执行中
+	fileDone    = "done"    // 完成
+	fileFailed  = "failed"  // 失败
+)
+
+// fileItem 描述预览/执行界面左侧列表中的一个源文件任务。
+type fileItem struct {
+	input  string   // 源文件路径
+	output string   // 输出文件路径
+	cmd    string   // 已格式化的完整 ffmpeg 命令
+	state  string   // filePending / fileRunning / fileDone / fileFailed
+	logs   []string // 该任务执行时的 ffmpeg 输出（按行，带样式）
 }
 
 type model struct {
@@ -65,18 +85,22 @@ type model struct {
 	featCursor int
 	featErr    string
 
-	// 转码高级参数预设
+	// 转码参数预设：内置（只读）在前，用户自定义在后
+	builtins      []presets.Builtin
 	presets       []string
 	presetCursor  int
 	manualAdvance string
 	statusMsg     string // 界面上的临时提示（保存成功等）
 
-	// 转码参数管理页
+	// 转码参数管理页（仅管理用户自定义预设）
 	mgrCursor    int
 	mgrEditIndex int             // 当前编辑的预设下标，-1 表示新增
 	mgrInput     textinput.Model // 编辑中的参数文本
 	mgrErr       string
 	mgrReturn    phase // 管理页返回的界面（操作页或转码页）
+
+	// 删除自定义预设的二次确认：记录待删除的下标，-1 表示无待确认项
+	delPendingIdx int
 
 	// 字幕列表
 	subs         []ffmpeg.SubtitleOption
@@ -92,9 +116,19 @@ type model struct {
 	preview string
 
 	// 预览
-	vp          viewport.Model
-	previewDone bool
-	planErr     error
+	vp             viewport.Model
+	previewDone    bool
+	previewSummary string // Plan 汇总文本（全部命令列表），左侧选中“全部”时展示
+	planErr        error
+	spin           spinner.Model
+
+	// 预览/执行共用的左右分栏：左侧源文件列表，右侧命令/输出
+	files      []fileItem
+	fileCursor int  // 左侧光标：0 = 全部汇总，1.. = 第 i 个源文件
+	fileFollow bool // 执行时右侧自动跟随正在执行的文件（手动切换后停止）
+	runIdx     int  // 正在执行的文件下标（files 内），-1 表示当前无执行中任务
+	leftW      int  // 左侧文件栏宽度
+	rightW     int  // 右侧内容区宽度
 
 	// 执行
 	opt      *ffmpeg.VideoBatchOption
@@ -105,6 +139,8 @@ type model struct {
 	logs     []string
 	logVp    viewport.Model
 	bar      progress.Model
+	startAt  time.Time     // 开始执行时间（用于显示耗时）
+	elapsed  time.Duration // 批处理总耗时（结束时记录）
 	cancel   context.CancelFunc
 	evCh     chan ffmpeg.Event
 	doneCh   chan error
@@ -116,9 +152,28 @@ type model struct {
 
 func newModel() model {
 	return model{
-		phase: phaseFeature,
-		bar:   progress.New(progress.WithDefaultBlend()),
+		phase:    phaseFeature,
+		bar:      progress.New(progress.WithDefaultBlend()),
+		spin:     spinner.New(spinner.WithSpinner(spinner.Dot)),
+		builtins: presets.Builtins(),
+		runIdx:   -1,
+
+		delPendingIdx: -1,
 	}
+}
+
+// presetCount 返回转码参数页完整列表长度：内置 + 自定义 + 手动输入。
+func (m model) presetCount() int {
+	return len(m.builtins) + len(m.presets) + 1
+}
+
+// presetHintText 返回用户预设文件路径，用于状态提示。
+func presetHintText() string {
+	path, err := presets.FilePath()
+	if err != nil {
+		return "预设文件夹（无法解析位置: " + err.Error() + "）"
+	}
+	return path
 }
 
 // ---------- tea.Model ----------
@@ -140,7 +195,12 @@ type doneMsg struct{ err error }
 
 type batchStartedMsg struct{}
 
+type tickMsg struct{}
+
 // ---------- 命令 ----------
+
+// maxLogLines 限制日志缓冲行数，避免长任务占用过多内存。
+const maxLogLines = 1000
 
 func planCmd(opt *ffmpeg.VideoBatchOption, sel ffmpeg.Selection) tea.Cmd {
 	return func() tea.Msg {
@@ -184,17 +244,20 @@ func startBatchCmd(ctx context.Context, opt *ffmpeg.VideoBatchOption, sel ffmpeg
 	}
 }
 
+// tickCmd 每秒触发一次重绘，用于执行页显示实时耗时。
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
 // ---------- Update ----------
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width, m.height = ws.Width, ws.Height
-		// 纵向占用：顶栏 1 + 面板上下边框 2 + 底部分隔线与提示 2，其余留给面板内容。
-		m.vp.SetWidth(max(ws.Width-6, 10))
-		m.vp.SetHeight(max(ws.Height-9, 3))
-		m.logVp.SetWidth(max(ws.Width-6, 10))
-		m.logVp.SetHeight(max(ws.Height-14, 3))
-		m.bar.SetWidth(max(ws.Width-8, 10))
+		m.resizePanes()
+		// 尺寸变化后按新宽度重新折行刷新两侧视口。
+		m.syncPreview()
+		m.syncLogPane()
 		return m, nil
 	}
 
@@ -210,23 +273,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewDone = true
 		if msg.err != nil {
 			m.planErr = msg.err
-		} else {
-			var b strings.Builder
-			b.WriteString(fmt.Sprintf("已选择：%s，共生成 %d 条命令（%d 个视频）\n", displaySel(m.ops), len(msg.cmds), len(msg.cmds)))
-			if m.ops.AddSubtitle {
-				var suffixes []string
-				for _, s := range m.subs {
-					suffixes = append(suffixes, s.Suffix)
-				}
-				fmt.Fprintf(&b, "字幕（%d 条）：.%s\n", len(m.subs), strings.Join(suffixes, " / ."))
-			}
-			b.WriteString("确认无误后按 Enter 开始执行；此阶段不会运行任何命令，执行后可用 ↑/↓ 查看日志。\n\n")
-			for i, c := range msg.cmds {
-				fmt.Fprintf(&b, "[%d/%d] %s\n\n", i+1, len(msg.cmds), ffmpeg.FormatCommand(c))
-			}
-			m.vp.SetContent(b.String())
-			m.vp.GotoTop()
+			return m, nil
 		}
+		m.planErr = nil
+		m.files = buildFileItems(msg.cmds)
+		m.fileCursor = 0
+		m.runIdx = -1
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("已选择：%s，共生成 %d 条命令（%d 个视频）\n", displaySel(m.ops), len(msg.cmds), len(msg.cmds)))
+		if m.ops.AddSubtitle {
+			var suffixes []string
+			for _, s := range m.subs {
+				suffixes = append(suffixes, s.Suffix)
+			}
+			fmt.Fprintf(&b, "字幕（%d 条）：.%s\n", len(m.subs), strings.Join(suffixes, " / ."))
+		}
+		b.WriteString("确认无误后按 Enter 开始执行；左侧 ↑/↓ 切换文件查看对应命令。\n\n")
+		for i, c := range msg.cmds {
+			fmt.Fprintf(&b, "[%d/%d] %s\n\n", i+1, len(msg.cmds), ffmpeg.FormatCommand(c))
+		}
+		m.previewSummary = b.String()
+		m.syncPreview()
+		m.vp.GotoTop()
 		return m, nil
 
 	case eventMsg:
@@ -247,12 +315,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		m.eventing = false
 		m.runErr = msg.err
+		m.elapsed = time.Since(m.startAt).Round(time.Second)
 		m.phase = phaseResult
 		return m, nil
 
 	case batchStartedMsg:
 		m.eventing = true
-		return m, tea.Batch(listenEvents(m.evCh), listenDone(m.doneCh))
+		return m, tea.Batch(listenEvents(m.evCh), listenDone(m.doneCh), tickCmd())
+
+	case tickMsg:
+		if m.eventing {
+			return m, tickCmd()
+		}
+		return m, nil
+
+	case spinner.TickMsg:
+		if m.phase == phasePreview && !m.previewDone {
+			var cmd tea.Cmd
+			m.spin, cmd = m.spin.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -281,626 +364,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// ---------- 转码参数管理 ----------
-
-// openPresets 进入转码参数管理页，from 为返回目标。
-func (m *model) openPresets(from phase) tea.Cmd {
-	presets, err := ffmpeg.LoadAdvancePresets()
-	if err != nil {
-		m.statusMsg = "× 读取常用参数失败: " + err.Error()
-	}
-	m.presets = presets
-	m.mgrReturn = from
-	m.mgrErr = ""
-	if m.mgrCursor >= len(m.presets) {
-		m.mgrCursor = max(len(m.presets)-1, 0)
-	}
-	m.phase = phasePresets
-	return nil
-}
-
-func (m *model) updatePresets(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	n := len(m.presets)
-	switch key.String() {
-	case "up", "k":
-		if n > 0 {
-			m.mgrCursor = (m.mgrCursor - 1 + n) % n
-		}
-	case "down", "j":
-		if n > 0 {
-			m.mgrCursor = (m.mgrCursor + 1) % n
-		}
-	case "a", "n":
-		return m.openPresetEdit(-1)
-	case "e", "enter":
-		if n > 0 {
-			return m.openPresetEdit(m.mgrCursor)
-		}
-	case "d", "x":
-		if n > 0 {
-			m.presets = append(m.presets[:m.mgrCursor], m.presets[m.mgrCursor+1:]...)
-			if m.mgrCursor >= len(m.presets) && m.mgrCursor > 0 {
-				m.mgrCursor--
-			}
-			m.persistPresets("已删除")
-		}
-	case "K", "shift+up":
-		m.movePreset(-1)
-	case "J", "shift+down":
-		m.movePreset(1)
-	case "esc":
-		m.phase = m.mgrReturn
-		return m.afterPresetsBack()
-	case "q":
-		return tea.Quit
-	}
-	return nil
-}
-
-// movePreset 把当前预设上移（-1）或下移（+1），并保存顺序。
-func (m *model) movePreset(delta int) {
-	to := m.mgrCursor + delta
-	if len(m.presets) < 2 || to < 0 || to >= len(m.presets) {
-		return
-	}
-	m.presets[m.mgrCursor], m.presets[to] = m.presets[to], m.presets[m.mgrCursor]
-	m.mgrCursor = to
-	m.persistPresets("已调整顺序")
-}
-
-// persistPresets 写入 ~/.batcher/advance_presets.json，并以 action 作为成功提示前缀。
-func (m *model) persistPresets(action string) {
-	if m.mgrCursor >= len(m.presets) {
-		m.mgrCursor = max(len(m.presets)-1, 0)
-	}
-	if err := ffmpeg.SaveAdvancePresets(m.presets); err != nil {
-		m.statusMsg = "× 保存参数预设失败: " + err.Error()
-		return
-	}
-	m.statusMsg = action + "，已保存到 ~/.batcher/" + ffmpeg.AdvancePresetFile
-}
-
-// afterPresetsBack 从管理页返回时收缩转码页光标，避免删除后越界。
-func (m *model) afterPresetsBack() tea.Cmd {
-	m.presetCursor = min(m.presetCursor, len(m.presets))
-	return nil
-}
-
-// openPresetEdit 打开单条转码参数编辑，index=-1 表示新增。
-func (m *model) openPresetEdit(index int) tea.Cmd {
-	m.mgrEditIndex = index
-	m.mgrErr = ""
-	m.mgrInput = textinput.New()
-	m.mgrInput.Placeholder = "例如: -c:v h265 -crf 20 -c:a copy"
-	m.mgrInput.CharLimit = 512
-	if index >= 0 {
-		m.mgrInput.SetValue(m.presets[index])
-	}
-	m.phase = phasePresetEdit
-	return m.mgrInput.Focus()
-}
-
-func (m *model) updatePresetEdit(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	switch key.String() {
-	case "esc":
-		m.phase = phasePresets
-		return nil
-	case "enter":
-		return m.savePresetEdit()
-	default:
-		var cmd tea.Cmd
-		m.mgrInput, cmd = m.mgrInput.Update(msg)
-		return cmd
-	}
-}
-
-// savePresetEdit 校验并保存编辑结果；空参数与已存在的重复参数会被拒绝。
-func (m *model) savePresetEdit() tea.Cmd {
-	args := strings.Join(strings.Fields(m.mgrInput.Value()), " ")
-	if args == "" {
-		m.mgrErr = "参数不能为空"
-		return nil
-	}
-	for i, p := range m.presets {
-		if p == args && i != m.mgrEditIndex {
-			m.mgrErr = "已存在相同的参数"
-			return nil
-		}
-	}
-	if m.mgrEditIndex >= 0 && m.mgrEditIndex < len(m.presets) {
-		m.presets[m.mgrEditIndex] = args
-		m.mgrCursor = m.mgrEditIndex
-		m.persistPresets("已更新")
-	} else {
-		m.presets = append(m.presets, args)
-		m.mgrCursor = len(m.presets) - 1
-		m.persistPresets("已新增")
-	}
-	m.mgrErr = ""
-	m.phase = phasePresets
-	return nil
-}
-
-// ---------- 操作勾选 ----------
-
-func (m *model) updateFeature(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	switch key.String() {
-	case "up", "k":
-		m.featCursor = (m.featCursor - 1 + len(features)) % len(features)
-	case "down", "j":
-		m.featCursor = (m.featCursor + 1) % len(features)
-	case " ", "space":
-		features[m.featCursor].apply(&m.ops)
-		if m.ops.String() != "无" {
-			m.featErr = ""
-		}
-	case "enter", "tab":
-		return m.confirmFeature()
-	case "p":
-		return m.openPresets(phaseFeature)
-	case "q", "esc":
-		return tea.Quit
-	}
-	return nil
-}
-
-// confirmFeature 校验至少选择一个操作，进入下一界面（有转码先管参数，有字幕先管字幕列表）。
-func (m *model) confirmFeature() tea.Cmd {
-	if m.ops.String() == "无" {
-		m.featErr = "请至少勾选一项操作"
-		return nil
-	}
-	if m.ops.Convert {
-		presets, err := ffmpeg.LoadAdvancePresets()
-		m.presets = presets
-		if err != nil {
-			// 读取失败时视作无预设，可继续手动输入。
-			m.presets = nil
-			m.statusMsg = "× 读取常用参数失败: " + err.Error()
-		}
-		m.presetCursor = 0
-		m.phase = phaseAdvance
-		return nil
-	}
-	return m.afterAdvance()
-}
-
-// afterAdvance 处理完转码参数后的分流。
-func (m *model) afterAdvance() tea.Cmd {
-	if m.ops.AddSubtitle {
-		m.subCursor = 0
-		m.phase = phaseSubs
-		return nil
-	}
-	return m.openForm()
-}
-
-// ---------- 转码高级参数 ----------
-
-func (m *model) updateAdvance(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	manual := len(m.presets) // 手动输入选项的下标
-	switch key.String() {
-	case "up", "k":
-		m.presetCursor = (m.presetCursor - 1 + manual + 1) % (manual + 1)
-	case "down", "j":
-		m.presetCursor = (m.presetCursor + 1) % (manual + 1)
-	case "d":
-		if m.presetCursor < manual {
-			m.presets = append(m.presets[:m.presetCursor], m.presets[m.presetCursor+1:]...)
-			if err := ffmpeg.SaveAdvancePresets(m.presets); err != nil {
-				m.statusMsg = "× 保存参数预设失败: " + err.Error()
-			} else {
-				m.statusMsg = "已删除，并保存到 ~/.batcher/" + ffmpeg.AdvancePresetFile
-			}
-			if m.presetCursor >= manual-1 && m.presetCursor > 0 {
-				m.presetCursor--
-			}
-		}
-	case "p":
-		return m.openPresets(phaseAdvance)
-	case "enter":
-		if m.presetCursor == manual {
-			// 手动输入：进入主表单后自行填写高级参数。
-			m.manualAdvance = ""
-		} else {
-			m.manualAdvance = m.presets[m.presetCursor]
-		}
-		return m.afterAdvance()
-	case "q", "esc":
-		if key.String() == "q" {
-			return tea.Quit
-		}
-		m.phase = phaseFeature
-	}
-	return nil
-}
-
-// ---------- 字幕列表 ----------
-
-func (m *model) updateSubs(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	switch key.String() {
-	case "up", "k":
-		if len(m.subs) > 0 {
-			m.subCursor = (m.subCursor - 1 + len(m.subs)) % len(m.subs)
-		}
-	case "down", "j":
-		if len(m.subs) > 0 {
-			m.subCursor = (m.subCursor + 1) % len(m.subs)
-		}
-	case "a", "n":
-		return m.openSubEdit(-1)
-	case "e":
-		if len(m.subs) > 0 {
-			return m.openSubEdit(m.subCursor)
-		}
-	case "d":
-		if len(m.subs) > 0 {
-			m.subs = append(m.subs[:m.subCursor], m.subs[m.subCursor+1:]...)
-			if m.subCursor >= len(m.subs) && m.subCursor > 0 {
-				m.subCursor--
-			}
-		}
-	case "enter":
-		// 至少需要一条字幕才能继续。
-		if len(m.subs) == 0 {
-			m.subsErr = "请至少添加一条字幕（按 a 新增）"
-			return nil
-		}
-		return m.openForm()
-	case "q", "esc":
-		if key.String() == "q" {
-			return tea.Quit
-		}
-		m.phase = m.subsBackPhase()
-	}
-	return nil
-}
-
-// subsBackPhase 字幕列表的上一步：有转码则回到转码参数页，否则回到操作勾选页。
-func (m *model) subsBackPhase() phase {
-	if m.ops.Convert {
-		return phaseAdvance
-	}
-	return phaseFeature
-}
-
-// formBackPhase 主参数表单的上一步，与 afterAdvance 的分流顺序保持一致。
-func (m *model) formBackPhase() phase {
-	if m.ops.AddSubtitle {
-		return phaseSubs
-	}
-	if m.ops.Convert {
-		return phaseAdvance
-	}
-	return phaseFeature
-}
-
-// openSubEdit 打开单条字幕编辑表单，index=-1 表示新增。
-func (m *model) openSubEdit(index int) tea.Cmd {
-	m.subEditIndex = index
-	m.subFields = make([]field, 0, len(subFieldDefs))
-	var firstCmd tea.Cmd
-
-	var entry ffmpeg.SubtitleOption
-	if index >= 0 {
-		entry = m.subs[index]
-	} else {
-		// 新增条目默认沿用上一条的扩展名，方便批量录入 srt/eng 等。
-		if len(m.subs) > 0 {
-			entry.Suffix = m.subs[len(m.subs)-1].Suffix
-		}
-	}
-
-	for i, def := range subFieldDefs {
-		nf := newField(def)
-		switch def.key {
-		case "sub_suffix":
-			nf.input.SetValue(entry.Suffix)
-		case "sub_lang":
-			nf.input.SetValue(entry.Lang)
-		case "sub_title":
-			nf.input.SetValue(entry.Title)
-		}
-		if i == 0 {
-			firstCmd = nf.input.Focus()
-		}
-		m.subFields = append(m.subFields, nf)
-	}
-	m.editFocus = 0
-	m.phase = phaseSubEdit
-	return firstCmd
-}
-
-func (m *model) updateSubEdit(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	f := &m.subFields[m.editFocus]
-	switch key.String() {
-	case "esc":
-		m.phase = phaseSubs
-		return nil
-	case "tab", "down":
-		m.editFocus = (m.editFocus + 1) % len(m.subFields)
-		return m.refocusSubEdit()
-	case "shift+tab", "up":
-		m.editFocus = (m.editFocus - 1 + len(m.subFields)) % len(m.subFields)
-		return m.refocusSubEdit()
-	case "enter":
-		if m.editFocus == len(m.subFields)-1 {
-			return m.saveSubEdit()
-		}
-		m.editFocus++
-		return m.refocusSubEdit()
-	default:
-		var cmd tea.Cmd
-		f.input, cmd = f.input.Update(msg)
-		return cmd
-	}
-}
-
-func (m *model) refocusSubEdit() tea.Cmd {
-	var cmd tea.Cmd
-	for i := range m.subFields {
-		if i == m.editFocus {
-			cmd = m.subFields[i].input.Focus()
-		} else {
-			m.subFields[i].input.Blur()
-		}
-	}
-	return cmd
-}
-
-// saveSubEdit 校验并保存正在编辑的字幕条目。
-func (m *model) saveSubEdit() tea.Cmd {
-	suffix := strings.TrimSpace(m.subFields[0].Value())
-	lang := strings.TrimSpace(m.subFields[1].Value())
-	title := strings.TrimSpace(m.subFields[2].Value())
-	if suffix == "" {
-		m.subFields[0].err = "必填"
-		return nil
-	}
-	if !isISO639Code(lang) {
-		m.subFields[1].err = "需为 ISO 639-2 三字母码，如 chi / eng / jpn"
-		return nil
-	}
-	entry := ffmpeg.SubtitleOption{Suffix: suffix, Lang: lang, Title: title}
-	if m.subEditIndex >= 0 && m.subEditIndex < len(m.subs) {
-		m.subs[m.subEditIndex] = entry
-	} else {
-		m.subs = append(m.subs, entry)
-		m.subCursor = len(m.subs) - 1
-	}
-	m.subsErr = ""
-	m.phase = phaseSubs
-	return nil
-}
-
-// ---------- 主参数表单 ----------
-
-// openForm 构建主参数表单字段。
-func (m *model) openForm() tea.Cmd {
-	defs := fieldsFor(m.ops)
-	f := ffmpeg.DefaultOption()
-
-	m.fields = make([]field, 0, len(defs))
-	var firstCmd tea.Cmd
-	for i, def := range defs {
-		nf := newField(def)
-		nf.applyDefaults(&f)
-		// 高级参数预填常用预设的值。
-		if def.key == "advance" && m.manualAdvance != "" {
-			nf.input.SetValue(m.manualAdvance)
-		}
-		if i == 0 {
-			firstCmd = nf.input.Focus()
-		}
-		m.fields = append(m.fields, nf)
-	}
-	m.focus = 0
-	m.planErr = nil
-	m.previewDone = false
-	m.phase = phaseForm
-	return firstCmd
-}
-
-func (m *model) updateForm(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	if key.String() == "ctrl+s" {
-		return m.saveAdvancePreset()
-	}
-
-	f := &m.fields[m.focus]
-
-	switch key.String() {
-	case "esc":
-		m.statusMsg = ""
-		m.phase = m.formBackPhase()
-		return nil
-	case "tab", "down":
-		m.focus = (m.focus + 1) % len(m.fields)
-		return m.refocus()
-	case "shift+tab", "up":
-		m.focus = (m.focus - 1 + len(m.fields)) % len(m.fields)
-		return m.refocus()
-	case "enter":
-		if m.focus == len(m.fields)-1 {
-			return m.confirmForm()
-		}
-		m.focus++
-		return m.refocus()
-	default:
-		var cmd tea.Cmd
-		f.input, cmd = f.input.Update(msg)
-		return cmd
-	}
-}
-
-// saveAdvancePreset 把当前“高级自定义参数”保存为常用参数（~/.batcher/advance_presets.json）。
-func (m *model) saveAdvancePreset() tea.Cmd {
-	var args string
-	for i := range m.fields {
-		if m.fields[i].def.key == "advance" {
-			args = m.fields[i].Value()
-			break
-		}
-	}
-	if args == "" {
-		m.statusMsg = "× 参数为空，先在‘高级自定义参数’中填写，例如: -c:v h265 -crf 20 -c:a copy"
-		return nil
-	}
-	if !m.ops.Convert {
-		m.statusMsg = "× 未勾选“视频转码”，无需保存高级参数"
-		return nil
-	}
-	m.presets = ffmpeg.UpsertPreset(m.presets, args)
-	if err := ffmpeg.SaveAdvancePresets(m.presets); err != nil {
-		m.statusMsg = "× 保存失败: " + err.Error()
-		return nil
-	}
-	m.statusMsg = "已保存常用参数并写入 ~/.batcher/" + ffmpeg.AdvancePresetFile
-	return nil
-}
-
-func (m *model) refocus() tea.Cmd {
-	var cmd tea.Cmd
-	for i := range m.fields {
-		if i == m.focus {
-			cmd = m.fields[i].input.Focus()
-		} else {
-			m.fields[i].input.Blur()
-		}
-	}
-	return cmd
-}
-
-// confirmForm 校验表单并进入预览（Plan 阶段，不执行命令）。
-func (m *model) confirmForm() tea.Cmd {
-	opt, err := m.buildOption()
-	if err != nil {
-		return nil
-	}
-	if m.ops.AddSubtitle && len(m.subs) == 0 {
-		m.planErr = fmt.Errorf("至少需要一条字幕（esc 返回字幕管理）")
-		return nil
-	}
-	m.opt = opt
-	m.planErr = nil
-	m.previewDone = false
-	m.preview = "正在生成命令列表..."
-	m.phase = phasePreview
-	return planCmd(m.opt, m.ops)
-}
-
-// ---------- 预览与执行 ----------
-
-func (m *model) updatePreview(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	switch key.String() {
-	case "esc":
-		m.phase = phaseForm
-		return m.refocus()
-	case "enter":
-		if m.planErr != nil {
-			m.phase = phaseForm
-			return m.refocus()
-		}
-		return m.startRun()
-	case "up", "k", "pgup", "down", "j", "pgdown":
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		return cmd
-	}
-	return nil
-}
-
-func (m *model) startRun() tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
-	m.evCh = make(chan ffmpeg.Event, 256)
-	m.doneCh = make(chan error, 1)
-	m.total, m.done, m.failed = 0, 0, 0
-	m.current = ""
-	m.logs = nil
-	m.runErr = nil
-	m.phase = phaseRunning
-	m.logVp.SetContent("")
-	return startBatchCmd(ctx, m.opt, m.ops, m.evCh, m.doneCh)
-}
-
-func (m *model) updateRunning(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	switch key.String() {
-	case "q", "esc":
-		m.quitCleanup()
-		return tea.Quit
-	case "up", "k":
-		var cmd tea.Cmd
-		m.logVp, cmd = m.logVp.Update(msg)
-		return cmd
-	case "down", "j":
-		var cmd tea.Cmd
-		m.logVp, cmd = m.logVp.Update(msg)
-		m.logVp.GotoBottom()
-		return cmd
-	}
-	return nil
-}
-
-func (m *model) updateResult(msg tea.Msg) tea.Cmd {
-	key, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
-	switch key.String() {
-	case "b", "esc":
-		m.phase = phaseForm
-		return m.refocus()
-	case "r":
-		return m.confirmForm()
-	case "q":
-		return tea.Quit
-	}
-	return nil
-}
-
-func (m *model) quitCleanup() {
-	if m.cancel != nil {
-		m.cancel()
-	}
-}
-
-// handleEvent 将 ffmpeg 事件写入日志、更新进度，返回进度条动画命令。
+// handleEvent 将 ffmpeg 事件按文件路由到左侧列表与右侧日志，更新进度，返回进度条动画命令。
 func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 	switch e.Type {
 	case ffmpeg.EventBatchStart:
@@ -908,390 +372,174 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 		m.appendLog(fmt.Sprintf("开始执行批处理，共 %d 个任务", e.Total), logLineInfoStyle)
 	case ffmpeg.EventCommandStart:
 		m.current = e.Command
-		m.appendLog(fmt.Sprintf("▶ [%d/%d] %s", e.Index+1, e.Total, e.Command), logLineInfoStyle)
+		m.runIdx = e.Index
+		line := fmt.Sprintf("▶ [%d/%d] %s", e.Index+1, e.Total, e.Command)
+		m.appendLog(line, logLineInfoStyle)
+		if it := m.fileAt(e.Index); it != nil {
+			it.state = fileRunning
+			it.logs = appendFileLog(it.logs, line, logLineInfoStyle)
+		}
+		if m.fileFollow {
+			m.fileCursor = e.Index + 1
+		}
 	case ffmpeg.EventLog:
 		m.appendLog("    "+e.Message, logLineDefaultStyle)
+		if it := m.fileAt(e.Index); it != nil {
+			it.logs = appendFileLog(it.logs, "    "+e.Message, logLineDefaultStyle)
+		}
 	case ffmpeg.EventCommandDone:
 		m.done++
-		m.appendLog(fmt.Sprintf("✔ [%d/%d] 完成", e.Index+1, e.Total), logLineDoneStyle)
+		m.current = ""
+		line := fmt.Sprintf("✔ [%d/%d] 完成", e.Index+1, e.Total)
+		m.appendLog(line, logLineDoneStyle)
+		if it := m.fileAt(e.Index); it != nil {
+			it.state = fileDone
+			it.logs = appendFileLog(it.logs, line, logLineDoneStyle)
+		}
 	case ffmpeg.EventCommandFailed:
 		m.failed++
-		m.appendLog(fmt.Sprintf("✘ [%d/%d] 失败: %s", e.Index+1, e.Total, e.Message), logLineFailedStyle)
+		m.current = ""
+		line := fmt.Sprintf("✘ [%d/%d] 失败: %s", e.Index+1, e.Total, e.Message)
+		m.appendLog(line, logLineFailedStyle)
+		if it := m.fileAt(e.Index); it != nil {
+			it.state = fileFailed
+			it.logs = appendFileLog(it.logs, line, logLineFailedStyle)
+		}
 	}
 	var cmd tea.Cmd
 	if m.total > 0 {
 		cmd = m.bar.SetPercent(float64(m.done+m.failed) / float64(m.total))
 	}
-	m.logVp.GotoBottom()
+	m.syncLogPane()
 	return cmd
+}
+
+// fileAt 返回指定下标的文件条目，越界时返回 nil（事件 Index 与 files 顺序一致）。
+func (m model) fileAt(idx int) *fileItem {
+	if idx >= 0 && idx < len(m.files) {
+		return &m.files[idx]
+	}
+	return nil
+}
+
+// appendFileLog 向单个文件的日志缓冲追加一行（带样式），超过上限时丢弃旧行。
+func appendFileLog(logs []string, line string, s lipgloss.Style) []string {
+	logs = append(logs, s.Render(line))
+	if len(logs) > maxLogLines {
+		logs = logs[len(logs)-maxLogLines:]
+	}
+	return logs
+}
+
+// buildFileItems 从 Plan 生成的命令列表提取源文件与其命令。
+// 每条命令固定以 "-i <源文件>" 开头、以输出路径结尾（见 internal/ffmpeg 各批处理生成逻辑）。
+func buildFileItems(cmds [][]string) []fileItem {
+	items := make([]fileItem, 0, len(cmds))
+	for _, args := range cmds {
+		it := fileItem{cmd: ffmpeg.FormatCommand(args)}
+		if len(args) > 0 {
+			it.output = args[len(args)-1]
+		}
+		if len(args) >= 2 && args[0] == "-i" {
+			it.input = args[1]
+		}
+		items = append(items, it)
+	}
+	return items
 }
 
 func (m *model) appendLog(line string, s lipgloss.Style) {
 	m.logs = append(m.logs, s.Render(line))
-	if len(m.logs) > 1000 {
-		m.logs = m.logs[len(m.logs)-1000:]
-	}
-	m.logVp.SetContent(strings.Join(m.logs, "\n"))
-}
-
-// ---------- View ----------
-
-// View 实现 tea.Model，将整页内容放入备用屏幕缓冲（全屏模式）。
-func (m model) View() tea.View {
-	v := tea.NewView(m.render())
-	v.AltScreen = true
-	return v
-}
-
-func (m model) render() string {
-	if m.width == 0 {
-		return "加载中..."
-	}
-
-	frame := panelStyle.Width(m.width - 2).Render(m.body())
-	return lipgloss.JoinVertical(lipgloss.Left, m.header(), frame, m.footer())
-}
-
-// stepLabels 返回当前操作组合下的流程步骤，与 afterAdvance / formBackPhase 的分流保持一致。
-func (m model) stepLabels() []string {
-	steps := []string{"操作"}
-	if m.ops.Convert {
-		steps = append(steps, "转码")
-	}
-	if m.ops.AddSubtitle {
-		steps = append(steps, "字幕")
-	}
-	return append(steps, "参数", "预览", "执行")
-}
-
-// currentStep 返回当前界面对应的步骤名。
-func (m model) currentStep() string {
-	switch m.phase {
-	case phaseFeature:
-		return "操作"
-	case phaseAdvance:
-		return "转码"
-	case phaseSubs, phaseSubEdit:
-		return "字幕"
-	case phaseForm:
-		return "参数"
-	case phasePreview:
-		return "预览"
-	default:
-		return "执行"
+	if len(m.logs) > maxLogLines {
+		m.logs = m.logs[len(m.logs)-maxLogLines:]
 	}
 }
 
-// header 顶部标题栏：左侧应用徽标，右侧显示流程步骤并高亮当前步骤。
-func (m model) header() string {
-	left := appBadgeStyle.Render("batcher")
-	if m.phase == phasePresets || m.phase == phasePresetEdit {
-		right := stepActiveStyle.Render("转码参数管理") + " "
-		gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 1)
-		return left + strings.Repeat(" ", gap) + right
-	}
-	cur := m.currentStep()
-	reached := true
-	var parts []string
-	for _, s := range m.stepLabels() {
-		switch {
-		case s == cur:
-			parts = append(parts, stepActiveStyle.Render(s))
-			reached = false
-		case reached:
-			parts = append(parts, stepDoneStyle.Render("✔ "+s))
-		default:
-			parts = append(parts, stepTodoStyle.Render(s))
-		}
-	}
-	right := strings.Join(parts, stepSepStyle.Render(" › "))
-	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 1)
-	return left + strings.Repeat(" ", gap) + right + " "
+// ---------- 左右分栏（预览/执行共用） ----------
+
+// bodyH 返回面板内部可用行数（去掉顶栏 1、底栏 2 与面板上下边框 2）。
+func (m model) bodyH() int {
+	return max(m.height-5, 3)
 }
 
-func (m model) body() string {
-	switch m.phase {
-	case phaseFeature:
-		return m.featureView()
-	case phaseAdvance:
-		return m.advanceView()
-	case phaseSubs:
-		return m.subsView()
-	case phaseSubEdit:
-		return m.subEditView()
-	case phaseForm:
-		return m.formView()
-	case phasePreview:
-		return m.previewView()
-	case phaseRunning:
-		return m.runningView()
-	case phaseResult:
-		return m.resultView()
-	case phasePresets:
-		return m.presetsView()
-	case phasePresetEdit:
-		return m.presetEditView()
+// resizePanes 依据终端宽高计算左右分栏与视口尺寸。
+func (m *model) resizePanes() {
+	// 面板内容宽度：终端宽 - 面板左右边框 2 - 内边距 2。
+	contentW := max(m.width-6, 10)
+	leftW := min(28, max(18, contentW*2/7))
+	// 保证右侧内容区至少 36 列，窄终端时压缩左侧。
+	if right := contentW - leftW - 1; right < 36 {
+		leftW = max(14, contentW-37)
 	}
-	return ""
+	m.leftW = max(leftW, 10)
+	m.rightW = max(contentW-m.leftW-1, 10)
+
+	m.vp.SetWidth(m.rightW)
+	m.vp.SetHeight(max(m.bodyH()-1, 3))
+	m.logVp.SetWidth(m.rightW)
+	m.logVp.SetHeight(max(m.bodyH()-2, 3))
+	m.bar.SetWidth(max(m.rightW-4, 10))
 }
 
-func (m model) presetsView() string {
-	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render("转码参数管理") + "\n")
-	b.WriteString(subtitleStyle.Render("a 新增，e/Enter 编辑，d 删除，shift+↑/↓ 调整顺序；顺序即转码页中的显示顺序") + "\n\n")
-	if len(m.presets) == 0 {
-		b.WriteString("  " + descStyle.Render("暂无常用参数，按 a 新增一条") + "\n")
+// moveFilePane 移动左侧文件列表光标（0 为“全部”汇总项）并刷新右侧内容。
+// 执行/结果阶段的手动切换会停止自动跟随。
+func (m *model) moveFilePane(delta int) tea.Cmd {
+	if len(m.files) == 0 {
+		return nil
 	}
-	for i, p := range m.presets {
-		cursor, style := "  ", normalStyle
-		if i == m.mgrCursor {
-			cursor = selectedMark.Render("▸ ")
-			style = selectedStyle
-		}
-		b.WriteString(fmt.Sprintf("%s%2d. %s\n", cursor, i+1, style.Render(p)))
+	next := min(len(m.files), max(0, m.fileCursor+delta))
+	if next == m.fileCursor {
+		return nil
 	}
-	if m.statusMsg != "" {
-		b.WriteString("\n  " + statusStyle.Render(m.statusMsg) + "\n")
+	m.fileCursor = next
+	if m.phase == phaseRunning {
+		m.fileFollow = false
 	}
-	return b.String()
+	m.syncPreview()
+	m.vp.GotoTop()
+	m.syncLogPane()
+	return nil
 }
 
-func (m model) presetEditView() string {
-	var b strings.Builder
-	title := "新增转码参数"
-	if m.mgrEditIndex >= 0 {
-		title = fmt.Sprintf("编辑第 %d 条转码参数", m.mgrEditIndex+1)
+// previewContent 返回右侧预览視口的原始文本：选中“全部”时为汇总列表，否则为该文件命令。
+func (m model) previewContent() string {
+	if idx := m.fileCursor - 1; idx >= 0 && idx < len(m.files) {
+		it := m.files[idx]
+		var b strings.Builder
+		fmt.Fprintf(&b, "输出: %s\n\n", it.output)
+		b.WriteString(it.cmd)
+		return b.String()
 	}
-	b.WriteString(taskTitleStyle.Render(title) + "\n")
-	b.WriteString(subtitleStyle.Render("Enter 保存，esc 取消；参数会按空格拆分后传给 ffmpeg") + "\n\n")
-	b.WriteString("  " + labelFocusedStyle.Render("高级参数") + " " + m.mgrInput.View() + "\n")
-	if m.mgrErr != "" {
-		b.WriteString("  " + strings.Repeat(" ", 18) + errorStyle.Render("× "+m.mgrErr) + "\n")
-	}
-	return b.String()
+	return m.previewSummary
 }
 
-func (m model) featureView() string {
-	var b strings.Builder
-	b.WriteString(subtitleStyle.Render("勾选本次批处理要执行的操作（可任意组合，一次生成一条 ffmpeg 命令）：") + "\n\n")
-	for i, feat := range features {
-		mark := uncheckedStyle.Render("[ ]")
-		if isSelected(m.ops, feat.hint) {
-			mark = checkedStyle.Render("[✔]")
-		}
-		cursor, style := "  ", normalStyle
-		if i == m.featCursor {
-			cursor = selectedMark.Render("▸ ")
-			style = selectedStyle
-		}
-		b.WriteString(cursor + mark + " " + style.Render(feat.hint) + "\n")
-		if d, ok := featureDescs[feat.hint]; ok && i == m.featCursor {
-			b.WriteString("      " + descStyle.Render(d) + "\n")
-		}
+// syncPreview 按左侧选中项刷新右侧预览内容（长命令按内容区宽度折行）。
+func (m *model) syncPreview() {
+	if !m.previewDone || m.planErr != nil {
+		return
 	}
-	b.WriteString("\n  已选择: " + selectedStyle.Render(displaySel(m.ops)) + "\n")
-	if m.featErr != "" {
-		b.WriteString("  " + errorStyle.Render("× "+m.featErr) + "\n")
-	}
-	return b.String()
+	m.vp.SetContent(wrapText(m.previewContent(), m.rightW))
 }
 
-func isSelected(sel ffmpeg.Selection, hint string) bool {
-	switch hint {
-	case "视频转码":
-		return sel.Convert
-	case "添加字幕":
-		return sel.AddSubtitle
-	case "添加字体":
-		return sel.AddFonts
+// syncLogPane 按左侧选中项刷新右侧日志视图并贴底，跟随最新输出。
+func (m *model) syncLogPane() {
+	if len(m.files) == 0 {
+		m.logVp.SetContent("")
+		return
 	}
-	return false
+	var s string
+	if idx := m.fileCursor - 1; idx < 0 {
+		s = strings.Join(m.logs, "\n")
+	} else if idx < len(m.files) {
+		s = strings.Join(m.files[idx].logs, "\n")
+	}
+	m.logVp.SetContent(wrapText(s, m.rightW))
+	m.logVp.GotoBottom()
 }
 
-func (m model) advanceView() string {
-	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render("视频转码 · 高级参数") + "\n")
-	b.WriteString(subtitleStyle.Render("↑/↓ 选择，Enter 使用所选继续；d 删除选中的常用参数；常用参数也可在后续表单页按 ctrl+s 保存") + "\n\n")
-	for i, p := range m.presets {
-		cursor, style := "  ", normalStyle
-		if i == m.presetCursor {
-			cursor = selectedMark.Render("▸ ")
-			style = selectedStyle
-		}
-		b.WriteString(cursor + style.Render(p) + "\n")
+// quitCleanup 退出前取消仍在执行的批处理。
+func (m model) quitCleanup() {
+	if m.cancel != nil {
+		m.cancel()
 	}
-	cursor, style := "  ", normalStyle
-	if m.presetCursor == len(m.presets) {
-		cursor = selectedMark.Render("▸ ")
-		style = selectedStyle
-	}
-	b.WriteString(cursor + style.Render("(手动输入参数)") + "\n")
-	if len(m.presets) == 0 {
-		b.WriteString("  " + descStyle.Render("尚无常用参数，可选择手动输入，之后在表单页按 ctrl+s 保存") + "\n")
-	}
-	if m.statusMsg != "" {
-		b.WriteString("\n  " + statusStyle.Render(m.statusMsg) + "\n")
-	}
-	return b.String()
-}
-
-func (m model) subsView() string {
-	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render("添加字幕 · 字幕列表") + "\n")
-	b.WriteString(subtitleStyle.Render("字幕按 <视频名>.<后缀> 或 <视频名>.<标记>.<后缀> 匹配文件") + "\n\n")
-	if len(m.subs) == 0 {
-		b.WriteString("  " + descStyle.Render("字幕列表为空，按 a 新增一条") + "\n")
-	}
-	for i, sub := range m.subs {
-		cursor, style := "  ", normalStyle
-		if i == m.subCursor {
-			cursor = selectedMark.Render("▸ ")
-			style = selectedStyle
-		}
-		b.WriteString(fmt.Sprintf("%s%d. %s  语言: %s  标题: %s\n", cursor, i+1,
-			style.Render("."+sub.Suffix), sub.Lang, sub.Title))
-	}
-	if m.subsErr != "" {
-		b.WriteString("\n  " + errorStyle.Render("× "+m.subsErr) + "\n")
-	}
-	return b.String()
-}
-
-func (m model) subEditView() string {
-	var b strings.Builder
-	title := "新增字幕"
-	if m.subEditIndex >= 0 {
-		title = fmt.Sprintf("编辑第 %d 条字幕", m.subEditIndex+1)
-	}
-	b.WriteString(taskTitleStyle.Render(title) + "\n")
-	b.WriteString(subtitleStyle.Render("↑/↓ 或 Tab 切换字段，Enter 编辑与保存，esc 取消返回") + "\n\n")
-	for i := range m.subFields {
-		f := &m.subFields[i]
-		lbl := labelStyle.Render(f.def.label)
-		if i == m.editFocus {
-			lbl = labelFocusedStyle.Render(f.def.label)
-		}
-		b.WriteString("  " + lbl + " " + f.input.View() + "\n")
-		if f.err != "" {
-			b.WriteString("  " + strings.Repeat(" ", 18) + errorStyle.Render("× "+f.err) + "\n")
-		}
-	}
-	return b.String()
-}
-
-func (m model) formView() string {
-	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render(displaySel(m.ops)+" · 参数填写") + "\n")
-	b.WriteString(subtitleStyle.Render("↑/↓ 或 Tab 切换字段，Enter 编辑之下一项、最后一项直接提交，esc 返回") + "\n\n")
-
-	for i := range m.fields {
-		f := &m.fields[i]
-		lbl := labelStyle.Render(f.def.label)
-		if i == m.focus {
-			lbl = labelFocusedStyle.Render(f.def.label)
-		}
-		b.WriteString("  " + lbl + " " + f.input.View() + "\n")
-		if f.err != "" {
-			b.WriteString("  " + strings.Repeat(" ", 18) + errorStyle.Render("× "+f.err) + "\n")
-		}
-	}
-	if m.ops.AddSubtitle {
-		var parts []string
-		for i, sub := range m.subs {
-			parts = append(parts, fmt.Sprintf("%d.%s(%s)", i+1, sub.Suffix, sub.Lang))
-		}
-		b.WriteString("  " + labelStyle.Render("字幕列表") + " " + descStyle.Render(strings.Join(parts, "  ")) + "\n")
-	}
-	b.WriteString("\n")
-	if m.planErr != nil {
-		b.WriteString("  " + errorStyle.Render("× "+m.planErr.Error()) + "\n")
-	}
-	if m.statusMsg != "" {
-		b.WriteString("  " + statusStyle.Render(m.statusMsg) + "\n")
-	}
-	return b.String()
-}
-
-func (m model) previewView() string {
-	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render(displaySel(m.ops)+" · 命令预览") + "\n")
-	switch {
-	case m.planErr != nil:
-		b.WriteString("  " + errorStyle.Render("× 生成命令失败: "+m.planErr.Error()) + "\n\n")
-		b.WriteString("  按 Enter / esc 返回修改参数。\n")
-	case !m.previewDone:
-		b.WriteString("  " + subtitleStyle.Render(m.preview) + "\n")
-	default:
-		b.WriteString(m.vp.View())
-	}
-	return b.String()
-}
-
-func (m model) runningView() string {
-	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render(displaySel(m.ops)+" · 执行中") + "\n")
-
-	if m.total > 0 {
-		b.WriteString("  " + m.bar.View() + "\n")
-		b.WriteString(fmt.Sprintf("  进度: %d/%d 完成，%d 失败\n\n", m.done, m.total, m.failed))
-	} else {
-		b.WriteString("  " + subtitleStyle.Render("正在启动...") + "\n\n")
-	}
-	if m.current != "" {
-		b.WriteString("  " + subtitleStyle.Render("当前: "+m.current) + "\n")
-	}
-	b.WriteString(m.logVp.View() + "\n")
-	return b.String()
-}
-
-func (m model) resultView() string {
-	var b strings.Builder
-	if m.runErr != nil {
-		b.WriteString("  " + errorStyle.Render(fmt.Sprintf("× 批处理失败: %v", m.runErr)) + "\n\n")
-	} else {
-		b.WriteString("  " + successStyle.Render(fmt.Sprintf("✔ 批处理完成：%d 个任务全部成功", m.done)) + "\n\n")
-	}
-	b.WriteString("  r 重新生成并执行    b 返回参数配置    q 退出\n\n")
-
-	if len(m.logs) > 0 {
-		b.WriteString(strings.Join(m.logs[max(0, len(m.logs)-15):], "\n"))
-	}
-	return b.String()
-}
-
-func (m model) footer() string {
-	var hints []string
-	switch m.phase {
-	case phaseFeature:
-		hints = []string{"↑/↓ 切换", "space 勾选", "Enter 下一步", "p 参数管理", "q 退出"}
-	case phaseAdvance:
-		hints = []string{"↑/↓ 选择", "Enter 使用", "d 删除", "p 参数管理", "esc 返回"}
-	case phasePresets:
-		hints = []string{"a 新增", "e 编辑", "d 删除", "shift+↑/↓ 排序", "esc 返回"}
-	case phasePresetEdit:
-		hints = []string{"Enter 保存", "esc 取消"}
-	case phaseSubs:
-		hints = []string{"a 新增", "e 编辑", "d 删除", "↑/↓ 选择", "Enter 继续", "esc 返回"}
-	case phaseSubEdit:
-		hints = []string{"↑/↓/Tab 切换", "Enter 保存", "esc 取消"}
-	case phaseForm:
-		hints = []string{"↑/↓/Tab 切换", "Enter 下一个/提交", "ctrl+s 保存参数预设", "esc 返回"}
-	case phasePreview:
-		hints = []string{"Enter 开始执行", "esc 返回", "↑/↓ 滚动"}
-	case phaseRunning:
-		hints = []string{"q/esc 中止并退出", "↑/↓ 滚动日志"}
-	case phaseResult:
-		hints = []string{"r 重新执行", "b 返回配置", "q 退出"}
-	}
-	divider := dividerStyle.Render(strings.Repeat("─", max(m.width, 1)))
-	keys := make([]string, 0, len(hints))
-	for _, h := range hints {
-		k, v, ok := strings.Cut(h, " ")
-		if !ok {
-			keys = append(keys, helpDescStyle.Render(h))
-			continue
-		}
-		keys = append(keys, helpKeyStyle.Render(k)+" "+helpDescStyle.Render(v))
-	}
-	return divider + "\n" + " " + strings.Join(keys, helpSepStyle.Render("  ·  "))
 }
