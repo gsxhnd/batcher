@@ -9,7 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/presets"
 )
 
 // ---------- View ----------
@@ -128,17 +128,13 @@ func (m model) featureView() string {
 	b.WriteString(subtitleStyle.Render("勾选本次批处理要执行的操作（可任意组合，一次生成一条 ffmpeg 命令）：") + "\n\n")
 	for i, feat := range features {
 		mark := uncheckedStyle.Render("[ ]")
-		if isSelected(m.ops, feat.hint) {
+		if feat.selected(m.ops) {
 			mark = checkedStyle.Render("[✔]")
 		}
-		cursor, style := "  ", normalStyle
-		if i == m.featCursor {
-			cursor = selectedMark.Render("▸ ")
-			style = selectedStyle
-		}
-		b.WriteString(cursor + mark + " " + style.Render(feat.hint) + "\n")
-		if d, ok := featureDescs[feat.hint]; ok && i == m.featCursor {
-			b.WriteString("      " + descStyle.Render(d) + "\n")
+		focused := i == m.featCursor
+		b.WriteString(cursorMark(focused) + mark + " " + itemStyle(focused).Render(feat.label) + "\n")
+		if focused {
+			b.WriteString("      " + descStyle.Render(feat.desc) + "\n")
 		}
 	}
 	b.WriteString("\n  已选择: " + selectedStyle.Render(displaySel(m.ops)) + "\n")
@@ -148,18 +144,29 @@ func (m model) featureView() string {
 	return b.String()
 }
 
-// presetRows 渲染一条转码参数列表项，extra 为追加在参数后的灰色说明。
-func presetRows(cursor int, args, extra string) string {
-	mark, style := "  ", normalStyle
-	if cursor >= 0 {
-		mark = selectedMark.Render("▸ ")
-		style = selectedStyle
+// cursorMark 返回列表行的光标前缀。
+func cursorMark(focused bool) string {
+	if focused {
+		return selectedMark.Render("▸ ")
 	}
-	line := style.Render(args)
+	return "  "
+}
+
+// itemStyle 返回列表行文本的样式：聚焦行高亮。
+func itemStyle(focused bool) lipgloss.Style {
+	if focused {
+		return selectedStyle
+	}
+	return normalStyle
+}
+
+// presetRows 渲染一条转码参数列表项，extra 为追加在参数后的灰色说明。
+func presetRows(focused bool, args, extra string) string {
+	line := itemStyle(focused).Render(args)
 	if extra != "" {
 		line += "  " + descStyle.Render(extra)
 	}
-	return mark + line
+	return cursorMark(focused) + line
 }
 
 func (m model) advanceView() string {
@@ -169,21 +176,13 @@ func (m model) advanceView() string {
 
 	// 内置预设（只读）
 	for i, bp := range m.builtins {
-		cursor := -1
-		if i == m.presetCursor {
-			cursor = i
-		}
-		b.WriteString(presetRows(cursor, bp.Args, bp.Name+" · 内置") + "\n")
+		b.WriteString(presetRows(i == m.presetCursor, bp.Args, bp.Name+" · 内置") + "\n")
 	}
 
-	// 用户自定义预设
+	// 用户自定义预设：名称为主标签，参数作为说明；无名称时直接显示参数。
 	for i, p := range m.presets {
-		idx := len(m.builtins) + i
-		cursor := -1
-		if idx == m.presetCursor {
-			cursor = idx
-		}
-		line := presetRows(cursor, p, "自定义")
+		focused := m.advanceUserOffset()+i == m.presetCursor
+		line := presetRows(focused, presetTitle(p), presetDetail(p, "自定义"))
 		if i == m.delPendingIdx {
 			line += "  " + errorStyle.Render("× 再次按 d 确认删除")
 		}
@@ -191,16 +190,12 @@ func (m model) advanceView() string {
 	}
 
 	// 手动输入
-	manual := len(m.builtins) + len(m.presets)
-	cursor := -1
-	if m.presetCursor == manual {
-		cursor = manual
-	}
+	manual := m.advanceUserOffset() + len(m.presets)
+	extra := ""
 	if len(m.presets) == 0 {
-		b.WriteString(presetRows(cursor, "(手动输入参数)", "或按 a 从选中的内置预设复制") + "\n")
-	} else {
-		b.WriteString(presetRows(cursor, "(手动输入参数)", "") + "\n")
+		extra = "或按 a 从选中的内置预设复制"
 	}
+	b.WriteString(presetRows(m.presetCursor == manual, "(手动输入参数)", extra) + "\n")
 
 	b.WriteString(statusLine(m.statusMsg))
 	return b.String()
@@ -217,19 +212,18 @@ func (m model) presetsView() string {
 		b.WriteString(fmt.Sprintf("    %2d. %s\n", i+1, normalStyle.Render(bp.Args)+descStyle.Render("  "+bp.Name)))
 	}
 
-	// 用户自定义预设
+	// 用户自定义预设：每条占一行，名称在前、参数在后，名称为空时只显示参数。
 	b.WriteString("\n  " + sectionStyle.Render(fmt.Sprintf("自定义预设（%d 条）", len(m.presets))) + "\n")
 	if len(m.presets) == 0 {
 		b.WriteString("    " + descStyle.Render("暂无自定义预设，按 a 新增一条") + "\n")
 	}
 	for i, p := range m.presets {
-		cursor, style := "  ", normalStyle
-		if i == m.mgrCursor {
-			cursor = selectedMark.Render("▸ ")
-			style = selectedStyle
+		focused := i == m.mgrCursor
+		line := fmt.Sprintf("%s%2d. %s", cursorMark(focused), i+1, itemStyle(focused).Render(presetTitle(p)))
+		if p.Name != "" {
+			line += "  " + descStyle.Render(p.Args)
 		}
-		line := fmt.Sprintf("%s%2d. %s", cursor, i+1, style.Render(p))
-		if i == m.mgrCursor && i == m.delPendingIdx {
+		if focused && i == m.delPendingIdx {
 			line += "  " + errorStyle.Render("× 再次按 d 确认删除")
 		}
 		b.WriteString(line + "\n")
@@ -240,6 +234,22 @@ func (m model) presetsView() string {
 	return b.String()
 }
 
+// presetTitle 返回预设列表中的主标签：有名称用名称，否则用参数文本。
+func presetTitle(p presets.Preset) string {
+	if p.Name != "" {
+		return p.Name
+	}
+	return p.Args
+}
+
+// presetDetail 返回预设列表中的说明文字：有名称时附上参数，无名称时只标注来源。
+func presetDetail(p presets.Preset, source string) string {
+	if p.Name != "" {
+		return p.Args
+	}
+	return source
+}
+
 func (m model) presetEditView() string {
 	var b strings.Builder
 	title := "新增转码参数"
@@ -247,24 +257,19 @@ func (m model) presetEditView() string {
 		title = fmt.Sprintf("编辑第 %d 条转码参数", m.mgrEditIndex+1)
 	}
 	b.WriteString(taskTitleStyle.Render(title) + "\n")
-	b.WriteString(subtitleStyle.Render("Enter 保存，esc 取消；参数会按空格拆分后传给 ffmpeg") + "\n\n")
-	b.WriteString("  " + labelFocusedStyle.Render("高级参数") + " " + m.mgrInput.View() + "\n")
+	b.WriteString(subtitleStyle.Render("↑/↓ 或 Tab 切换字段，Enter 下一项 / 最后一项保存，esc 取消；参数会按空格拆分后传给 ffmpeg") + "\n\n")
+	for i := range m.mgrFields {
+		f := &m.mgrFields[i]
+		lbl := labelStyle.Render(f.def.label)
+		if i == m.mgrFocus {
+			lbl = labelFocusedStyle.Render(f.def.label)
+		}
+		b.WriteString("  " + lbl + " " + f.input.View() + "\n")
+	}
 	if m.mgrErr != "" {
 		b.WriteString("  " + strings.Repeat(" ", 18) + errorStyle.Render("× "+m.mgrErr) + "\n")
 	}
 	return b.String()
-}
-
-func isSelected(sel ffmpeg.Selection, hint string) bool {
-	switch hint {
-	case "视频转码":
-		return sel.Convert
-	case "添加字幕":
-		return sel.AddSubtitle
-	case "添加字体":
-		return sel.AddFonts
-	}
-	return false
 }
 
 func (m model) subsView() string {
@@ -275,13 +280,9 @@ func (m model) subsView() string {
 		b.WriteString("  " + descStyle.Render("字幕列表为空，按 a 新增一条") + "\n")
 	}
 	for i, sub := range m.subs {
-		cursor, style := "  ", normalStyle
-		if i == m.subCursor {
-			cursor = selectedMark.Render("▸ ")
-			style = selectedStyle
-		}
-		b.WriteString(fmt.Sprintf("%s%d. %s  语言: %s  标题: %s\n", cursor, i+1,
-			style.Render("."+sub.Suffix), sub.Lang, sub.Title))
+		focused := i == m.subCursor
+		b.WriteString(fmt.Sprintf("%s%d. %s  语言: %s  标题: %s\n", cursorMark(focused), i+1,
+			itemStyle(focused).Render("."+sub.Suffix), sub.Lang, sub.Title))
 	}
 	if m.subsErr != "" {
 		b.WriteString("\n  " + errorStyle.Render("× "+m.subsErr) + "\n")
@@ -447,11 +448,7 @@ func (m model) filePane() string {
 
 // fileRow 渲染左侧列表一行；idx 为文件下标（-1 表示“全部”）。
 func (m model) fileRow(idx int, name string) string {
-	cursor, style := "  ", normalStyle
-	if idx+1 == m.fileCursor {
-		cursor = selectedMark.Render("▸ ")
-		style = selectedStyle
-	}
+	focused := idx+1 == m.fileCursor
 	// 执行/结果阶段在“全部”行尾显示汇总进度。
 	if idx < 0 && m.total > 0 && (m.phase == phaseRunning || m.phase == phaseResult) {
 		name = fmt.Sprintf("全部（%d/%d）", m.done+m.failed, m.total)
@@ -463,7 +460,7 @@ func (m model) fileRow(idx int, name string) string {
 		}
 		name += " " + fileStatusMark(state)
 	}
-	return cursor + style.Render(ansi.Truncate(name, max(m.leftW-3, 4), "…")) + "\n"
+	return cursorMark(focused) + itemStyle(focused).Render(ansi.Truncate(name, max(m.leftW-3, 4), "…")) + "\n"
 }
 
 // fileStatusMark 渲染文件执行状态标记。
@@ -506,7 +503,7 @@ func (m model) footer() string {
 	case phasePresets:
 		hints = []string{"a 新增", "e 编辑", "d×2 删除", "shift+↑/↓ 排序", "esc 返回"}
 	case phasePresetEdit:
-		hints = []string{"Enter 保存", "esc 取消"}
+		hints = []string{"↑/↓/Tab 切换", "Enter 下一个/保存", "esc 取消"}
 	case phaseSubs:
 		hints = []string{"a 新增", "e 编辑", "d 删除", "↑/↓ 选择", "Enter 继续", "esc 返回"}
 	case phaseSubEdit:

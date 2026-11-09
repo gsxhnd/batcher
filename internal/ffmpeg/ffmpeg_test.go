@@ -325,7 +325,7 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 	}
 }
 
-func Test_videoBatch_filterOutput(t *testing.T) {
+func Test_videoBatch_outputPaths(t *testing.T) {
 	type args struct {
 		outPath   string
 		outFormat string
@@ -355,7 +355,7 @@ func Test_videoBatch_filterOutput(t *testing.T) {
 				},
 			}
 
-			got := vb.filterOutput(tt.inputPath)
+			got := vb.outputPaths(tt.inputPath)
 			assert.Equal(t, tt.want, got)
 		})
 	}

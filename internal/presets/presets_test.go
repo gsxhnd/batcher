@@ -19,7 +19,10 @@ func TestLoadFrom_FileNotExists(t *testing.T) {
 func TestSaveToAndLoadFrom(t *testing.T) {
 	dir := t.TempDir()
 
-	want := []string{"-c:v h265 -crf 20 -c:a copy", "-c:v libx264 -preset fast"}
+	want := []Preset{
+		{Name: "H.265 通用", Args: "-c:v h265 -crf 20 -c:a copy"},
+		{Name: "", Args: "-c:v libx264 -preset fast"},
+	}
 	require.NoError(t, SaveTo(dir, want))
 
 	// 保存后应创建预设文件夹与文件
@@ -34,30 +37,46 @@ func TestSaveToAndLoadFrom(t *testing.T) {
 func TestSaveToNormalizesAndDedupes(t *testing.T) {
 	dir := t.TempDir()
 
-	in := []string{
-		"  -c:v   h265  -crf 20  ",
-		"-c:v h265 -crf 20", // 规范化后与前一条重复
-		"",
-		"   ",
-		"-c copy",
+	in := []Preset{
+		{Name: "  画质 A  ", Args: "  -c:v   h265  -crf 20  "},
+		{Name: "重复", Args: "-c:v h265 -crf 20"}, // 规范化后参数与前一条重复
+		{Name: "空参数", Args: "   "},
+		{Name: "只有名字", Args: ""},
+		{Name: "无损", Args: "-c copy"},
 	}
 	require.NoError(t, SaveTo(dir, in))
 
 	got, err := LoadFrom(dir)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"-c:v h265 -crf 20", "-c copy"}, got, "应去空白、去重、保序")
+	assert.Equal(t, []Preset{
+		{Name: "画质 A", Args: "-c:v h265 -crf 20"},
+		{Name: "无损", Args: "-c copy"},
+	}, got, "应去空白、按参数去重、丢弃空参数、保序")
+}
+
+func TestLoadFromLegacyStringList(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `["-c:v h265 -crf 20", "-c copy"]`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, PresetFile), []byte(legacy), 0o644))
+
+	got, err := LoadFrom(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []Preset{
+		{Args: "-c:v h265 -crf 20"},
+		{Args: "-c copy"},
+	}, got, "旧版字符串列表应读作未命名预设")
 }
 
 func TestUpsert(t *testing.T) {
-	base := []string{"-c:v h265 -crf 20 -c:a copy"}
+	base := []Preset{{Name: "H.265", Args: "-c:v h265 -crf 20 -c:a copy"}}
 
-	got := Upsert(base, "  -c:v   h265  -crf 20  -c:a copy ")
-	assert.Equal(t, base, got, "重复参数不应重复添加")
+	got := Upsert(base, Preset{Name: "另起名", Args: "  -c:v   h265  -crf 20  -c:a copy "})
+	assert.Equal(t, base, got, "参数重复时保留原条目（名称不覆盖）")
 
-	got = Upsert(base, "-c:v nvenc -cq 23")
+	got = Upsert(base, Preset{Name: "NVENC", Args: "-c:v nvenc -cq 23"})
 	assert.Len(t, got, 2)
 
-	assert.Equal(t, base, Upsert(base, "   "), "空白参数不应添加")
+	assert.Equal(t, base, Upsert(base, Preset{Name: "x", Args: "   "}), "空白参数不应添加")
 }
 
 func TestBuiltins(t *testing.T) {

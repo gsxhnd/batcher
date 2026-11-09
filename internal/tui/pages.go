@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/gsxhnd/batcher/internal/presets"
@@ -58,7 +57,7 @@ func (m *model) updateFeature(msg tea.Msg) tea.Cmd {
 	case "down", "j":
 		m.featCursor = (m.featCursor + 1) % len(features)
 	case " ", "space":
-		features[m.featCursor].apply(&m.ops)
+		features[m.featCursor].toggle(&m.ops)
 		if m.ops.String() != "无" {
 			m.featErr = ""
 		}
@@ -114,9 +113,10 @@ func (m *model) updateAdvance(msg tea.Msg) tea.Cmd {
 	case "a":
 		// 从选中的内置预设复制一份到自定义预设，随后可微调参数。
 		if m.presetCursor < offset {
-			return m.openPresetEditWith(-1, m.builtins[m.presetCursor].Args)
+			b := m.builtins[m.presetCursor]
+			return m.openPresetEditWith(-1, presets.Preset{Name: b.Name, Args: b.Args})
 		}
-		return m.openPresetEditWith(-1, "")
+		return m.openPresetEditWith(-1, presets.Preset{})
 	case "p":
 		return m.openPresets(phaseAdvance)
 	case "enter":
@@ -124,7 +124,7 @@ func (m *model) updateAdvance(msg tea.Msg) tea.Cmd {
 		case m.presetCursor < offset:
 			m.manualAdvance = m.builtins[m.presetCursor].Args
 		case m.presetCursor < manual:
-			m.manualAdvance = m.presets[m.presetCursor-offset]
+			m.manualAdvance = m.presets[m.presetCursor-offset].Args
 		default:
 			// 手动输入：进入主表单后自行填写高级参数。
 			m.manualAdvance = ""
@@ -179,7 +179,7 @@ func (m *model) updatePresets(msg tea.Msg) tea.Cmd {
 			m.mgrCursor = (m.mgrCursor + 1) % n
 		}
 	case "a", "n":
-		return m.openPresetEditWith(-1, "")
+		return m.openPresetEditWith(-1, presets.Preset{})
 	case "e", "enter":
 		if n > 0 {
 			return m.openPresetEditWith(m.mgrCursor, m.presets[m.mgrCursor])
@@ -241,17 +241,22 @@ func (m *model) afterPresetsBack() tea.Cmd {
 	return nil
 }
 
-// openPresetEditWith 打开单条转码参数编辑，index=-1 表示新增，initVal 为输入框初始值。
-func (m *model) openPresetEditWith(index int, initVal string) tea.Cmd {
+// openPresetEditWith 打开单条转码参数编辑，index=-1 表示新增，p 为表单的初始值。
+func (m *model) openPresetEditWith(index int, p presets.Preset) tea.Cmd {
 	m.mgrEditIndex = index
 	m.mgrErr = ""
 	m.delPendingIdx = -1
-	m.mgrInput = textinput.New()
-	m.mgrInput.Placeholder = "例如: -c:v h265 -crf 20 -c:a copy"
-	m.mgrInput.CharLimit = 512
-	m.mgrInput.SetValue(initVal)
+	m.mgrFields = make([]field, 0, len(presetFieldDefs))
+	values := map[string]string{"preset_name": p.Name, "preset_args": p.Args}
+	for _, def := range presetFieldDefs {
+		nf := newField(def)
+		nf.applyPresetDefaults()
+		nf.input.SetValue(values[def.key])
+		m.mgrFields = append(m.mgrFields, nf)
+	}
+	m.mgrFocus = 0
 	m.phase = phasePresetEdit
-	return m.mgrInput.Focus()
+	return focusField(m.mgrFields, m.mgrFocus)
 }
 
 func (m *model) updatePresetEdit(msg tea.Msg) tea.Cmd {
@@ -259,38 +264,54 @@ func (m *model) updatePresetEdit(msg tea.Msg) tea.Cmd {
 	if !ok {
 		return nil
 	}
+	last := len(m.mgrFields) - 1
 	switch key.String() {
 	case "esc":
 		m.phase = phasePresets
 		return nil
+	case "tab", "down":
+		m.mgrFocus = (m.mgrFocus + 1) % len(m.mgrFields)
+		return focusField(m.mgrFields, m.mgrFocus)
+	case "shift+tab", "up":
+		m.mgrFocus = (m.mgrFocus - 1 + len(m.mgrFields)) % len(m.mgrFields)
+		return focusField(m.mgrFields, m.mgrFocus)
 	case "enter":
-		return m.savePresetEdit()
+		if m.mgrFocus == last {
+			return m.savePresetEdit()
+		}
+		m.mgrFocus++
+		return focusField(m.mgrFields, m.mgrFocus)
 	default:
 		var cmd tea.Cmd
-		m.mgrInput, cmd = m.mgrInput.Update(msg)
+		m.mgrFields[m.mgrFocus].input, cmd = m.mgrFields[m.mgrFocus].input.Update(msg)
 		return cmd
 	}
 }
 
-// savePresetEdit 校验并保存编辑结果；空参数与已存在的重复参数会被拒绝。
+// savePresetEdit 校验并保存编辑结果：参数不能为空，且参数文本不能与其他预设重复。
 func (m *model) savePresetEdit() tea.Cmd {
-	args := presets.Trim(m.mgrInput.Value())
-	if args == "" {
-		m.mgrErr = "参数不能为空"
-		return nil
+	entry := presets.Preset{
+		Name: strings.TrimSpace(m.mgrFields[0].Value()),
+		Args: presets.Trim(m.mgrFields[1].Value()),
+	}
+	if entry.Args == "" {
+		m.mgrErr = "高级参数不能为空"
+		m.mgrFocus = len(m.mgrFields) - 1
+		return focusField(m.mgrFields, m.mgrFocus)
 	}
 	for i, p := range m.presets {
-		if p == args && i != m.mgrEditIndex {
+		if p.Args == entry.Args && i != m.mgrEditIndex {
 			m.mgrErr = "已存在相同的参数"
-			return nil
+			m.mgrFocus = len(m.mgrFields) - 1
+			return focusField(m.mgrFields, m.mgrFocus)
 		}
 	}
 	if m.mgrEditIndex >= 0 && m.mgrEditIndex < len(m.presets) {
-		m.presets[m.mgrEditIndex] = args
+		m.presets[m.mgrEditIndex] = entry
 		m.mgrCursor = m.mgrEditIndex
 		m.persistPresets("已更新")
 	} else {
-		m.presets = append(m.presets, args)
+		m.presets = append(m.presets, entry)
 		m.mgrCursor = len(m.presets) - 1
 		m.persistPresets("已新增")
 	}
@@ -381,6 +402,7 @@ func (m *model) openSubEdit(index int) tea.Cmd {
 
 	for i, def := range subFieldDefs {
 		nf := newField(def)
+		nf.applySubDefaults()
 		switch def.key {
 		case "sub_suffix":
 			nf.input.SetValue(entry.Suffix)
@@ -429,15 +451,7 @@ func (m *model) updateSubEdit(msg tea.Msg) tea.Cmd {
 }
 
 func (m *model) refocusSubEdit() tea.Cmd {
-	var cmd tea.Cmd
-	for i := range m.subFields {
-		if i == m.editFocus {
-			cmd = m.subFields[i].input.Focus()
-		} else {
-			m.subFields[i].input.Blur()
-		}
-	}
-	return cmd
+	return focusField(m.subFields, m.editFocus)
 }
 
 // saveSubEdit 校验并保存正在编辑的字幕条目。
@@ -545,7 +559,7 @@ func (m *model) saveAdvancePreset() tea.Cmd {
 		m.statusMsg = "× 未勾选“视频转码”，无需保存高级参数"
 		return nil
 	}
-	m.presets = presets.Upsert(m.presets, args)
+	m.presets = presets.Upsert(m.presets, presets.Preset{Args: args})
 	if err := presets.Save(m.presets); err != nil {
 		m.statusMsg = "× 保存失败: " + err.Error()
 		return nil
@@ -555,12 +569,17 @@ func (m *model) saveAdvancePreset() tea.Cmd {
 }
 
 func (m *model) refocus() tea.Cmd {
+	return focusField(m.fields, m.focus)
+}
+
+// focusField 聚焦 fields[focus] 并失焦其余字段，返回聚焦输入框的光标闪烁命令。
+func focusField(fields []field, focus int) tea.Cmd {
 	var cmd tea.Cmd
-	for i := range m.fields {
-		if i == m.focus {
-			cmd = m.fields[i].input.Focus()
+	for i := range fields {
+		if i == focus {
+			cmd = fields[i].input.Focus()
 		} else {
-			m.fields[i].input.Blur()
+			fields[i].input.Blur()
 		}
 	}
 	return cmd
@@ -606,9 +625,9 @@ func (m *model) updatePreview(msg tea.Msg) tea.Cmd {
 		}
 		return m.startRun()
 	case "up", "k":
-		return m.moveFilePane(-1)
+		m.moveFilePane(-1)
 	case "down", "j":
-		return m.moveFilePane(1)
+		m.moveFilePane(1)
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
@@ -651,17 +670,16 @@ func (m *model) updateRunning(msg tea.Msg) tea.Cmd {
 		m.quitCleanup()
 		return tea.Quit
 	case "up", "k":
-		return m.moveFilePane(-1)
+		m.moveFilePane(-1)
 	case "down", "j":
-		return m.moveFilePane(1)
+		m.moveFilePane(1)
 	case "f":
 		// 跳回正在执行的文件并恢复自动跟随。
-		if it := m.fileAt(m.runIdx); it != nil && it.state == fileRunning {
+		if m.runIdx >= 0 && m.runIdx < len(m.files) && m.files[m.runIdx].state == fileRunning {
 			m.fileFollow = true
 			m.fileCursor = m.runIdx + 1
 			m.syncLogPane()
 		}
-		return nil
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
 		var cmd tea.Cmd
 		m.logVp, cmd = m.logVp.Update(msg)
@@ -677,9 +695,9 @@ func (m *model) updateResult(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case "up", "k":
-		return m.moveFilePane(-1)
+		m.moveFilePane(-1)
 	case "down", "j":
-		return m.moveFilePane(1)
+		m.moveFilePane(1)
 	case "b", "esc":
 		m.phase = phaseForm
 		return m.refocus()

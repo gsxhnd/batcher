@@ -8,7 +8,6 @@ import (
 
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -31,31 +30,33 @@ const (
 	phasePresetEdit              // 单条转码参数编辑
 )
 
-// feature 描述组合选择界面中的一个可勾选项。
+// feature 描述组合选择界面中的一个可勾选操作。
 type feature struct {
-	hint  string
-	apply func(*ffmpeg.Selection)
+	label    string
+	desc     string
+	selected func(ffmpeg.Selection) bool
+	toggle   func(*ffmpeg.Selection)
 }
 
 var features = []feature{
 	{
-		hint:  "视频转码",
-		apply: func(s *ffmpeg.Selection) { s.Convert = !s.Convert },
+		label:    "视频转码",
+		desc:     "按“自定义参数 + 输出后缀”转码；参数可在下一步选择/保存常用预设",
+		selected: func(s ffmpeg.Selection) bool { return s.Convert },
+		toggle:   func(s *ffmpeg.Selection) { s.Convert = !s.Convert },
 	},
 	{
-		hint:  "添加字幕",
-		apply: func(s *ffmpeg.Selection) { s.AddSubtitle = !s.AddSubtitle },
+		label:    "添加字幕",
+		desc:     "把源目录下匹配视频名的字幕文件封装进视频，支持多条字幕",
+		selected: func(s ffmpeg.Selection) bool { return s.AddSubtitle },
+		toggle:   func(s *ffmpeg.Selection) { s.AddSubtitle = !s.AddSubtitle },
 	},
 	{
-		hint:  "添加字体",
-		apply: func(s *ffmpeg.Selection) { s.AddFonts = !s.AddFonts },
+		label:    "添加字体",
+		desc:     "把字体文件夹中的字体文件内嵌到视频（mkv 附带流）",
+		selected: func(s ffmpeg.Selection) bool { return s.AddFonts },
+		toggle:   func(s *ffmpeg.Selection) { s.AddFonts = !s.AddFonts },
 	},
-}
-
-var featureDescs = map[string]string{
-	"视频转码": "按“自定义参数 + 输出后缀”转码；参数可在下一步选择/保存常用预设",
-	"添加字幕": "把源目录下匹配视频名的字幕文件封装进视频，支持多条字幕",
-	"添加字体": "把字体文件夹中的字体文件内嵌到视频（mkv 附带流）",
 }
 
 // 文件任务的执行状态（左侧列表标记用）。
@@ -87,15 +88,16 @@ type model struct {
 
 	// 转码参数预设：内置（只读）在前，用户自定义在后
 	builtins      []presets.Builtin
-	presets       []string
+	presets       []presets.Preset
 	presetCursor  int
 	manualAdvance string
 	statusMsg     string // 界面上的临时提示（保存成功等）
 
 	// 转码参数管理页（仅管理用户自定义预设）
 	mgrCursor    int
-	mgrEditIndex int             // 当前编辑的预设下标，-1 表示新增
-	mgrInput     textinput.Model // 编辑中的参数文本
+	mgrEditIndex int     // 当前编辑的预设下标，-1 表示新增
+	mgrFields    []field // 编辑表单：名称 / 参数
+	mgrFocus     int     // 编辑表单内的焦点
 	mgrErr       string
 	mgrReturn    phase // 管理页返回的界面（操作页或转码页）
 
@@ -279,38 +281,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files = buildFileItems(msg.cmds)
 		m.fileCursor = 0
 		m.runIdx = -1
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("已选择：%s，共生成 %d 条命令（%d 个视频）\n", displaySel(m.ops), len(msg.cmds), len(msg.cmds)))
-		if m.ops.AddSubtitle {
-			var suffixes []string
-			for _, s := range m.subs {
-				suffixes = append(suffixes, s.Suffix)
-			}
-			fmt.Fprintf(&b, "字幕（%d 条）：.%s\n", len(m.subs), strings.Join(suffixes, " / ."))
-		}
-		b.WriteString("确认无误后按 Enter 开始执行；左侧 ↑/↓ 切换文件查看对应命令。\n\n")
-		for i, c := range msg.cmds {
-			fmt.Fprintf(&b, "[%d/%d] %s\n\n", i+1, len(msg.cmds), ffmpeg.FormatCommand(c))
-		}
-		m.previewSummary = b.String()
+		m.previewSummary = m.summaryText(msg.cmds)
 		m.syncPreview()
 		m.vp.GotoTop()
 		return m, nil
 
 	case eventMsg:
-		barCmd := m.handleEvent(msg.event)
-		var cmd tea.Cmd
+		cmds := []tea.Cmd{m.handleEvent(msg.event)}
 		if m.eventing {
-			cmd = tea.Batch(listenEvents(m.evCh))
+			cmds = append(cmds, listenEvents(m.evCh))
 		}
-		if barCmd != nil {
-			if cmd == nil {
-				cmd = barCmd
-			} else {
-				cmd = tea.Batch(cmd, barCmd)
-			}
-		}
-		return m, cmd
+		return m, tea.Batch(cmds...)
 
 	case doneMsg:
 		m.eventing = false
@@ -364,7 +345,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleEvent 将 ffmpeg 事件按文件路由到左侧列表与右侧日志，更新进度，返回进度条动画命令。
+// handleEvent 将 ffmpeg 事件写入全局日志与对应文件的日志，并更新进度条。
+// 事件 Index 与 files 顺序一致，因此可直接定位到源文件条目。
 func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 	switch e.Type {
 	case ffmpeg.EventBatchStart:
@@ -374,37 +356,20 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 		m.current = e.Command
 		m.runIdx = e.Index
 		line := fmt.Sprintf("▶ [%d/%d] %s", e.Index+1, e.Total, e.Command)
-		m.appendLog(line, logLineInfoStyle)
-		if it := m.fileAt(e.Index); it != nil {
-			it.state = fileRunning
-			it.logs = appendFileLog(it.logs, line, logLineInfoStyle)
-		}
+		m.recordLine(e.Index, line, fileRunning, logLineInfoStyle)
 		if m.fileFollow {
 			m.fileCursor = e.Index + 1
 		}
 	case ffmpeg.EventLog:
-		m.appendLog("    "+e.Message, logLineDefaultStyle)
-		if it := m.fileAt(e.Index); it != nil {
-			it.logs = appendFileLog(it.logs, "    "+e.Message, logLineDefaultStyle)
-		}
+		m.recordLine(e.Index, "    "+e.Message, "", logLineDefaultStyle)
 	case ffmpeg.EventCommandDone:
 		m.done++
 		m.current = ""
-		line := fmt.Sprintf("✔ [%d/%d] 完成", e.Index+1, e.Total)
-		m.appendLog(line, logLineDoneStyle)
-		if it := m.fileAt(e.Index); it != nil {
-			it.state = fileDone
-			it.logs = appendFileLog(it.logs, line, logLineDoneStyle)
-		}
+		m.recordLine(e.Index, fmt.Sprintf("✔ [%d/%d] 完成", e.Index+1, e.Total), fileDone, logLineDoneStyle)
 	case ffmpeg.EventCommandFailed:
 		m.failed++
 		m.current = ""
-		line := fmt.Sprintf("✘ [%d/%d] 失败: %s", e.Index+1, e.Total, e.Message)
-		m.appendLog(line, logLineFailedStyle)
-		if it := m.fileAt(e.Index); it != nil {
-			it.state = fileFailed
-			it.logs = appendFileLog(it.logs, line, logLineFailedStyle)
-		}
+		m.recordLine(e.Index, fmt.Sprintf("✘ [%d/%d] 失败: %s", e.Index+1, e.Total, e.Message), fileFailed, logLineFailedStyle)
 	}
 	var cmd tea.Cmd
 	if m.total > 0 {
@@ -414,12 +379,17 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 	return cmd
 }
 
-// fileAt 返回指定下标的文件条目，越界时返回 nil（事件 Index 与 files 顺序一致）。
-func (m model) fileAt(idx int) *fileItem {
-	if idx >= 0 && idx < len(m.files) {
-		return &m.files[idx]
+// recordLine 把一行输出同时写入全局日志与第 idx 个文件的日志；state 为空时不修改文件状态。
+func (m *model) recordLine(idx int, line, state string, s lipgloss.Style) {
+	m.appendLog(line, s)
+	if idx < 0 || idx >= len(m.files) {
+		return
 	}
-	return nil
+	it := &m.files[idx]
+	if state != "" {
+		it.state = state
+	}
+	it.logs = appendFileLog(it.logs, line, s)
 }
 
 // appendFileLog 向单个文件的日志缓冲追加一行（带样式），超过上限时丢弃旧行。
@@ -429,6 +399,24 @@ func appendFileLog(logs []string, line string, s lipgloss.Style) []string {
 		logs = logs[len(logs)-maxLogLines:]
 	}
 	return logs
+}
+
+// summaryText 生成预览页“全部”视图的汇总文本：概要、字幕列表与全部命令。
+func (m model) summaryText(cmds [][]string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "已选择：%s，共生成 %d 条命令（%d 个视频）\n", displaySel(m.ops), len(cmds), len(cmds))
+	if m.ops.AddSubtitle {
+		suffixes := make([]string, 0, len(m.subs))
+		for _, s := range m.subs {
+			suffixes = append(suffixes, s.Suffix)
+		}
+		fmt.Fprintf(&b, "字幕（%d 条）：.%s\n", len(m.subs), strings.Join(suffixes, " / ."))
+	}
+	b.WriteString("确认无误后按 Enter 开始执行；左侧 ↑/↓ 切换文件查看对应命令。\n\n")
+	for i, c := range cmds {
+		fmt.Fprintf(&b, "[%d/%d] %s\n\n", i+1, len(cmds), ffmpeg.FormatCommand(c))
+	}
+	return b.String()
 }
 
 // buildFileItems 从 Plan 生成的命令列表提取源文件与其命令。
@@ -449,10 +437,7 @@ func buildFileItems(cmds [][]string) []fileItem {
 }
 
 func (m *model) appendLog(line string, s lipgloss.Style) {
-	m.logs = append(m.logs, s.Render(line))
-	if len(m.logs) > maxLogLines {
-		m.logs = m.logs[len(m.logs)-maxLogLines:]
-	}
+	m.logs = appendFileLog(m.logs, line, s)
 }
 
 // ---------- 左右分栏（预览/执行共用） ----------
@@ -482,14 +467,14 @@ func (m *model) resizePanes() {
 }
 
 // moveFilePane 移动左侧文件列表光标（0 为“全部”汇总项）并刷新右侧内容。
-// 执行/结果阶段的手动切换会停止自动跟随。
-func (m *model) moveFilePane(delta int) tea.Cmd {
+// 执行阶段的手动切换会停止自动跟随。
+func (m *model) moveFilePane(delta int) {
 	if len(m.files) == 0 {
-		return nil
+		return
 	}
 	next := min(len(m.files), max(0, m.fileCursor+delta))
 	if next == m.fileCursor {
-		return nil
+		return
 	}
 	m.fileCursor = next
 	if m.phase == phaseRunning {
@@ -498,10 +483,9 @@ func (m *model) moveFilePane(delta int) tea.Cmd {
 	m.syncPreview()
 	m.vp.GotoTop()
 	m.syncLogPane()
-	return nil
 }
 
-// previewContent 返回右侧预览視口的原始文本：选中“全部”时为汇总列表，否则为该文件命令。
+// previewContent 返回右侧预览视口的原始文本：选中“全部”时为汇总列表，否则为该文件命令。
 func (m model) previewContent() string {
 	if idx := m.fileCursor - 1; idx >= 0 && idx < len(m.files) {
 		it := m.files[idx]
@@ -523,17 +507,15 @@ func (m *model) syncPreview() {
 
 // syncLogPane 按左侧选中项刷新右侧日志视图并贴底，跟随最新输出。
 func (m *model) syncLogPane() {
-	if len(m.files) == 0 {
-		m.logVp.SetContent("")
-		return
+	var lines []string
+	switch idx := m.fileCursor - 1; {
+	case len(m.files) == 0:
+	case idx < 0:
+		lines = m.logs
+	case idx < len(m.files):
+		lines = m.files[idx].logs
 	}
-	var s string
-	if idx := m.fileCursor - 1; idx < 0 {
-		s = strings.Join(m.logs, "\n")
-	} else if idx < len(m.files) {
-		s = strings.Join(m.files[idx].logs, "\n")
-	}
-	m.logVp.SetContent(wrapText(s, m.rightW))
+	m.logVp.SetContent(wrapText(strings.Join(lines, "\n"), m.rightW))
 	m.logVp.GotoBottom()
 }
 

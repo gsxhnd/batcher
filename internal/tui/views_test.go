@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,11 +35,12 @@ func TestAdvanceViewListsBuiltins(t *testing.T) {
 	m.ops = ffmpeg.Selection{Convert: true}
 	m.width, m.height = 100, 30
 	m.phase = phaseAdvance
-	m.presets = []string{"-c:v mycustom -crf 30"}
+	m.presets = []presets.Preset{{Name: "我的画质", Args: "-c:v mycustom -crf 30"}}
 
 	out := m.advanceView()
 	require.Contains(t, out, "-c copy", "应展示第一条内置预设")
 	require.Contains(t, out, "内置", "内置条目应有标记")
-	require.Contains(t, out, "-c:v mycustom -crf 30", "应展示自定义预设")
+	require.Contains(t, out, "我的画质", "自定义预设应以名称作为标签")
+	require.Contains(t, out, "-c:v mycustom -crf 30", "应展示自定义预设的参数")
 	require.Contains(t, out, "(手动输入参数)")
 }

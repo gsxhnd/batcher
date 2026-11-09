@@ -15,6 +15,29 @@ import (
 // PresetFile 用户预设文件名（位于预设文件夹内）。
 const PresetFile = "advance_presets.json"
 
+// Preset 一条用户自定义转码参数：Name 为界面上的标签（可为空），Args 为传给 ffmpeg 的参数。
+type Preset struct {
+	Name string `json:"name"`
+	Args string `json:"args"`
+}
+
+// UnmarshalJSON 兼容旧版文件：旧版每条预设只是一个参数字符串，读取后视为未命名预设。
+func (p *Preset) UnmarshalJSON(data []byte) error {
+	var args string
+	if err := json.Unmarshal(data, &args); err == nil {
+		*p = Preset{Args: args}
+		return nil
+	}
+	// 使用不带方法的别名类型，避免递归调用本方法。
+	type plain Preset
+	var v plain
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*p = Preset(v)
+	return nil
+}
+
 // envDir 允许通过环境变量覆盖预设目录，主要供开发与测试使用。
 const envDir = "BATCHER_PRESETS_DIR"
 
@@ -52,7 +75,7 @@ func FilePath() (string, error) {
 }
 
 // Load 读取用户预设列表；文件不存在时返回空列表（非错误）。
-func Load() ([]string, error) {
+func Load() ([]Preset, error) {
 	dir, err := Dir()
 	if err != nil {
 		return nil, err
@@ -61,7 +84,7 @@ func Load() ([]string, error) {
 }
 
 // Save 覆写保存用户预设列表（自动创建预设文件夹、去重、保序）。
-func Save(presets []string) error {
+func Save(presets []Preset) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -70,7 +93,7 @@ func Save(presets []string) error {
 }
 
 // LoadFrom 从指定目录读取用户预设列表；文件不存在时返回空列表（非错误）。
-func LoadFrom(dir string) ([]string, error) {
+func LoadFrom(dir string) ([]Preset, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("preset directory cannot be empty")
 	}
@@ -82,15 +105,16 @@ func LoadFrom(dir string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("read presets %s: %w", path, err)
 	}
-	var presets []string
+	var presets []Preset
 	if err := json.Unmarshal(data, &presets); err != nil {
 		return nil, fmt.Errorf("parse presets %s: %w", path, err)
 	}
 	return presets, nil
 }
 
-// SaveTo 覆写保存用户预设列表到指定目录（自动创建目录，去重、去空白、保序）。
-func SaveTo(dir string, presets []string) error {
+// SaveTo 覆写保存用户预设列表到指定目录（自动创建目录）。
+// 参数为空的条目会被丢弃；参数相同的条目只保留第一条，名称与参数均去除首尾空白。
+func SaveTo(dir string, presets []Preset) error {
 	if dir == "" {
 		return fmt.Errorf("preset directory cannot be empty")
 	}
@@ -99,16 +123,16 @@ func SaveTo(dir string, presets []string) error {
 	}
 
 	seen := make(map[string]struct{}, len(presets))
-	uniq := make([]string, 0, len(presets))
+	uniq := make([]Preset, 0, len(presets))
 	for _, p := range presets {
-		p = Trim(p)
-		if p == "" {
+		p = Preset{Name: strings.TrimSpace(p.Name), Args: Trim(p.Args)}
+		if p.Args == "" {
 			continue
 		}
-		if _, ok := seen[p]; ok {
+		if _, ok := seen[p.Args]; ok {
 			continue
 		}
-		seen[p] = struct{}{}
+		seen[p.Args] = struct{}{}
 		uniq = append(uniq, p)
 	}
 
@@ -123,18 +147,18 @@ func SaveTo(dir string, presets []string) error {
 	return nil
 }
 
-// Upsert 向预设列表追加一条参数（按参数文本去重），返回新列表。
-func Upsert(existing []string, args string) []string {
-	args = Trim(args)
-	if args == "" {
+// Upsert 向预设列表追加一条预设（按参数文本去重，已存在则保持原条目不变），返回新列表。
+func Upsert(existing []Preset, p Preset) []Preset {
+	p.Args = Trim(p.Args)
+	if p.Args == "" {
 		return existing
 	}
-	for _, p := range existing {
-		if p == args {
+	for _, e := range existing {
+		if e.Args == p.Args {
 			return existing
 		}
 	}
-	return append(existing, args)
+	return append(existing, p)
 }
 
 // Trim 规范化一条高级参数字符串（去首尾空白并压缩连续空格）。
