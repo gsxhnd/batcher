@@ -9,11 +9,10 @@ report_sizes: true
 before:
   hooks:
     - go mod tidy
-    - go generate ./...
 
 builds:
   - id: batcher
-    main: ./cmd
+    main: ./cmd/batcher
     env:
       - CGO_ENABLED=0
     flags:

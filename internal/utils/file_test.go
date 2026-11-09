@@ -17,13 +17,13 @@ func TestMakeDir(t *testing.T) {
 	}{
 		{
 			name:    "create_new_dir",
-			path:    "../testdata/test_new_dir",
+			path:    "../../testdata/test_new_dir",
 			wantErr: false,
-			cleanup: func() { os.RemoveAll("../testdata/test_new_dir") },
+			cleanup: func() { os.RemoveAll("../../testdata/test_new_dir") },
 		},
 		{
 			name:    "existing_dir",
-			path:    "../testdata",
+			path:    "../../testdata",
 			wantErr: false,
 		},
 		{

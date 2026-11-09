@@ -8,16 +8,16 @@ import (
 )
 
 var correctMp4Videos = []string{
-	"../testdata/1/1.mp4",
-	"../testdata/1/2.mp4",
-	"../testdata/2/1.mp4",
-	"../testdata/2/2.mp4",
+	"../../testdata/1/1.mp4",
+	"../../testdata/1/2.mp4",
+	"../../testdata/2/1.mp4",
+	"../../testdata/2/2.mp4",
 }
 var correctMkvVideos = []string{
-	"../testdata/1/1.mkv",
-	"../testdata/1/2.mkv",
-	"../testdata/2/1.mkv",
-	"../testdata/2/2.mkv",
+	"../../testdata/1/1.mkv",
+	"../../testdata/1/2.mkv",
+	"../../testdata/2/1.mkv",
+	"../../testdata/2/2.mkv",
 }
 
 func TestNewVideoBatch(t *testing.T) {
@@ -27,7 +27,7 @@ func TestNewVideoBatch(t *testing.T) {
 		wantErr bool
 	}{
 		{"test_success", &VideoBatchOption{
-			OutputPath: "../testdata",
+			OutputPath: "../../testdata",
 		}, false},
 		{"test_nil_option", nil, true},
 		{"test_empty_output", &VideoBatchOption{}, true},
@@ -57,8 +57,8 @@ func Test_videoBatch_GetVideosList(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"test_mkv", args{InputPath: "../testdata", InputFormat: "mkv"}, correctMkvVideos, false},
-		{"test_mp4", args{InputPath: "../testdata", InputFormat: "mp4"}, correctMp4Videos, false},
+		{"test_mkv", args{InputPath: "../../testdata", InputFormat: "mkv"}, correctMkvVideos, false},
+		{"test_mp4", args{InputPath: "../../testdata", InputFormat: "mp4"}, correctMp4Videos, false},
 		{"test_not_exist_path", args{InputPath: "../111", InputFormat: "mp4"}, []string{}, true},
 	}
 
@@ -85,10 +85,10 @@ func Test_videoBatch_GetVideosList(t *testing.T) {
 }
 
 var correctFonts = []string{
-	"../testdata/1/1.ttf",
-	"../testdata/1/2.ttf",
-	"../testdata/2/1.ttf",
-	"../testdata/2/2.ttf",
+	"../../testdata/1/1.ttf",
+	"../../testdata/1/2.ttf",
+	"../../testdata/2/1.ttf",
+	"../../testdata/2/2.ttf",
 }
 
 func Test_videoBatch_GetFontsList(t *testing.T) {
@@ -101,7 +101,7 @@ func Test_videoBatch_GetFontsList(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"test_success", args{FontsPath: "../testdata"}, correctFonts, false},
+		{"test_success", args{FontsPath: "../../testdata"}, correctFonts, false},
 		{"test_not_exist", args{FontsPath: "../111"}, nil, true},
 	}
 
@@ -125,10 +125,10 @@ func Test_videoBatch_GetFontsList(t *testing.T) {
 }
 
 var correctFontsCmd = []string{
-	"-attach", "../testdata/1/1.ttf", "-metadata:s:t:0", "mimetype=application/x-truetype-font",
-	"-attach", "../testdata/1/2.ttf", "-metadata:s:t:1", "mimetype=application/x-truetype-font",
-	"-attach", "../testdata/2/1.ttf", "-metadata:s:t:2", "mimetype=application/x-truetype-font",
-	"-attach", "../testdata/2/2.ttf", "-metadata:s:t:3", "mimetype=application/x-truetype-font",
+	"-attach", "../../testdata/1/1.ttf", "-metadata:s:t:0", "mimetype=application/x-truetype-font",
+	"-attach", "../../testdata/1/2.ttf", "-metadata:s:t:1", "mimetype=application/x-truetype-font",
+	"-attach", "../../testdata/2/1.ttf", "-metadata:s:t:2", "mimetype=application/x-truetype-font",
+	"-attach", "../../testdata/2/2.ttf", "-metadata:s:t:3", "mimetype=application/x-truetype-font",
 }
 
 func Test_videoBatch_GetFontsParams(t *testing.T) {
@@ -141,7 +141,7 @@ func Test_videoBatch_GetFontsParams(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"test_success", args{FontsPath: "../testdata"}, correctFontsCmd, false},
+		{"test_success", args{FontsPath: "../../testdata"}, correctFontsCmd, false},
 		{"test_not_exist", args{FontsPath: "../111"}, nil, true},
 	}
 	for _, tt := range tests {
@@ -163,10 +163,10 @@ func Test_videoBatch_GetFontsParams(t *testing.T) {
 }
 
 var correctConvertBatch = [][]string{
-	{"-i", "../testdata/1/1.mp4", "../testdata/output/1.mkv"},
-	{"-i", "../testdata/1/2.mp4", "../testdata/output/2.mkv"},
-	{"-i", "../testdata/2/1.mp4", "../testdata/output/1-1.mkv"},
-	{"-i", "../testdata/2/2.mp4", "../testdata/output/2-1.mkv"},
+	{"-i", "../../testdata/1/1.mp4", "../../testdata/output/1.mkv"},
+	{"-i", "../../testdata/1/2.mp4", "../../testdata/output/2.mkv"},
+	{"-i", "../../testdata/2/1.mp4", "../../testdata/output/1-1.mkv"},
+	{"-i", "../../testdata/2/2.mp4", "../../testdata/output/2-1.mkv"},
 }
 
 func Test_videoBatch_GetConvertBatch(t *testing.T) {
@@ -182,8 +182,8 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 		want    [][]string
 		wantErr bool
 	}{
-		{"test_success", args{InputPath: "../testdata", InputFormat: "mp4", OutputPath: "../testdata/output", OutputFormat: "mkv"}, correctConvertBatch, false},
-		{"test_not_exist", args{InputPath: "../111", InputFormat: "mp4", OutputPath: "../testdata/output", OutputFormat: "mkv"}, nil, true},
+		{"test_success", args{InputPath: "../../testdata", InputFormat: "mp4", OutputPath: "../../testdata/output", OutputFormat: "mkv"}, correctConvertBatch, false},
+		{"test_not_exist", args{InputPath: "../111", InputFormat: "mp4", OutputPath: "../../testdata/output", OutputFormat: "mkv"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -211,17 +211,17 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 
 var correctAddFontsCmdBatch = func() [][]string {
 	a := [][]string{
-		{"-i", "../testdata/1/1.mkv", "-c", "copy"},
-		{"-i", "../testdata/1/2.mkv", "-c", "copy"},
-		{"-i", "../testdata/2/1.mkv", "-c", "copy"},
-		{"-i", "../testdata/2/2.mkv", "-c", "copy"},
+		{"-i", "../../testdata/1/1.mkv", "-c", "copy"},
+		{"-i", "../../testdata/1/2.mkv", "-c", "copy"},
+		{"-i", "../../testdata/2/1.mkv", "-c", "copy"},
+		{"-i", "../../testdata/2/2.mkv", "-c", "copy"},
 	}
 
 	b := []string{
-		"../testdata/output/1.mkv",
-		"../testdata/output/2.mkv",
-		"../testdata/output/1-1.mkv",
-		"../testdata/output/2-1.mkv",
+		"../../testdata/output/1.mkv",
+		"../../testdata/output/2.mkv",
+		"../../testdata/output/1-1.mkv",
+		"../../testdata/output/2-1.mkv",
 	}
 	var c [][]string
 	for i, v := range a {
@@ -246,8 +246,8 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 		want    [][]string
 		wantErr bool
 	}{
-		{"test_success", args{InputPath: "../testdata", InputFormat: "mkv", FontsPath: "../testdata", OutputPath: "../testdata/output"}, correctAddFontsCmdBatch(), false},
-		{"test_not_exist", args{InputPath: "../111", InputFormat: "mkv", OutputPath: "../testdata/output", OutputFormat: "mkv"}, nil, true},
+		{"test_success", args{InputPath: "../../testdata", InputFormat: "mkv", FontsPath: "../../testdata", OutputPath: "../../testdata/output"}, correctAddFontsCmdBatch(), false},
+		{"test_not_exist", args{InputPath: "../111", InputFormat: "mkv", OutputPath: "../../testdata/output", OutputFormat: "mkv"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -273,10 +273,10 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 }
 
 var correctMp4FilterOutput = map[string]string{
-	"../testdata/1/1.mp4": "../output/1.mkv",
-	"../testdata/1/2.mp4": "../output/2.mkv",
-	"../testdata/2/1.mp4": "../output/1-1.mkv",
-	"../testdata/2/2.mp4": "../output/2-1.mkv",
+	"../../testdata/1/1.mp4": "../output/1.mkv",
+	"../../testdata/1/2.mp4": "../output/2.mkv",
+	"../../testdata/2/1.mp4": "../output/1-1.mkv",
+	"../../testdata/2/2.mp4": "../output/2-1.mkv",
 }
 
 func Test_videoBatch_filterOutput(t *testing.T) {
@@ -353,4 +353,58 @@ func Test_videoBatch_ExecuteBatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_videoBatch_ExecuteBatch_Events(t *testing.T) {
+	var events []Event
+	vb := &videoBatch{
+		option: &VideoBatchOption{
+			Workers: 1,
+			OnEvent: func(e Event) { events = append(events, e) },
+		},
+	}
+
+	err := vb.ExecuteBatch(context.Background(), [][]string{{"-version"}})
+	assert.Nil(t, err)
+
+	types := make([]EventType, 0, len(events))
+	for _, e := range events {
+		types = append(types, e.Type)
+	}
+	assert.Equal(t, EventBatchStart, types[0])
+	assert.Contains(t, types, EventCommandStart)
+	assert.Contains(t, types, EventLog)
+	assert.Equal(t, EventCommandDone, types[len(types)-1])
+}
+
+func Test_videoBatch_ExecuteBatch_Failed(t *testing.T) {
+	var failed bool
+	vb := &videoBatch{
+		option: &VideoBatchOption{
+			Workers: 2,
+			OnEvent: func(e Event) {
+				if e.Type == EventCommandFailed {
+					failed = true
+				}
+			},
+		},
+	}
+
+	err := vb.ExecuteBatch(context.Background(), [][]string{{"-i", "not-exist-file.mp4", "-f", "null", "-"}})
+	assert.NotNil(t, err)
+	assert.True(t, failed)
+}
+
+func Test_videoBatch_ExecuteBatch_Cancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	vb := &videoBatch{option: &VideoBatchOption{Workers: 1}}
+	err := vb.ExecuteBatch(ctx, [][]string{{"-version"}})
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestPlan_UnknownTask(t *testing.T) {
+	_, _, err := Plan("nope", &VideoBatchOption{OutputPath: t.TempDir()})
+	assert.NotNil(t, err)
 }

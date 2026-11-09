@@ -1,2 +1,9 @@
 testdata
 .DS_Store
+# gui
+.task
+.wails
+cmd/gui/bin
+cmd/gui/frontend/node_modules
+cmd/gui/frontend/dist/*
+!cmd/gui/frontend/dist/.gitkeep
