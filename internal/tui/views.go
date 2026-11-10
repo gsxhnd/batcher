@@ -402,10 +402,10 @@ func (m model) runBody() string {
 		if row, ok := m.focusedBatchRow(); ok {
 			b.WriteString(m.batchOverviewBlock(row))
 		} else {
-			// 主体内容最上方固定显示所选任务的完整 CLI 命令（不随日志滚动）。
 			b.WriteString(m.pinnedCmdBlock())
 		}
 		b.WriteString(m.progressBlock())
+		b.WriteString(m.outputDivider())
 		b.WriteString(m.logVp.View())
 		return statusSuffix(m.statusMsg) + b.String()
 	}
@@ -514,7 +514,26 @@ func (m model) pinnedCmdBlock() string {
 	} else {
 		b.WriteString("  " + wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)) + "\n")
 	}
+	b.WriteString(m.subtaskStatusLine())
 	return b.String()
+}
+
+// outputDivider 把不滚动的状态区和下面的输出区隔开，固定一行。
+func (m model) outputDivider() string {
+	title := " 输出 "
+	width := max(m.rightW-2, lipgloss.Width(title))
+	pad := max(width-lipgloss.Width(title), 0)
+	left, right := pad/2, pad-pad/2
+	line := strings.Repeat("─", left) + title + strings.Repeat("─", right)
+	return descStyle.Render(truncateText(line, width)) + "\n"
+}
+
+// outputSplitH 是状态区与输出区之间分隔线的行数。
+func (m model) outputSplitH() int {
+	if m.running || m.queueViewActive() {
+		return 1
+	}
+	return 0
 }
 
 // batchOverviewBlock 渲染主任务总览，固定 4 行，与 runPinH 一致。
@@ -543,10 +562,11 @@ func (m model) runPinH() int {
 		return 4
 	}
 	cmd := m.pinnedCmdText()
-	if cmd == "" {
-		return 2
+	lines := 2
+	if cmd != "" {
+		lines = 1 + len(strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n"))
 	}
-	return 1 + len(strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n"))
+	return lines + 1 // 命令区再加一行状态
 }
 
 // runBarH 进度区占用的行数，与 progressBlock 一致。

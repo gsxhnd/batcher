@@ -513,6 +513,10 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		m.openHelpModal()
 		return nil
 	case "x":
+		if m.focus == panelRun && m.queueViewActive() {
+			m.statusMsg = "任务列表中按 x 不会新建主任务"
+			return nil
+		}
 		return m.tryStartRun()
 	case "enter":
 		if m.focus == panelRun && (m.queueViewActive() || m.outputFocus) {
@@ -793,7 +797,7 @@ func (m *model) refreshRunHeights() {
 		inner = max(inner-h-1, 2)
 	}
 	if m.running || m.queueViewActive() {
-		m.logVp.SetHeight(max(inner-m.runPinH()-m.runBarH(), 2))
+		m.logVp.SetHeight(max(inner-m.runPinH()-m.runBarH()-m.outputSplitH(), 2))
 		return
 	}
 	m.vp.SetHeight(max(inner-m.previewHeadH(), 1))
@@ -999,8 +1003,8 @@ func (m *model) syncLogPane() {
 	}
 }
 
-// syncRosterLogPane 按批次列表光标刷新右侧内容。
-// 主任务行只展示各子任务的状态，不放执行明细；子任务行展示该任务自己的输出。
+// syncRosterLogPane 按批次列表光标刷新右侧输出区。
+// 主任务行不放子任务日志；子任务行只放该任务自己的 ffmpeg 输出。
 func (m *model) syncRosterLogPane() {
 	if len(m.roster) == 0 {
 		return
@@ -1009,7 +1013,7 @@ func (m *model) syncRosterLogPane() {
 	var lines []string
 	switch {
 	case row.itemID == "":
-		lines = m.batchStatusLines(row.batchID)
+		lines = []string{descStyle.Render("主任务只保留状态。选中子任务后按 enter 查看输出。")}
 	case row.batchID == m.filesBatch:
 		if idx := itemIndexOf(row.itemID); idx >= 0 && idx < len(m.files) {
 			lines = m.files[idx].logs
@@ -1025,50 +1029,57 @@ func (m *model) syncRosterLogPane() {
 	}
 }
 
-// batchStatusLines 是主任务行的内容：每个子任务一行状态，不包含 ffmpeg 输出。
-func (m model) batchStatusLines(batchID string) []string {
-	if m.queue == nil {
-		return []string{descStyle.Render("暂无任务状态")}
-	}
-	b, ok := m.queue.BatchCopy(batchID)
-	if !ok {
-		return []string{descStyle.Render("任务已不在队列中")}
-	}
-	c := b.Counts()
-	lines := []string{
-		descStyle.Render(fmt.Sprintf("状态：%s    完成 %d / 失败 %d / 跳过 %d / 取消 %d，共 %d",
-			batchStateText(b.Status), c.Done, c.Failed, c.Skipped, c.Canceled, c.Total)),
-		descStyle.Render("输入: " + b.InputDir),
-		descStyle.Render("输出: " + b.OutputDir),
-		"",
-	}
-	for _, it := range b.Items {
-		if it.Removed {
-			continue
-		}
-		line := fmt.Sprintf("%s  %s", itemStateText(it.Status), filepath.Base(it.Input))
-		if it.Status == task.StatusFailed && it.Error != "" {
-			errLine := it.Error
-			if i := strings.IndexByte(errLine, '\n'); i >= 0 {
-				errLine = errLine[:i]
+// subtaskStatusLine 是子任务固定区的一行状态，不随输出滚动。
+func (m model) subtaskStatusLine() string {
+	text := "状态：" + m.focusedItemStateText()
+	if m.queue != nil && len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
+		row := m.roster[m.fileCursor]
+		if snap, ok := m.queue.BatchCopy(row.batchID); ok {
+			for _, it := range snap.Items {
+				if it.ID != row.itemID || it.Status != task.StatusFailed || it.Error == "" {
+					continue
+				}
+				errLine := it.Error
+				if i := strings.IndexByte(errLine, '\n'); i >= 0 {
+					errLine = errLine[:i]
+				}
+				text += "  " + errLine
+				break
 			}
-			line += "  " + errLine
 		}
-		style := descStyle
-		switch it.Status {
-		case task.StatusFailed:
-			style = logLineFailedStyle
-		case task.StatusDone:
-			style = logLineDoneStyle
-		case task.StatusRunning:
-			style = subtitleStyle
-		}
-		lines = append(lines, style.Render(line))
 	}
-	if len(lines) == 4 {
-		lines = append(lines, descStyle.Render("没有子任务"))
+	return "  " + descStyle.Render(truncateText(text, max(m.rightW-4, 4))) + "\n"
+}
+
+// focusedItemStateText 返回当前子任务的中文状态。
+func (m model) focusedItemStateText() string {
+	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) && m.roster[m.fileCursor].itemID != "" {
+		return fileStateText(m.roster[m.fileCursor].state)
 	}
-	return lines
+	if m.runIdx >= 0 && m.runIdx < len(m.files) {
+		return fileStateText(m.files[m.runIdx].state)
+	}
+	return "等待"
+}
+
+// fileStateText 把界面里的文件状态转成中文。
+func fileStateText(state string) string {
+	switch state {
+	case fileRunning:
+		return "执行中"
+	case filePaused:
+		return "已暂停"
+	case fileDone:
+		return "已完成"
+	case fileFailed:
+		return "失败"
+	case fileSkipped:
+		return "已跳过"
+	case fileCanceled:
+		return "已取消"
+	default:
+		return "等待"
+	}
 }
 
 // itemStateText 返回子任务状态的中文名。

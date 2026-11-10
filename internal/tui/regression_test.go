@@ -662,7 +662,7 @@ func TestBatchRowHidesSubtaskLogs(t *testing.T) {
 	view := m.logVp.View()
 	assert.NotContains(t, view, "ffmpeg-detail-UNIQUE")
 	assert.NotContains(t, view, "child-output-UNIQUE")
-	assert.Contains(t, view, "暂无任务状态")
+	assert.Contains(t, view, "主任务只保留状态")
 }
 
 func TestFFmpegLogUsesItemID(t *testing.T) {
@@ -708,4 +708,61 @@ func TestEnterSubtaskScrollsOutput(t *testing.T) {
 
 	press(&m, "esc")
 	assert.False(t, m.outputFocus)
+}
+
+func TestTaskPanelXDoesNotEnqueue(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops.Convert = true
+	m.rebuildFields()
+	testQueue(t, &m)
+	m.plan, m.previewDone = testPlan("a.mkv"), true
+	m.focus = panelRun
+	m.roster = []rosterRow{{batchID: "existing", title: "已有任务"}}
+
+	press(&m, "x")
+	assert.Empty(t, m.queue.Snapshot(), "任务列表里按 x 不应新建主任务")
+	assert.Contains(t, m.statusMsg, "不会新建")
+
+	m.focus = panelOps
+	m.roster = nil
+	press(&m, "x")
+	assert.Len(t, m.queue.Snapshot(), 1, "离开任务列表后 x 仍可入队")
+}
+
+func TestRunBodySplitsFixedAndOutput(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 34
+	m.resizePanes()
+	m.focus = panelRun
+	m.running = true
+	m.total = 2
+	m.current = "ffmpeg -i a.mkv -c copy out/a.mkv"
+	m.runIdx = 0
+	m.fileCursor = 1
+	m.files = []fileItem{{
+		input: "a.mkv",
+		cmd:   m.current,
+		state: fileRunning,
+		logs:  []string{"ffmpeg-scroll-UNIQUE"},
+	}}
+	m.refreshRunHeights()
+	m.syncLogPane()
+
+	body := m.runBody()
+	cmdAt := strings.Index(body, "固定 · 当前任务完整命令")
+	splitAt := strings.Index(body, "输出")
+	logAt := strings.Index(body, "ffmpeg-scroll-UNIQUE")
+	require.Greater(t, cmdAt, -1)
+	require.Greater(t, splitAt, cmdAt, "分隔线应在固定内容之后")
+	require.Greater(t, logAt, splitAt, "输出应在分隔线之后")
+	assert.Contains(t, body, "状态：执行中")
+	assert.NotContains(t, m.logVp.View(), "固定 · 当前任务完整命令", "固定内容不应放进可滚动输出")
+	assert.Contains(t, m.logVp.View(), "ffmpeg-scroll-UNIQUE")
+
+	out := m.render()
+	for i, ln := range strings.Split(out, "\n") {
+		assert.Equal(t, 120, lipgloss.Width(ln), "第 %d 行宽度应为 120", i+1)
+	}
 }
