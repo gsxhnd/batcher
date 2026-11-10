@@ -55,11 +55,13 @@ batcher 组合流程会为每条字幕追加独立输入。默认先映射原视
 ## 添加多个字体
 
 ```shell
-ffmpeg -i INPUT -map 0 -c copy -attach FONT.ttf \
+# -attach 的路径要用 "/" 分隔：ffmpeg 只按 "/" 取附件文件名，
+# Windows 的 "\" 会让附件 filename 变成整条路径。
+ffmpeg -i INPUT -map 0 -c copy -attach fonts/FONT.ttf \
   -metadata:s:t:m:filename:FONT.ttf mimetype=application/x-truetype-font OUTPUT.mkv
 ```
 
-字体 MIME 元数据按附件文件名匹配，不依赖原视频已有的附件数量，也不会改写其他附件的 MIME 类型。
+字体 MIME 元数据按附件文件名匹配，不依赖原视频已有的附件数量，也不会改写其他附件的 MIME 类型。batcher 生成的命令会自动把字体路径转成正斜杠。
 
 ## 相关工具
 

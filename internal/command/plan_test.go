@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -100,6 +101,24 @@ func TestFontsParams(t *testing.T) {
 	got, err = p.fontsParams(ctx)
 	assert.NoError(t, err)
 	assert.Nil(t, got)
+}
+
+func TestFontAttachUsesSlashPathAndBasenameMatcher(t *testing.T) {
+	fx := testutil.NewFixture(t)
+	p, err := newPlanner(&VideoBatchOption{OutputPath: fx.Out, FontsPath: fx.Root})
+	require.NoError(t, err)
+	got, err := p.fontsParams(context.Background())
+	require.NoError(t, err)
+	require.NotEmpty(t, got)
+	for i := 0; i+3 < len(got); i += 4 {
+		require.Equal(t, "-attach", got[i])
+		attach := got[i+1]
+		// ffmpeg 只按 "/" 取附件文件名；反斜杠会让 filename 变成整条路径，
+		// 下面的按文件名匹配就会失效，mimetype 写不进去。
+		assert.NotContains(t, attach, `\`, "字体路径必须使用正斜杠")
+		assert.Equal(t, "-metadata:s:t:m:filename:"+path.Base(attach), got[i+2])
+		assert.Equal(t, "mimetype=application/x-truetype-font", got[i+3])
+	}
 }
 
 func TestBuildPlanConvertCommands(t *testing.T) {

@@ -194,7 +194,8 @@ func TestAddingFontsPreservesExistingAttachmentMetadata(t *testing.T) {
 	source := filepath.Join(root, "source.mkv")
 	runFixtureFFmpeg(t, []string{
 		"-nostdin", "-n", "-v", "error", "-i", fx.video, "-map", "0", "-c", "copy",
-		"-attach", attachment, "-metadata:s:t:0", "mimetype=application/octet-stream", source,
+		// 与生产代码一致：ffmpeg 只按 "/" 取附件文件名，否则 filename 会变成整条路径。
+		"-attach", filepath.ToSlash(attachment), "-metadata:s:t:0", "mimetype=application/octet-stream", source,
 	})
 	opt := command.DefaultOption()
 	opt.InputPath, opt.InputFormat, opt.FontsPath = source, "mkv", fx.fonts

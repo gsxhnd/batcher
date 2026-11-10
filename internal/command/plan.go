@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -113,9 +114,13 @@ func (p *planner) fontsParams(ctx context.Context) ([]string, error) {
 
 	fontsCmdList := make([]string, 0, len(fontsList)*4)
 	for _, fontPath := range fontsList {
+		// ffmpeg 只按 "/" 拆分 -attach 的路径来生成附件 filename 元数据：Windows 的
+		// 反斜杠会让 filename 变成整条路径（如 fonts\黑体.ttf），按文件名匹配的
+		// -metadata:s:t:m:filename: 就会落空，mimetype 不会被写入，封装因此失败。
+		attachPath := filepath.ToSlash(fontPath)
 		fontsCmdList = append(fontsCmdList,
-			"-attach", fontPath,
-			"-metadata:s:t:m:filename:"+filepath.Base(fontPath),
+			"-attach", attachPath,
+			"-metadata:s:t:m:filename:"+path.Base(attachPath),
 			"mimetype=application/x-truetype-font",
 		)
 	}

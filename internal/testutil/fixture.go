@@ -7,6 +7,7 @@ package testutil
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 
@@ -61,12 +62,14 @@ func NewFixture(t *testing.T) Fixture {
 }
 
 // AttachCmd 生成 fonts 字体列表对应的 -attach 参数段期望值。
+// 路径与生产代码一样转成 "/"：ffmpeg 只按 "/" 取附件文件名。
 func AttachCmd(fonts []string) []string {
 	cmd := make([]string, 0, len(fonts)*4)
 	for _, fontPath := range fonts {
+		attachPath := filepath.ToSlash(fontPath)
 		cmd = append(cmd,
-			"-attach", fontPath,
-			"-metadata:s:t:m:filename:"+filepath.Base(fontPath),
+			"-attach", attachPath,
+			"-metadata:s:t:m:filename:"+path.Base(attachPath),
 			"mimetype=application/x-truetype-font",
 		)
 	}
