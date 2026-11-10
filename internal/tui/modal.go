@@ -8,8 +8,8 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/commandline"
-	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/gsxhnd/batcher/internal/presets"
 )
 
@@ -59,7 +59,7 @@ func (m *model) openPresetModal(index int, p presets.Preset) tea.Cmd {
 
 // openSubModal 打开单条字幕编辑弹窗。index=-1 表示新增，默认沿用上一条的扩展名。
 func (m *model) openSubModal(index int) tea.Cmd {
-	var entry ffmpeg.SubtitleOption
+	var entry command.SubtitleOption
 	if index >= 0 && index < len(m.subs) {
 		entry = m.subs[index]
 	} else if len(m.subs) > 0 {
@@ -127,7 +127,7 @@ func helpText() string {
 	}
 
 	row("1-5 / tab", "切换面板（未启用的自动跳过）")
-	row("x", "开始执行（先校验配置，出错跳到对应面板）")
+	row("x", "把当前配置加入任务队列（校验出错跳到对应面板）")
 	row("?", "打开/关闭本帮助")
 	row("q", "退出；执行中=取消当前批处理")
 	row("ctrl+c", "强制退出并中止任务")
@@ -142,20 +142,23 @@ func helpText() string {
 	row("e", "编辑自定义预设（内置只读）")
 	row("d", "删除自定义预设（弹窗确认）")
 	row("J / K", "下移 / 上移自定义预设")
+	row("弹窗", "tab/enter 下一项 · ctrl+s 保存 · esc 取消")
 	section("[3] 字幕轨道")
 	row("n", "新增字幕（弹窗）")
 	row("e / enter", "编辑选中的字幕")
 	row("t", "标记/取消默认字幕流（-disposition default）")
 	row("d", "删除字幕（弹窗确认）")
+	row("弹窗", "tab/enter 下一项 · ctrl+s 保存 · esc 取消")
 	section("[4] 参数")
 	row("enter", "进入编辑 / 下一项；esc 完成")
 	row("↑/↓", "切换字段（编辑时=在字段间移动）")
 	row("ctrl+s", "把高级参数另存为预设")
 	section("[5] 任务")
 	row("↑/↓", "在“全部”与单个文件之间切换")
-	row("enter / x", "开始执行")
+	row("enter / x", "入队当前配置（队列空闲时立即开始）")
 	row("f", "跳回正在执行的文件（执行中）")
 	row("y", "复制当前正在查看/执行的完整命令到剪贴板")
+	row("r/s/a", "暂停时：重试 / 跳过 / 中止")
 	row("pgup/pgdn/滚轮", "滚动命令/日志（向上滚动暂停跟随新输出）")
 	section("执行中")
 	row("完整命令", "固定显示在主体内容最上方，长命令自动折行")
@@ -219,6 +222,7 @@ func (m model) modalView() string {
 		if md.err != "" {
 			b.WriteString("  " + errorStyle.Render("× "+md.err) + "\n")
 		}
+		b.WriteString("  " + descStyle.Render("tab / enter 下一项 · ctrl+s 保存 · esc 取消") + "\n")
 		content = b.String()
 	}
 	return drawBox(w, md.title, true, true, content, -1)
@@ -267,7 +271,6 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 
-	last := len(md.fields) - 1
 	switch key.String() {
 	case "esc":
 		m.modal = nil
@@ -279,11 +282,12 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		md.focus = (md.focus - 1 + len(md.fields)) % len(md.fields)
 		return focusField(md.fields, md.focus)
 	case "enter":
-		if md.focus == last {
-			return m.saveModal()
-		}
-		md.focus++
+		// enter 只用于推进到下一个字段（循环），不做确认——避免在末字段误保存；
+		// 保存改由显式的 ctrl+s 触发。
+		md.focus = (md.focus + 1) % len(md.fields)
 		return focusField(md.fields, md.focus)
+	case "ctrl+s":
+		return m.saveModal()
 	default:
 		f := &md.fields[md.focus]
 		if f.def.kind == fieldBool {
@@ -385,7 +389,7 @@ func (m *model) saveSubModal() tea.Cmd {
 		md.fields[1].err = "需为 ISO 639-2 三字母码，如 chi / eng / jpn"
 		return focusField(md.fields, 1)
 	}
-	entry := ffmpeg.SubtitleOption{
+	entry := command.SubtitleOption{
 		Suffix:  suffix,
 		Lang:    lang,
 		Title:   title,

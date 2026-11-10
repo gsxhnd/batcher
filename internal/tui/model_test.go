@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,7 +47,7 @@ func press(m *model, s string) {
 func TestPanelSwitchSkipsDisabledPanels(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{} // 未勾选任何操作：预设/字幕面板不可用
+	m.ops = command.Selection{} // 未勾选任何操作：预设/字幕面板不可用
 
 	press(&m, "2")
 	assert.Equal(t, panelOps, m.focus, "未勾选转码时不能进入预设面板")
@@ -81,7 +81,7 @@ func TestToggleConvertEnablesAndRebuildsForm(t *testing.T) {
 	isolatePresets(t)
 	require.NoError(t, presets.Save([]presets.Preset{{Name: "画质", Args: "-c:v h265"}}))
 	m := newModel()
-	m.ops = ffmpeg.Selection{AddSubtitle: true}
+	m.ops = command.Selection{AddSubtitle: true}
 	m.rebuildFields()
 	require.False(t, slicesAny(m.fields, "advance"), "未勾选转码时不应有高级参数字段")
 
@@ -114,7 +114,7 @@ func TestToggleConvertEnablesAndRebuildsForm(t *testing.T) {
 func TestPresetModalAddEditDuplicate(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.focus = panelPresets
 
 	press(&m, "a")
@@ -127,14 +127,14 @@ func TestPresetModalAddEditDuplicate(t *testing.T) {
 	}
 
 	fill("  H.265 画质  ", "  -c:v   h265 -crf 20 ")
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	require.Nil(t, m.modal, "保存成功后应关闭弹窗")
 	assert.Equal(t, []presets.Preset{{Name: "H.265 画质", Args: "-c:v h265 -crf 20"}}, m.presets,
 		"名称去首尾空白，参数规范化空白")
 
 	press(&m, "a")
 	fill("", "-c:v h264")
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	assert.Equal(t, []presets.Preset{
 		{Name: "H.265 画质", Args: "-c:v h265 -crf 20"},
 		{Name: "", Args: "-c:v h264"},
@@ -142,7 +142,7 @@ func TestPresetModalAddEditDuplicate(t *testing.T) {
 
 	press(&m, "a")
 	fill("重复", "-c:v h265 -crf 20")
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	require.NotNil(t, m.modal, "参数重复应留在弹窗内修改")
 	assert.NotEmpty(t, m.modal.err)
 	press(&m, "esc")
@@ -155,7 +155,7 @@ func TestPresetModalAddEditDuplicate(t *testing.T) {
 	m.modal.fields[0].input.SetValue("H.264")
 	m.modal.fields[1].input.SetValue("-c:v hevc")
 	m.modal.focus = 1
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	assert.Equal(t, []presets.Preset{
 		{Name: "H.265 画质", Args: "-c:v h265 -crf 20"},
 		{Name: "H.264", Args: "-c:v hevc"},
@@ -167,7 +167,7 @@ func TestPresetDeleteUsesConfirmModal(t *testing.T) {
 	isolatePresets(t)
 	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}}))
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.focus = panelPresets
 	m.presetCursor = m.presetUserOffset()
 	m.manualAdvance = "a" // 删除当前选中预设时应同步清空主表单
@@ -196,7 +196,7 @@ func TestPresetReorderPersists(t *testing.T) {
 	isolatePresets(t)
 	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.focus = panelPresets
 	m.presetCursor = m.presetUserOffset()
 
@@ -212,7 +212,7 @@ func TestPresetReorderPersists(t *testing.T) {
 func TestPresetGuardsBuiltins(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.focus = panelPresets
 	m.presetCursor = 0 // 内置条目
 
@@ -228,7 +228,7 @@ func TestPresetGuardsBuiltins(t *testing.T) {
 func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.focus = panelPresets
 	require.NotEmpty(t, m.builtins)
 
@@ -238,7 +238,7 @@ func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
 	assert.Equal(t, m.builtins[0].Args, m.modal.fields[1].input.Value(), "参数预填内置预设参数")
 
 	m.modal.focus = 1
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	require.Nil(t, m.modal)
 	assert.Equal(t, []presets.Preset{{Name: m.builtins[0].Name, Args: m.builtins[0].Args}}, m.presets,
 		"复制后成为自定义预设")
@@ -248,7 +248,7 @@ func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
 func TestModalSwallowsGlobalKeys(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.focus = panelPresets
 
 	press(&m, "a")
@@ -265,7 +265,7 @@ func TestModalSwallowsGlobalKeys(t *testing.T) {
 func TestSublistModalCRUD(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{AddSubtitle: true}
+	m.ops = command.Selection{AddSubtitle: true}
 	m.focus = panelSubs
 
 	press(&m, "n")
@@ -273,17 +273,16 @@ func TestSublistModalCRUD(t *testing.T) {
 	m.modal.fields[0].input.SetValue("ass")
 	m.modal.fields[1].input.SetValue("zh") // 非法语言码
 	m.modal.fields[2].input.SetValue("中文")
-	m.modal.focus = 3 // 最后一个字段（默认字幕流）后按 enter 保存
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	require.NotNil(t, m.modal, "非法语言码应留在弹窗")
 	assert.NotEmpty(t, m.modal.fields[1].err)
 	assert.Nil(t, findSub(m.subs, "ass"), "不应保存非法条目")
 
 	m.modal.fields[1].input.SetValue("chi")
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	assert.Nil(t, m.modal)
 	require.Len(t, m.subs, 1)
-	assert.Equal(t, ffmpeg.SubtitleOption{Suffix: "ass", Lang: "chi", Title: "中文"}, m.subs[0])
+	assert.Equal(t, command.SubtitleOption{Suffix: "ass", Lang: "chi", Title: "中文"}, m.subs[0])
 
 	press(&m, "e")
 	require.NotNil(t, m.modal, "e 应打开编辑弹窗并回填")
@@ -300,7 +299,7 @@ func TestSublistModalCRUD(t *testing.T) {
 func TestSubModalDefaultTrack(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{AddSubtitle: true}
+	m.ops = command.Selection{AddSubtitle: true}
 	m.focus = panelSubs
 
 	press(&m, "n")
@@ -317,7 +316,7 @@ func TestSubModalDefaultTrack(t *testing.T) {
 	press(&m, "space")
 	require.False(t, m.modal.fields[3].Checked(), "再按 space 应取消勾选")
 	press(&m, "space")
-	press(&m, "enter") // 保存
+	press(&m, "ctrl+s") // 保存
 
 	assert.Nil(t, m.modal)
 	require.Len(t, m.subs, 1)
@@ -339,7 +338,7 @@ func TestSubModalDefaultTrack(t *testing.T) {
 func TestFormEditingSwallowsGlobalKeys(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.rebuildFields()
 	m.focus = panelForm
 
@@ -367,7 +366,7 @@ func TestTryStartRunValidation(t *testing.T) {
 	assert.False(t, m.running)
 
 	// 勾选添加字体但未填字体目录
-	m.ops = ffmpeg.Selection{AddFonts: true}
+	m.ops = command.Selection{AddFonts: true}
 	m.rebuildFields()
 	press(&m, "x")
 	assert.Equal(t, panelForm, m.focus, "校验失败应跳到参数面板")
@@ -375,7 +374,7 @@ func TestTryStartRunValidation(t *testing.T) {
 	assert.False(t, m.running)
 
 	// 勾选添加字幕但字幕列表为空
-	m.ops = ffmpeg.Selection{AddSubtitle: true}
+	m.ops = command.Selection{AddSubtitle: true}
 	m.rebuildFields()
 	press(&m, "x")
 	assert.Equal(t, panelSubs, m.focus, "字幕为空应跳到字幕面板")
@@ -426,18 +425,29 @@ func TestSetFocusLeavesRunStopsFollow(t *testing.T) {
 func TestRunLockedFocusDuringExecution(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
+	m.ops.Convert = true
+	m.rebuildFields()
+	testQueue(t, &m)
+	// 执行中允许切换面板（新语义：不锁定配置与面板）。
 	m.running = true
 	m.focus = panelRun
-
 	press(&m, "1")
-	assert.Equal(t, panelRun, m.focus, "执行中不允许切换面板")
+	assert.Equal(t, panelOps, m.focus, "执行中允许切换面板编辑配置")
 
-	// q 取消执行但不退出（cancel 已设置才会真正取消）
-	var canceled bool
-	m.cancel = func() { canceled = true }
+	// q/esc 取消当前批次：未暂停时走 CancelCurrent，暂停时发中止决策。
+	m.focus = panelRun
 	press(&m, "q")
-	assert.True(t, canceled, "执行中按 q 应发送取消请求")
+	assert.Contains(t, m.statusMsg, "取消请求")
 	assert.True(t, m.running, "取消是异步的，界面保持执行态直到结束")
+
+	// 暂停中按 r/s/a 发出决策指令。
+	m.pausedBatch = "测试批次"
+	press(&m, "r")
+	assert.Contains(t, m.statusMsg, "重试")
+	press(&m, "s")
+	assert.Contains(t, m.statusMsg, "跳过")
+	press(&m, "a")
+	assert.Contains(t, m.statusMsg, "中止")
 }
 
 func TestIsISO639Code(t *testing.T) {
@@ -471,7 +481,7 @@ func findField(fields *[]field, key string) (*field, bool) {
 	return nil, false
 }
 
-func findSub(subs []ffmpeg.SubtitleOption, suffix string) *ffmpeg.SubtitleOption {
+func findSub(subs []command.SubtitleOption, suffix string) *command.SubtitleOption {
 	for i := range subs {
 		if subs[i].Suffix == suffix {
 			return &subs[i]

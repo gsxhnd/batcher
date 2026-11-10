@@ -11,8 +11,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -116,29 +118,118 @@ func TestPasteReachesOnlyActiveInput(t *testing.T) {
 	}
 }
 
-func TestExecutionRequiresLatestPreviewAndLocksPlanning(t *testing.T) {
+// testQueue 为模型接上一个真实队列并注册清理；事件由测试自行从 m.evCh 读取。
+func testQueue(t *testing.T, m *model) {
+	t.Helper()
+	m.evCh = make(chan tea.Msg, 256)
+	m.initQueue(m.evCh)
+	t.Cleanup(m.queue.Stop)
+}
+
+// queueSelection 返回队列测试使用的选择组合。
+func queueSelection() command.Selection {
+	return command.Selection{Convert: true}
+}
+
+// waitBatchEvent 从模型事件通道读消息并喂给 Update，直到出现指定类型的队列事件或超时。
+func waitBatchEvent(t *testing.T, m *model, typ task.QueueEventType) queueEventMsg {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case msg := <-m.evCh:
+			next, _ := m.Update(msg)
+			*m = next.(model)
+			if e, ok := msg.(queueEventMsg); ok && e.evt.Type == typ {
+				return e
+			}
+		case <-time.After(deadline.Sub(time.Now()) / 2):
+			t.Fatalf("等待队列事件 %s 超时", typ)
+		}
+	}
+	t.Fatalf("等待队列事件 %s 超时", typ)
+	return queueEventMsg{}
+}
+
+func TestExecutionRequiresLatestPreview(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.ops.Convert = true
 	m.rebuildFields()
+	testQueue(t, &m)
 	m.plan, m.previewDone, m.planLoading = testPlan("a.mkv"), true, true
 	press(&m, "x")
-	assert.False(t, m.running, "过期预览不能执行")
+	assert.Empty(t, m.queue.Snapshot(), "预览未就绪不能入队")
 	m.planLoading = false
-	next, _ := m.Update(planMsg{seq: m.planSeq, plan: testPlan("a.mkv")})
+	next, _ := m.Update(planMsg{seq: m.planSeq, plan: testPlanOut(t, "a.mkv")})
 	m = next.(model)
 	press(&m, "x")
-	t.Cleanup(m.quitCleanup)
-	require.True(t, m.running)
-	assert.Equal(t, 1, m.total)
-	assert.Equal(t, "a.mkv", m.files[0].input)
+	batches := m.queue.Snapshot()
+	require.Len(t, batches, 1, "最新预览生成后 x 入队")
 	seq := m.planSeq
-	next, cmd := m.Update(planDebounceMsg{seq: seq})
+	next, _ = m.Update(planMsg{seq: seq, plan: testPlanOut(t, "不应替换.mkv")})
 	m = next.(model)
-	assert.Nil(t, cmd)
-	next, _ = m.Update(planMsg{seq: seq, plan: testPlan("不应替换.mkv")})
+	assert.Equal(t, "a.mkv", batches[0].Items[0].Input, "入队复制的快照不受后续计划影响")
+}
+
+// TestQueueEventsFlowWhenIdle 验证队列事件监听链常驻：
+// 程序启动即由 Init 挂上监听，空闲（未在执行）时入队也能立刻进入执行。
+// 此前的缺陷是监听只在 eventing=true 时重挂，空闲时第一条事件后即断链，入队永远不执行。
+func TestQueueEventsFlowWhenIdle(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = command.Selection{Convert: true}
+	m.rebuildFields()
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	require.NoError(t, err)
+	batchID := batch.ID
+	_ = batchID
+
+	cur := m
+	cmd := cur.Init()
+	deadline := time.Now().Add(8 * time.Second)
+	sawStarted := false
+	for time.Now().Before(deadline) {
+		if cmd == nil {
+			t.Fatal("监听链提前断开：Update 未重挂监听，空闲时队列事件无法送达界面")
+		}
+		msg := cmd()
+		require.NotNil(t, msg)
+		next, c := cur.Update(msg)
+		cur, cmd = next.(model), c
+		if e, ok := msg.(queueEventMsg); ok && e.evt.Type == task.QueueBatchStarted {
+			sawStarted = true
+		}
+		if sawStarted {
+			cur.queue.Stop()
+			assert.True(t, cur.running, "收到 BatchStarted 后界面应处于执行态")
+			return
+		}
+	}
+	t.Fatal("等待 QueueBatchStarted 超时：入队后事件未送达")
+}
+
+func TestStalesPlanMessagesDuringRun(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops.Convert = true
+	m.rebuildFields()
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
+	require.NoError(t, err)
+	waitBatchEvent(t, &m, task.QueueBatchStarted)
+	require.True(t, m.running)
+	require.Len(t, m.files, 1)
+	m.statusMsg = ""
+
+	// 执行中生成的新计划先暂存：批次结束后再应用，避免与执行中文件列表下标冲突。
+	next, _ := m.Update(planMsg{seq: m.planSeq, plan: testPlan("新配置.mkv")})
 	m = next.(model)
-	assert.Equal(t, "a.mkv", m.files[0].input)
+	require.NotNil(t, m.pendingPlan, "运行期间的新计划应暂存")
+	assert.Equal(t, "新配置.mkv", m.pendingPlan.Jobs[0].Input)
+	assert.Contains(t, m.statusMsg, "配置已更新")
+	_ = batch
 }
 
 func TestOldRunMessagesAreIgnored(t *testing.T) {
@@ -166,55 +257,78 @@ func TestBatchMessagesDrainBeforeCompletion(t *testing.T) {
 		plan.Jobs[i].Output = filepath.Join(t.TempDir(), "输出")
 		plan.Jobs[i].Args = []string{"-version"}
 	}
-	plan.Jobs[1].Args = []string{"-batcher-invalid"}
+	// 第一条失败触发暂停，决策为中止：后续子任务取消，批次失败收尾。
+	plan.Jobs[0].Args = []string{"-batcher-invalid"}
 	m := newModel()
-	m.ctx, m.runID, m.running, m.eventing = ctx, 7, true, true
+	m.ctx = ctx
 	m.plan, m.previewDone, m.startAt = plan, true, time.Now()
 	m.files = buildFileItems(plan.Jobs)
-	ch := make(chan tea.Msg, 1)
-	started, finished := make(chan struct{}), make(chan struct{})
-	go startBatchCmd(ctx, ctx, plan, m.runID, ch, started, finished)()
-	for {
-		select {
-		case <-ctx.Done():
-			t.Fatal("等待批处理事件超时")
-		case msg := <-ch:
-			require.NotNil(t, msg)
-			_, ending := msg.(doneMsg)
-			if ending {
-				assert.Equal(t, 2, m.done, "结束结果前必须已经消费完成事件")
-				assert.Equal(t, 1, m.failed)
-				assert.NotEmpty(t, m.logs)
-			}
-			next, _ := m.Update(msg)
-			m = next.(model)
-			if ending {
-				assert.False(t, m.running)
-				assert.Equal(t, fileDone, m.files[0].state)
-				assert.Equal(t, fileFailed, m.files[1].state)
-				assert.Equal(t, fileDone, m.files[2].state)
-				<-finished
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(plan, queueSelection())
+	require.NoError(t, err)
+	// 暂停后立刻决策中止，驱动批次快速收尾；捕获队列指针，避免与 Update 的值拷贝竞态。
+	q := m.queue
+	go func() {
+		for {
+			s, ok := q.BatchStatus(batch.ID)
+			if !ok || s.Terminal() {
 				return
 			}
+			if s == task.StatusPaused {
+				q.Decide(task.DecisionAbort)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	deadline := time.Now().Add(9 * time.Second)
+	for {
+		select {
+		case msg := <-m.evCh:
+			next, _ := m.Update(msg)
+			m = next.(model)
+			e, ok := msg.(queueEventMsg)
+			if !ok || e.evt.Type != task.QueueBatchFailed {
+				if time.Now().After(deadline) {
+					t.Fatal("等待批次结束事件超时")
+				}
+				continue
+			}
+			// 中止后：第一条失败，其余子任务取消，批次失败收尾。
+			assert.Equal(t, 0, m.done)
+			assert.Equal(t, 1, m.failed)
+			assert.Equal(t, 2, m.canceled)
+			assert.NotEmpty(t, m.logs)
+			assert.False(t, m.running)
+			assert.Equal(t, fileFailed, m.files[0].state)
+			assert.Equal(t, fileCanceled, m.files[1].state)
+			assert.Equal(t, fileCanceled, m.files[2].state)
+			return
+		case <-ctx.Done():
+			t.Fatal("等待批处理事件超时")
 		}
 	}
 }
 
-func TestApplicationCancellationUnblocksEventBackpressure(t *testing.T) {
+func TestCancelledQueueDropsEventsFast(t *testing.T) {
 	isolatePresets(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	plan := testPlan("a")
 	plan.Jobs[0].Output = filepath.Join(t.TempDir(), "输出")
 	plan.Jobs[0].Args = []string{"-version"}
-	ch := make(chan tea.Msg, 1)
-	started, finished := make(chan struct{}), make(chan struct{})
-	go startBatchCmd(ctx, ctx, plan, 1, ch, started, finished)()
-	<-started
+	m := newModel()
+	m.ctx = ctx
+	testQueue(t, &m)
+	_, err := m.queue.Enqueue(plan, queueSelection())
+	require.NoError(t, err)
+	waitBatchEvent(t, &m, task.QueueItemStarted)
 	cancel()
+	stopped := make(chan struct{})
+	go func() { m.queue.Stop(); close(stopped) }()
 	select {
-	case <-finished:
+	case <-stopped:
 	case <-time.After(5 * time.Second):
-		t.Fatal("退出后事件背压不应阻塞批处理回收")
+		t.Fatal("退出后事件背压不应阻塞队列回收")
 	}
 }
 
@@ -256,7 +370,7 @@ func TestProgressAndCoalescedLogRefresh(t *testing.T) {
 func TestHiddenAndEmptyFieldValuesSurviveRebuild(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{Convert: true, AddFonts: true}
+	m.ops = command.Selection{Convert: true, AddFonts: true}
 	m.rebuildFields()
 	values := map[string]string{"advance": "-c:v mpeg4", "fonts_path": "字体 路径", "input_path": ""}
 	for key, value := range values {
@@ -264,9 +378,9 @@ func TestHiddenAndEmptyFieldValuesSurviveRebuild(t *testing.T) {
 		require.True(t, ok)
 		field.input.SetValue(value)
 	}
-	m.ops = ffmpeg.Selection{}
+	m.ops = command.Selection{}
 	m.rebuildFields()
-	m.ops = ffmpeg.Selection{Convert: true, AddFonts: true}
+	m.ops = command.Selection{Convert: true, AddFonts: true}
 	m.rebuildFields()
 	for key, value := range values {
 		field, ok := findField(&m.fields, key)
@@ -279,7 +393,7 @@ func TestOnlyOneDefaultSubtitle(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.ops.AddSubtitle, m.focus = true, panelSubs
-	m.subs = []ffmpeg.SubtitleOption{{Suffix: "chi.ass", Default: true}, {Suffix: "eng.ass"}}
+	m.subs = []command.SubtitleOption{{Suffix: "chi.ass", Default: true}, {Suffix: "eng.ass"}}
 	m.subCursor = 1
 	press(&m, "t")
 	assert.False(t, m.subs[0].Default)
@@ -401,12 +515,12 @@ func TestReschedulingCancelsPreviousPlan(t *testing.T) {
 
 func TestPlanCommandReturnsReadOnlySnapshot(t *testing.T) {
 	isolatePresets(t)
-	opt := ffmpeg.DefaultOption()
+	opt := command.DefaultOption()
 	opt.InputPath = t.TempDir()
 	opt.OutputPath = filepath.Join(t.TempDir(), "尚未创建")
 	input := filepath.Join(opt.InputPath, "a.mp4")
 	require.NoError(t, os.WriteFile(input, nil, 0o644))
-	msg := planCmd(context.Background(), &opt, ffmpeg.Selection{Convert: true}, 7)().(planMsg)
+	msg := planCmd(context.Background(), &opt, command.Selection{Convert: true}, 7)().(planMsg)
 	require.NoError(t, msg.err)
 	assert.Equal(t, 7, msg.seq)
 	require.NotNil(t, msg.plan)

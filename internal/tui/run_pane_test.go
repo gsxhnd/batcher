@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -162,8 +162,8 @@ func TestMouseWheelPausesFollow(t *testing.T) {
 func TestSummaryMarksDefaultSub(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = ffmpeg.Selection{AddSubtitle: true}
-	m.subs = []ffmpeg.SubtitleOption{
+	m.ops = command.Selection{AddSubtitle: true}
+	m.subs = []command.SubtitleOption{
 		{Suffix: "ass", Lang: "chi", Title: "中文", Default: true},
 		{Suffix: "srt", Lang: "eng", Title: "English"},
 	}

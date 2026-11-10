@@ -14,6 +14,7 @@ const (
 	EventCommandFailed   EventType = "command_failed"
 	EventCommandCanceled EventType = "command_canceled"
 	EventLog             EventType = "log"
+	EventProgress        EventType = "progress"
 )
 
 // Event 描述批处理执行过程中的状态变化，供 TUI 展示进度。
@@ -23,6 +24,8 @@ type Event struct {
 	Total   int       `json:"total"`
 	Command string    `json:"command,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Progress 仅在 EventProgress 事件中有值。
+	Progress *Progress `json:"progress,omitempty"`
 }
 
 // lineWriter 将写入的数据按行（\n 或 \r）切分后回调，用于捕获 ffmpeg 输出。

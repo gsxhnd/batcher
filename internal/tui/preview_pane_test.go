@@ -1,17 +1,20 @@
 package tui
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestBuildFileItemsExtractsInputAndOutput(t *testing.T) {
-	items := buildFileItems([]ffmpeg.Job{
+	items := buildFileItems([]command.Job{
 		{Input: "src/a.mkv", Output: "out/a.webm", Args: []string{"-nostdin", "-n", "-i", "src/a.mkv", "-c", "copy", "out/a.webm"}},
 		{Input: "src/b.mkv", Output: "out/b.mkv", Args: []string{"-nostdin", "-n", "-i", "src/b.mkv", "out/b.mkv"}},
 	})
@@ -37,11 +40,23 @@ func TestPlanMsgBuildsFileList(t *testing.T) {
 }
 
 // testPlan 提供显式输入/输出的计划，避免测试依赖命令参数位置。
-func testPlan(inputs ...string) *ffmpeg.BatchPlan {
-	plan := &ffmpeg.BatchPlan{}
+func testPlan(inputs ...string) *command.BatchPlan {
+	plan := &command.BatchPlan{}
 	for _, input := range inputs {
 		output := "o/" + input
-		plan.Jobs = append(plan.Jobs, ffmpeg.Job{Input: input, Output: output, Args: []string{"-nostdin", "-n", "-i", input, output}})
+		plan.Jobs = append(plan.Jobs, command.Job{Input: input, Output: output, Args: []string{"-nostdin", "-n", "-i", input, output}})
+	}
+	return plan
+}
+
+// testPlanOut 同 testPlan，但把每个任务的输出放到临时目录——
+// 供入队（batch 记录写入输出目录）的测试使用，避免向测试进程的工作目录写文件。
+func testPlanOut(t *testing.T, inputs ...string) *command.BatchPlan {
+	t.Helper()
+	plan := testPlan(inputs...)
+	base := t.TempDir()
+	for i := range plan.Jobs {
+		plan.Jobs[i].Output = filepath.Join(base, fmt.Sprintf("out%d.mkv", i))
 	}
 	return plan
 }
@@ -116,7 +131,7 @@ func TestMoveFilePaneBoundsAndFollow(t *testing.T) {
 	assert.True(t, m.fileFollow)
 }
 
-// TestSchedulePlanDebounce 验证防抖序号与执行锁。
+// TestSchedulePlanDebounce 验证防抖序号；执行期间同样允许重新生成（新配置暂存）。
 func TestSchedulePlanDebounce(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -127,11 +142,11 @@ func TestSchedulePlanDebounce(t *testing.T) {
 	assert.Equal(t, 1, m.planSeq)
 	assert.True(t, m.planLoading)
 
-	// 执行中不再触发。
+	// 执行中也能安排：applyPlan 把结果暂存到 pendingPlan。
 	m.running = true
 	cmd = m.schedulePlan(planDebounceDelay)
-	assert.Nil(t, cmd, "执行中不应安排生成")
-	assert.Equal(t, 1, m.planSeq, "执行中序号不变")
+	assert.NotNil(t, cmd, "执行中允许重新生成计划")
+	assert.Equal(t, 2, m.planSeq, "执行中序号同样递增")
 }
 
 // TestDoneMsgUnlocks 验证执行结束时解锁并保留配置以便重跑。
@@ -141,7 +156,7 @@ func TestDoneMsgUnlocks(t *testing.T) {
 	m.running = true
 	m.total = 2
 	m.done = 2
-	m.ops = ffmpeg.Selection{Convert: true}
+	m.ops = command.Selection{Convert: true}
 	m.startAt = time.Now().Add(-time.Second)
 
 	next, _ := m.Update(doneMsg{err: nil})

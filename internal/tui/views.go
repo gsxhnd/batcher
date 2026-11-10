@@ -111,7 +111,7 @@ func (m model) panelTitle(p panel) string {
 		title := "5 · 任务"
 		switch {
 		case m.total > 0:
-			title = fmt.Sprintf("5 · 任务 %d/%d", m.done+m.failed+m.canceled, m.total)
+			title = fmt.Sprintf("5 · 任务 %d/%d", m.processedCount(), m.total)
 		case m.previewDone && m.planErr == nil && len(m.files) > 0:
 			title = fmt.Sprintf("5 · 任务（%d 个文件）", len(m.files))
 		}
@@ -392,7 +392,7 @@ func (m model) runBody() string {
 		// 主体内容最上方固定显示当前任务的完整 CLI 命令（不随日志滚动）。
 		b.WriteString(m.pinnedCmdBlock())
 		if m.total > 0 {
-			percent := float64(m.done+m.failed+m.canceled) / float64(m.total)
+			percent := float64(m.processedCount()) / float64(m.total)
 			b.WriteString("  " + m.bar.ViewAs(percent) + "\n")
 			b.WriteString(m.progressHint() + "\n")
 		} else {
@@ -433,12 +433,15 @@ func statusSuffix(msg string) string {
 
 // progressHint 组合进度/耗时/当前命令的一行状态文本，超宽时截断。
 func (m model) progressHint() string {
-	hint := fmt.Sprintf("进度: %d/%d", m.done+m.failed+m.canceled, m.total)
+	hint := fmt.Sprintf("进度: %d/%d", m.processedCount(), m.total)
 	if m.failed > 0 {
 		hint += fmt.Sprintf("，失败 %d", m.failed)
 	}
 	if m.canceled > 0 {
 		hint += fmt.Sprintf("，取消 %d", m.canceled)
+	}
+	if m.skipped > 0 {
+		hint += fmt.Sprintf("，跳过 %d", m.skipped)
 	}
 	hint += "   耗时: " + time.Since(m.startAt).Round(time.Second).String()
 	if m.fileCursor == 0 && m.current != "" {
@@ -516,7 +519,7 @@ func (m model) filePane(h int) string {
 func (m model) fileRow(idx int, name string) string {
 	focused := idx+1 == m.fileCursor
 	if idx < 0 && m.total > 0 {
-		name = fmt.Sprintf("全部（%d/%d）", m.done+m.failed+m.canceled, m.total)
+		name = fmt.Sprintf("全部（%d/%d）", m.processedCount(), m.total)
 	}
 	if m.total > 0 {
 		state := filePending
@@ -538,7 +541,7 @@ func fileStatusMark(state string) string {
 		return logLineDoneStyle.Render("✔")
 	case fileFailed:
 		return logLineFailedStyle.Render("✘")
-	case fileCanceled:
+	case fileCanceled, fileSkipped:
 		return descStyle.Render("−")
 	default:
 		return descStyle.Render("○")

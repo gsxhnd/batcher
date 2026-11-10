@@ -1,14 +1,14 @@
 package tui
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/task"
 )
 
 // ---------- 面板 [1] 操作 ----------
@@ -341,6 +341,25 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	case "down", "j":
 		m.moveFilePane(1)
 		return nil
+	}
+	// 暂停等待决策时：r 重试 / s 跳过 / a 中止当前主任务。
+	if m.pausedBatch != "" {
+		switch key.String() {
+		case "r":
+			m.queue.Decide(task.DecisionRetry)
+			m.statusMsg = "已发送重试指令"
+			return nil
+		case "s":
+			m.queue.Decide(task.DecisionSkip)
+			m.statusMsg = "已发送跳过指令"
+			return nil
+		case "a":
+			m.queue.Decide(task.DecisionAbort)
+			m.statusMsg = "已发送中止指令"
+			return nil
+		}
+	}
+	switch key.String() {
 	case "f":
 		// 跳回正在执行的文件并恢复自动跟随。
 		if m.runIdx >= 0 && m.runIdx < len(m.files) && m.files[m.runIdx].state == fileRunning {
@@ -420,11 +439,9 @@ func (m *model) copyShownCommand() tea.Cmd {
 	return tea.SetClipboard(strings.Join(commands, "\n"))
 }
 
-// tryStartRun 校验配置并启动执行：失败时把焦点跳到出错的面板并给出提示。
+// tryStartRun 校验配置并把计划加入任务队列：失败时把焦点跳到出错的面板并给出提示。
+// 队列执行中同样可以入队新批次，使用最新生成的计划。
 func (m *model) tryStartRun() tea.Cmd {
-	if m.running {
-		return nil
-	}
 	if !m.ops.Any() {
 		m.featErr = "请至少勾选一项操作"
 		m.setFocus(panelOps)
@@ -441,65 +458,43 @@ func (m *model) tryStartRun() tea.Cmd {
 		m.setFocus(panelSubs)
 		return nil
 	}
-	if m.planErr != nil && !m.planLoading {
+	// 运行期间重新生成的计划暂存在 pendingPlan；入队使用最新计划。
+	plan, planErr := m.plan, m.planErr
+	if m.pendingPlan != nil {
+		plan, planErr = m.pendingPlan, m.pendingPlanErr
+	}
+	if planErr != nil && !m.planLoading {
 		m.statusMsg = "× 请先修正命令预览中的错误"
 		m.setFocus(panelRun)
 		return nil
 	}
-	if m.planLoading || m.planGenerate || !m.previewDone || m.plan == nil {
-		m.statusMsg = "请等待最新命令预览生成，查看后再按 x 执行"
+	if m.planLoading || m.planGenerate || !m.previewDone || plan == nil {
+		m.statusMsg = "请等待最新命令预览生成，查看后再按 x 入队"
 		m.setFocus(panelRun)
 		if !m.planLoading {
 			return m.schedulePlan(0)
 		}
 		return nil
 	}
-	if len(m.plan.Jobs) == 0 {
-		m.statusMsg = "× 未找到匹配的视频文件，未执行任何任务"
+	if len(plan.Jobs) == 0 {
+		m.statusMsg = "× 未找到匹配的视频文件，未入队任何任务"
 		m.setFocus(panelRun)
 		return nil
 	}
-	return m.startRun()
+	return m.enqueue(plan)
 }
 
-// startRun 初始化执行状态并启动批处理，随后配置全部锁定。
-func (m *model) startRun() tea.Cmd {
-	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancel = cancel
-	m.evCh = make(chan tea.Msg, 256)
-	m.runStarted = make(chan struct{})
-	m.runFinished = make(chan struct{})
-	m.runID++
-	if m.planCancel != nil {
-		m.planCancel()
-		m.planCancel = nil
+// enqueue 把计划交给任务队列，队列空闲时立即开始执行。
+func (m *model) enqueue(plan *command.BatchPlan) tea.Cmd {
+	if m.queue == nil {
+		m.statusMsg = "× 队列未就绪，请重启程序"
+		return nil
 	}
-	m.planSeq++
-	m.planGenerate, m.planLoading = false, false
-	m.total, m.done, m.failed, m.canceled = len(m.plan.Jobs), 0, 0, 0
-	m.current = ""
-	m.logs = nil
-	m.logDirty, m.logRefreshScheduled = false, false
-	m.runErr = nil
-	m.runIdx = -1
-	m.fileFollow = true
-	m.fileCursor = 0
-	for i := range m.files {
-		m.files[i].state = filePending
-		m.files[i].logs = nil
+	b, err := m.queue.Enqueue(plan, m.ops)
+	if err != nil {
+		m.statusMsg = "× 入队失败: " + err.Error()
+		return nil
 	}
-	m.startAt = time.Now()
-	m.elapsed = 0
-	m.running = true
-	m.eventing = true
-	m.logFollow = true
-	m.setFocus(panelRun)
-	m.refreshRunHeights()
-	m.syncLogPane()
-	m.logVp.GotoBottom()
-	return tea.Batch(
-		startBatchCmd(m.ctx, ctx, m.plan, m.runID, m.evCh, m.runStarted, m.runFinished),
-		listenEvents(m.ctx, m.evCh),
-		tickCmd(m.runID),
-	)
+	m.statusMsg = fmt.Sprintf("已加入任务队列（%d 个任务），队列空闲时立即开始", len(b.Items))
+	return nil
 }

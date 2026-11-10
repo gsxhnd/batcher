@@ -1,4 +1,4 @@
-package ffmpeg
+package task
 
 import (
 	"context"
@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gsxhnd/batcher/internal/command"
+	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,10 +33,10 @@ func newMediaFixture(t *testing.T) mediaFixture {
 	fx.video = filepath.Join(fx.input, "episode.mkv")
 	subtitle := "1\n00:00:00,000 --> 00:00:00,400\n测试字幕\n"
 	original := filepath.Join(root, "原字幕.srt")
-	writeFile(t, original, subtitle)
-	writeFile(t, filepath.Join(fx.input, "episode.chi.srt"), subtitle)
+	testutil.WriteFile(t, original, subtitle)
+	testutil.WriteFile(t, filepath.Join(fx.input, "episode.chi.srt"), subtitle)
 	// 字体附件只检查封装，不验证字体渲染，使用临时占位内容。
-	writeFile(t, filepath.Join(fx.fonts, "测试.ttf"), "字体附件占位内容")
+	testutil.WriteFile(t, filepath.Join(fx.fonts, "测试.ttf"), "字体附件占位内容")
 	runFixtureFFmpeg(t, []string{
 		"-nostdin", "-n", "-v", "error",
 		"-f", "lavfi", "-i", "color=c=black:s=32x32:r=2:d=0.5",
@@ -51,12 +54,12 @@ func runFixtureFFmpeg(t *testing.T, args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var logs string
-	vb := &videoBatch{option: &VideoBatchOption{Workers: 1, OnEvent: func(e Event) {
-		if e.Type == EventLog {
+	runner := &ffmpeg.Runner{OnEvent: func(e ffmpeg.Event) {
+		if e.Type == ffmpeg.EventLog {
 			logs += e.Message + "\n"
 		}
-	}}}
-	require.NoError(t, vb.ExecuteBatch(ctx, [][]string{args}), logs)
+	}}
+	require.NoError(t, runner.Run(ctx, ffmpeg.Call{Total: 1, Args: args}), logs)
 }
 
 type probedStream struct {
@@ -85,32 +88,32 @@ func TestBatchPlanRealMediaCombinations(t *testing.T) {
 	fx := newMediaFixture(t)
 	for _, tc := range []struct {
 		name string
-		sel  Selection
+		sel  command.Selection
 	}{
-		{"转码", Selection{Convert: true}},
-		{"字幕", Selection{AddSubtitle: true}},
-		{"字体", Selection{AddFonts: true}},
-		{"转码与字幕", Selection{Convert: true, AddSubtitle: true}},
-		{"转码与字体", Selection{Convert: true, AddFonts: true}},
-		{"字幕与字体", Selection{AddSubtitle: true, AddFonts: true}},
-		{"全部操作", Selection{Convert: true, AddSubtitle: true, AddFonts: true}},
+		{"转码", command.Selection{Convert: true}},
+		{"字幕", command.Selection{AddSubtitle: true}},
+		{"字体", command.Selection{AddFonts: true}},
+		{"转码与字幕", command.Selection{Convert: true, AddSubtitle: true}},
+		{"转码与字体", command.Selection{Convert: true, AddFonts: true}},
+		{"字幕与字体", command.Selection{AddSubtitle: true, AddFonts: true}},
+		{"全部操作", command.Selection{Convert: true, AddSubtitle: true, AddFonts: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			opt := DefaultOption()
+			opt := command.DefaultOption()
 			opt.InputPath, opt.InputFormat = fx.input, "mkv"
 			opt.OutputPath = filepath.Join(t.TempDir(), "尚未创建")
 			opt.FontsPath = fx.fonts
 			opt.Advance = `-c:v mpeg4 -q:v 4 -c:a copy -vf "scale=16:16" -metadata title="标题 with  spaces"`
-			opt.Subtitles = []SubtitleOption{{Suffix: "chi.srt", Lang: "chi", Title: "简体中文 with spaces", Default: true}}
+			opt.Subtitles = []command.SubtitleOption{{Suffix: "chi.srt", Lang: "chi", Title: "简体中文 with spaces", Default: true}}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			plan, err := BuildPlan(ctx, &opt, tc.sel)
+			plan, err := command.BuildPlan(ctx, &opt, tc.sel)
 			require.NoError(t, err)
 			require.Len(t, plan.Jobs, 1)
 			assert.NoDirExists(t, opt.OutputPath)
 			var logs string
-			err = plan.Execute(ctx, func(e Event) {
-				if e.Type == EventLog {
+			err = Execute(ctx, plan, func(e ffmpeg.Event) {
+				if e.Type == ffmpeg.EventLog {
 					logs += e.Message + "\n"
 				}
 			})
@@ -151,7 +154,7 @@ func TestBatchPlanRealMediaCombinations(t *testing.T) {
 			}
 			before, err := os.ReadFile(plan.Jobs[0].Output)
 			require.NoError(t, err)
-			assert.ErrorIs(t, plan.Execute(ctx, nil), os.ErrExist, "重跑不得静默覆盖已有文件")
+			assert.ErrorIs(t, Execute(ctx, plan, nil), os.ErrExist, "重跑不得静默覆盖已有文件")
 			after, err := os.ReadFile(plan.Jobs[0].Output)
 			require.NoError(t, err)
 			assert.Equal(t, before, after)
@@ -161,22 +164,19 @@ func TestBatchPlanRealMediaCombinations(t *testing.T) {
 
 func TestBatchPlanExecutesSnapshot(t *testing.T) {
 	fx := newMediaFixture(t)
-	opt := DefaultOption()
+	opt := command.DefaultOption()
 	opt.InputPath, opt.InputFormat = fx.input, "mkv"
 	opt.OutputPath = filepath.Join(t.TempDir(), "快照输出")
 	opt.Advance = "-c copy"
-	plan, err := BuildPlan(context.Background(), &opt, Selection{Convert: true})
+	plan, err := command.BuildPlan(context.Background(), &opt, command.Selection{Convert: true})
 	require.NoError(t, err)
-	commands := plan.Commands()
-	commands[0][0] = "调用方修改副本"
-	assert.Equal(t, "-nostdin", plan.Jobs[0].Args[0])
 	data, err := os.ReadFile(fx.video)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(fx.input, "新增.mkv"), data, 0o644))
 	opt.InputPath, opt.OutputPath, opt.Advance = "不存在的输入", "不能使用的新输出", "-y"
 	var total int
-	err = plan.Execute(context.Background(), func(e Event) {
-		if e.Type == EventBatchStart {
+	err = Execute(context.Background(), plan, func(e ffmpeg.Event) {
+		if e.Type == ffmpeg.EventBatchStart {
 			total = e.Total
 		}
 	})
@@ -186,32 +186,32 @@ func TestBatchPlanExecutesSnapshot(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(filepath.Dir(plan.Jobs[0].Output), "新增.mkv"))
 }
 
-func TestServiceRunPaths(t *testing.T) {
+func TestAddingFontsPreservesExistingAttachmentMetadata(t *testing.T) {
 	fx := newMediaFixture(t)
-	for _, task := range []Task{TaskConvert, TaskAddSubtitle, TaskAddFonts, "组合"} {
-		t.Run(string(task), func(t *testing.T) {
-			opt := DefaultOption()
-			opt.InputPath, opt.InputFormat, opt.FontsPath = fx.input, "mkv", fx.fonts
-			opt.OutputPath = filepath.Join(t.TempDir(), "输出")
-			opt.Advance = "-c copy"
-			opt.InputSubSuffix = "chi.srt"
-			var logs string
-			opt.OnEvent = func(e Event) { logs += e.Message + "\n" }
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			var err error
-			if task == "组合" {
-				err = RunCombined(ctx, &opt, Selection{Convert: true, AddSubtitle: true, AddFonts: true})
-			} else {
-				err = Run(ctx, task, &opt)
-			}
-			require.NoError(t, err, logs)
-			assert.FileExists(t, filepath.Join(opt.OutputPath, "episode.mkv"))
-			if task != "组合" {
-				assert.ErrorIs(t, Run(ctx, task, &opt), os.ErrExist)
-			}
-		})
+	root := t.TempDir()
+	attachment := filepath.Join(root, "原附件.bin")
+	testutil.WriteFile(t, attachment, "原附件内容")
+	source := filepath.Join(root, "source.mkv")
+	runFixtureFFmpeg(t, []string{
+		"-nostdin", "-n", "-v", "error", "-i", fx.video, "-map", "0", "-c", "copy",
+		"-attach", attachment, "-metadata:s:t:0", "mimetype=application/octet-stream", source,
+	})
+	opt := command.DefaultOption()
+	opt.InputPath, opt.InputFormat, opt.FontsPath = source, "mkv", fx.fonts
+	opt.OutputPath = t.TempDir()
+	plan, err := command.BuildPlan(context.Background(), &opt, command.Selection{AddFonts: true})
+	require.NoError(t, err)
+	var logs string
+	err = Execute(context.Background(), plan, func(e ffmpeg.Event) { logs += e.Message + "\n" })
+	require.NoError(t, err, logs)
+	attachments := make(map[string]string)
+	for _, stream := range probeStreams(t, plan.Jobs[0].Output) {
+		if stream.Type == "attachment" {
+			attachments[stream.Tags["filename"]] = stream.Tags["mimetype"]
+		}
 	}
-	assert.Error(t, Run(context.Background(), "未知任务", nil))
-	assert.Error(t, RunCombined(context.Background(), nil, Selection{Convert: true}))
+	assert.Equal(t, map[string]string{
+		"原附件.bin": "application/octet-stream",
+		"测试.ttf":  "application/x-truetype-font",
+	}, attachments)
 }

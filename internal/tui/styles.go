@@ -1,5 +1,5 @@
 // Package tui 是 batcher 的交互式终端界面，基于 bubbletea v2 / bubbles v2 / lipgloss v2 构建，
-// 复用 internal/ffmpeg 等核心包的 Plan / ExecuteBatch / Event 能力，不重复实现业务逻辑。
+// 复用 internal/command、internal/task、internal/ffmpeg 等核心包的规划、执行与事件能力，不重复实现业务逻辑。
 package tui
 
 import "charm.land/lipgloss/v2"

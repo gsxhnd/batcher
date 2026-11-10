@@ -33,18 +33,14 @@ func Run() error {
 	defer cancel()
 	m := newModel()
 	m.ctx = ctx
+	m.initQueue(make(chan tea.Msg, 256))
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	final, err := p.Run()
 	canceled := ctx.Err() != nil
 	cancel()
 	if final, ok := final.(model); ok {
+		// 停止任务队列并等待消费者退出：已启动的子任务完成取消与资源回收，记录落盘。
 		final.quitCleanup()
-		// 已经启动的命令必须完成取消与资源回收；尚未启动的命令会被 ctx 拦截。
-		select {
-		case <-final.runStarted:
-			<-final.runFinished
-		default:
-		}
 	}
 	if err != nil && (!errors.Is(err, tea.ErrProgramKilled) || !canceled || errors.Is(err, tea.ErrProgramPanic)) {
 		return fmt.Errorf("运行终端界面: %w", err)

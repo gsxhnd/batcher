@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
-	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,8 +32,8 @@ func TestViewsRender(t *testing.T) {
 			isolatePresets(t)
 			m := newModel()
 			m.width, m.height = 100, 34
-			m.ops = ffmpeg.Selection{Convert: true, AddSubtitle: true}
-			m.subs = []ffmpeg.SubtitleOption{{Suffix: "ass", Lang: "chi", Title: "中文"}}
+			m.ops = command.Selection{Convert: true, AddSubtitle: true}
+			m.subs = []command.SubtitleOption{{Suffix: "ass", Lang: "chi", Title: "中文"}}
 			setup(&m)
 			out := m.render()
 			require.NotEmpty(t, out, "视图不应为空")
@@ -149,9 +149,9 @@ func TestRenderRowsUniform(t *testing.T) {
 	for _, size := range [][2]int{{120, 30}, {100, 34}, {70, 24}, {96, 40}} {
 		m := base
 		m.width, m.height = size[0], size[1]
-		m.ops = ffmpeg.Selection{Convert: true, AddSubtitle: true}
+		m.ops = command.Selection{Convert: true, AddSubtitle: true}
 		m.rebuildFields()
-		m.subs = []ffmpeg.SubtitleOption{{Suffix: "ass", Lang: "chi"}}
+		m.subs = []command.SubtitleOption{{Suffix: "ass", Lang: "chi"}}
 		m.previewDone = true
 		m.files = []fileItem{{input: "ep01.mkv", cmd: "ffmpeg -i ep01.mkv o.mkv"}}
 		out := m.render()
