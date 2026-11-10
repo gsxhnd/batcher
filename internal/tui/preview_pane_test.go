@@ -3,18 +3,17 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/stretchr/testify/assert"
-	"time"
-
 	"github.com/stretchr/testify/require"
 )
 
 func TestBuildFileItemsExtractsInputAndOutput(t *testing.T) {
-	items := buildFileItems([][]string{
-		{"-i", "src/a.mkv", "-c", "copy", "out/a.webm"},
-		{"-i", "src/b.mkv", "-sub_charenc", "UTF-8", "out/b.mkv"},
+	items := buildFileItems([]ffmpeg.Job{
+		{Input: "src/a.mkv", Output: "out/a.webm", Args: []string{"-nostdin", "-n", "-i", "src/a.mkv", "-c", "copy", "out/a.webm"}},
+		{Input: "src/b.mkv", Output: "out/b.mkv", Args: []string{"-nostdin", "-n", "-i", "src/b.mkv", "out/b.mkv"}},
 	})
 	require.Len(t, items, 2)
 	assert.Equal(t, "src/a.mkv", items[0].input)
@@ -24,13 +23,11 @@ func TestBuildFileItemsExtractsInputAndOutput(t *testing.T) {
 }
 
 func TestPlanMsgBuildsFileList(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.planSeq = 1
 
-	next, _ := m.Update(planMsg{seq: 1, cmds: [][]string{
-		{"-i", "a.mkv", "-c", "copy", "o/a.mkv"},
-		{"-i", "b.mkv", "-c", "copy", "o/b.mkv"},
-	}})
+	next, _ := m.Update(planMsg{seq: 1, plan: testPlan("a.mkv", "b.mkv")})
 	m = next.(model)
 
 	assert.True(t, m.previewDone)
@@ -39,7 +36,18 @@ func TestPlanMsgBuildsFileList(t *testing.T) {
 	assert.Contains(t, m.previewSummary, "共生成 2 条命令")
 }
 
+// testPlan 提供显式输入/输出的计划，避免测试依赖命令参数位置。
+func testPlan(inputs ...string) *ffmpeg.BatchPlan {
+	plan := &ffmpeg.BatchPlan{}
+	for _, input := range inputs {
+		output := "o/" + input
+		plan.Jobs = append(plan.Jobs, ffmpeg.Job{Input: input, Output: output, Args: []string{"-nostdin", "-n", "-i", input, output}})
+	}
+	return plan
+}
+
 func TestPlanMsgWithErrorKeepsEmptyFiles(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.planSeq = 1
 	next, _ := m.Update(planMsg{seq: 1, err: assert.AnError})
@@ -51,6 +59,7 @@ func TestPlanMsgWithErrorKeepsEmptyFiles(t *testing.T) {
 }
 
 func TestHandleEventRoutesByFile(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.files = []fileItem{
 		{input: "a.mkv", cmd: "ffmpeg -i a.mkv o/a.mkv"},
@@ -79,6 +88,7 @@ func TestHandleEventRoutesByFile(t *testing.T) {
 }
 
 func TestMoveFilePaneBoundsAndFollow(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.running = true
 	m.files = []fileItem{
@@ -108,6 +118,7 @@ func TestMoveFilePaneBoundsAndFollow(t *testing.T) {
 
 // TestSchedulePlanDebounce 验证防抖序号与执行锁。
 func TestSchedulePlanDebounce(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.planSeq = 0
 
@@ -125,6 +136,7 @@ func TestSchedulePlanDebounce(t *testing.T) {
 
 // TestDoneMsgUnlocks 验证执行结束时解锁并保留配置以便重跑。
 func TestDoneMsgUnlocks(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.running = true
 	m.total = 2

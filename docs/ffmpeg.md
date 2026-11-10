@@ -2,7 +2,7 @@
 
 > 系统环境中需要预先安装 ffmpeg
 
-batcher 中勾选"视频转码"后填写/选择的"高级自定义参数"会原样传给 ffmpeg。以下是常用组合参考。
+batcher 中勾选"视频转码"后填写/选择的"高级自定义参数"会解析为独立参数，放在所有输入之后、输出路径之前。支持引号和转义，不经 shell 执行。以下是常用组合参考。
 
 ## CPU 编码（libx264 / libx265）
 
@@ -44,17 +44,22 @@ ffmpeg -i INPUT.mp4 -c copy OUTPUT.mkv
 ## 添加字幕
 
 ```shell
-ffmpeg -i INPUT -c copy -i INPUT.ass -sub_charenc UTF-8 -c copy -map 0 -map 1 \
+ffmpeg -i INPUT -sub_charenc UTF-8 -i INPUT.ass -map 0 -map '-0:s?' -map 1 -map '0:s?' -c copy \
   -metadata:s:s:0 language=chi -metadata:s:s:0 title="简体中文" OUTPUT
 ```
 
-batcher 组合流程会为每条字幕追加独立输入并自动递增字幕流序号（`-metadata:s:s:<n>`）。
+batcher 组合流程会为每条字幕追加独立输入。默认先映射原视频的非字幕流，再映射新增字幕，最后保留原字幕，新增字幕序号因此从 0 开始且不依赖原字幕数量。
+
+高级参数中的空格需要正确引用，例如 `-metadata title="hello  world"` 会保留标题中的两个空格。输入参数 `-i` 与覆盖选项 `-y` 不允许写入高级参数。
 
 ## 添加多个字体
 
 ```shell
-ffmpeg -i INPUT -c copy -attach INPUT_FONT -metadata:s:t:0 mimetype=application/x-truetype-font OUTPUT
+ffmpeg -i INPUT -map 0 -c copy -attach FONT.ttf \
+  -metadata:s:t:m:filename:FONT.ttf mimetype=application/x-truetype-font OUTPUT.mkv
 ```
+
+字体 MIME 元数据按附件文件名匹配，不依赖原视频已有的附件数量，也不会改写其他附件的 MIME 类型。
 
 ## 相关工具
 

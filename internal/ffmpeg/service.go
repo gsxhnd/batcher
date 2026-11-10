@@ -15,26 +15,24 @@ const (
 
 // Plan 根据任务类型生成 ffmpeg 参数列表，不会执行任何命令。
 func Plan(task Task, opt *VideoBatchOption) (VideoBatcher, [][]string, error) {
-	vb, err := NewVideoBatch(opt)
+	sel, err := selectionForTask(task)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create video batch: %w", err)
+		return nil, nil, err
 	}
+	return PlanCombined(opt, sel)
+}
 
-	var cmds [][]string
+func selectionForTask(task Task) (Selection, error) {
 	switch task {
 	case TaskConvert:
-		cmds, err = vb.GetConvertBatch()
+		return Selection{Convert: true}, nil
 	case TaskAddSubtitle:
-		cmds, err = vb.GetAddSubtitleBatch()
+		return Selection{AddSubtitle: true}, nil
 	case TaskAddFonts:
-		cmds, err = vb.GetAddFontsBatch()
+		return Selection{AddFonts: true}, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown task: %q", task)
+		return Selection{}, fmt.Errorf("未知任务: %q", task)
 	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("plan %s: %w", task, err)
-	}
-	return vb, cmds, nil
 }
 
 // Preview 返回将要执行的命令（仅格式化，不执行）。
@@ -48,25 +46,22 @@ func Preview(task Task, opt *VideoBatchOption) ([]string, error) {
 
 // Run 生成并执行批处理。
 func Run(ctx context.Context, task Task, opt *VideoBatchOption) error {
-	vb, cmds, err := Plan(task, opt)
+	sel, err := selectionForTask(task)
 	if err != nil {
 		return err
 	}
-	if err := vb.ExecuteBatch(ctx, cmds); err != nil {
-		return fmt.Errorf("execute batch: %w", err)
-	}
-	return nil
+	return RunCombined(ctx, opt, sel)
 }
 
 // PlanCombined 按操作组合生成 ffmpeg 参数列表，不会执行任何命令。
 func PlanCombined(opt *VideoBatchOption, sel Selection) (VideoBatcher, [][]string, error) {
 	vb, err := NewVideoBatch(opt)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create video batch: %w", err)
+		return nil, nil, fmt.Errorf("创建批处理: %w", err)
 	}
 	cmds, err := vb.GetCombinedBatch(sel)
 	if err != nil {
-		return nil, nil, fmt.Errorf("plan %s: %w", sel, err)
+		return nil, nil, fmt.Errorf("规划 %s: %w", sel, err)
 	}
 	return vb, cmds, nil
 }
@@ -91,12 +86,12 @@ func formatLines(cmds [][]string) []string {
 
 // RunCombined 生成并执行操作组合的批处理。
 func RunCombined(ctx context.Context, opt *VideoBatchOption, sel Selection) error {
-	vb, cmds, err := PlanCombined(opt, sel)
+	plan, err := BuildPlan(ctx, opt, sel)
 	if err != nil {
 		return err
 	}
-	if err := vb.ExecuteBatch(ctx, cmds); err != nil {
-		return fmt.Errorf("execute batch: %w", err)
+	if err := plan.Execute(ctx, opt.OnEvent); err != nil {
+		return fmt.Errorf("执行批处理: %w", err)
 	}
 	return nil
 }

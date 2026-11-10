@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -59,10 +60,11 @@ var features = []feature{
 
 // 文件任务的执行状态（左侧列表标记用）。
 const (
-	filePending = ""        // 待执行
-	fileRunning = "running" // 执行中
-	fileDone    = "done"    // 完成
-	fileFailed  = "failed"  // 失败
+	filePending  = ""         // 待执行
+	fileRunning  = "running"  // 执行中
+	fileDone     = "done"     // 完成
+	fileFailed   = "failed"   // 失败
+	fileCanceled = "canceled" // 已取消
 )
 
 // fileItem 描述任务面板文件列表中的一个源文件任务。
@@ -70,12 +72,13 @@ type fileItem struct {
 	input  string   // 源文件路径
 	output string   // 输出文件路径
 	cmd    string   // 已格式化的完整 ffmpeg 命令
-	state  string   // filePending / fileRunning / fileDone / fileFailed
+	state  string   // filePending / fileRunning / fileDone / fileFailed / fileCanceled
 	logs   []string // 该任务执行时的 ffmpeg 输出（按行，带样式）
 }
 
 type model struct {
 	width, height int
+	ctx           context.Context // 程序生命周期；退出时取消所有后台工作
 
 	focus panel // 当前聚焦的面板（1-5）
 
@@ -96,9 +99,10 @@ type model struct {
 	subCursor int
 
 	// 主参数表单（进入编辑态后全局快捷键失效）
-	fields  []field
-	focusNo int  // 表单内的字段下标
-	editing bool // 是否处于表单输入状态
+	fields      []field
+	fieldValues map[string]string // 保留暂时隐藏字段以及显式清空的值
+	focusNo     int               // 表单内的字段下标
+	editing     bool              // 是否处于表单输入状态
 
 	// 弹窗（预设/字幕编辑、删除确认），非空时按键全部交给弹窗
 	modal *modal
@@ -109,6 +113,8 @@ type model struct {
 	previewDone  bool
 	planErr      error
 	planGenerate bool // 防抖 tick 到期后是否需要重新生成
+	planCancel   context.CancelFunc
+	plan         *ffmpeg.BatchPlan
 
 	// 命令预览/执行日志共用的右侧视口
 	vp             viewport.Model
@@ -124,27 +130,32 @@ type model struct {
 	rightW     int  // 右侧内容区宽度
 
 	// 执行
-	running   bool
-	opt       *ffmpeg.VideoBatchOption
-	total     int
-	done      int
-	failed    int
-	current   string
-	logs      []string
-	logVp     viewport.Model
-	bar       progress.Model
-	startAt   time.Time     // 开始执行时间（用于显示耗时）
-	elapsed   time.Duration // 批处理总耗时（结束时记录）
-	logFollow bool          // 日志是否贴底跟随最新输出（用户向上滚动后暂停）
-	cancel    context.CancelFunc
-	evCh      chan ffmpeg.Event
-	doneCh    chan error
-	eventing  bool
-	runErr    error
+	running             bool
+	total               int
+	done                int
+	failed              int
+	canceled            int
+	current             string
+	logs                []string
+	logVp               viewport.Model
+	bar                 progress.Model
+	startAt             time.Time     // 开始执行时间（用于显示耗时）
+	elapsed             time.Duration // 批处理总耗时（结束时记录）
+	logFollow           bool          // 日志是否贴底跟随最新输出（用户向上滚动后暂停）
+	cancel              context.CancelFunc
+	evCh                chan tea.Msg // 状态、日志与结束结果有序传递
+	runStarted          chan struct{}
+	runFinished         chan struct{}
+	eventing            bool
+	runErr              error
+	runID               int
+	logDirty            bool
+	logRefreshScheduled bool
 }
 
 func newModel() model {
 	m := model{
+		ctx:      context.Background(),
 		focus:    panelOps,
 		bar:      progress.New(progress.WithDefaultBlend()),
 		spin:     spinner.New(spinner.WithSpinner(spinner.Dot)),
@@ -218,6 +229,7 @@ func (m *model) setFocus(p panel) {
 		m.fileFollow = false
 	}
 	m.focus = p
+	m.refreshRunHeights()
 }
 
 // nextPanel 按 tab 方向循环切换到下一个可用面板。
@@ -241,20 +253,26 @@ func (m model) Init() tea.Cmd {
 
 type planMsg struct {
 	seq  int
-	cmds [][]string
+	plan *ffmpeg.BatchPlan
 	err  error
 }
 
 // planDebounceMsg 是配置变化后的防抖时钟：到期且序号仍是最新时才重新生成命令。
 type planDebounceMsg struct{ seq int }
 
-type eventMsg struct{ event ffmpeg.Event }
+type eventMsg struct {
+	runID int
+	event ffmpeg.Event
+}
 
-type doneMsg struct{ err error }
+type doneMsg struct {
+	runID int
+	err   error
+}
 
-type batchStartedMsg struct{}
+type logRefreshMsg struct{ runID int }
 
-type tickMsg struct{}
+type tickMsg struct{ runID int }
 
 // ---------- 命令 ----------
 
@@ -264,51 +282,47 @@ const maxLogLines = 1000
 // planDebounceDelay 配置变化后等待多少毫秒再重新生成命令列表。
 const planDebounceDelay = 300 * time.Millisecond
 
-func planCmd(opt *ffmpeg.VideoBatchOption, sel ffmpeg.Selection, seq int) tea.Cmd {
+func planCmd(ctx context.Context, opt *ffmpeg.VideoBatchOption, sel ffmpeg.Selection, seq int) tea.Cmd {
 	return func() tea.Msg {
-		_, cmds, err := ffmpeg.PlanCombined(opt, sel)
-		return planMsg{seq: seq, cmds: cmds, err: err}
+		plan, err := ffmpeg.BuildPlan(ctx, opt, sel)
+		return planMsg{seq: seq, plan: plan, err: err}
 	}
 }
 
-func listenEvents(ch <-chan ffmpeg.Event) tea.Cmd {
+func listenEvents(ctx context.Context, ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		e, ok := <-ch
-		if !ok {
+		select {
+		case <-ctx.Done():
 			return nil
+		case msg := <-ch:
+			return msg
 		}
-		return eventMsg{event: e}
 	}
 }
 
-func listenDone(ch <-chan error) tea.Cmd {
+// startBatchCmd 在同一通道中依次发送全部事件和最终结果，取消执行也不丢弃收尾事件。
+func startBatchCmd(appCtx, ctx context.Context, plan *ffmpeg.BatchPlan, runID int, evCh chan tea.Msg, started, finished chan struct{}) tea.Cmd {
 	return func() tea.Msg {
-		err := <-ch
-		return doneMsg{err: err}
-	}
-}
-
-func startBatchCmd(ctx context.Context, opt *ffmpeg.VideoBatchOption, sel ffmpeg.Selection, evCh chan ffmpeg.Event, doneCh chan error) tea.Cmd {
-	return func() tea.Msg {
-		opt.OnEvent = func(e ffmpeg.Event) {
+		close(started)
+		defer close(finished)
+		defer close(evCh)
+		send := func(msg tea.Msg) {
 			select {
-			case evCh <- e:
-			case <-ctx.Done():
+			case evCh <- msg:
+			case <-appCtx.Done():
 			}
 		}
-		go func() {
-			err := ffmpeg.RunCombined(ctx, opt, sel)
-			close(evCh)
-			doneCh <- err
-			close(doneCh)
-		}()
-		return batchStartedMsg{}
+		err := plan.Execute(ctx, func(e ffmpeg.Event) {
+			send(eventMsg{runID: runID, event: e})
+		})
+		send(doneMsg{runID: runID, err: err})
+		return nil
 	}
 }
 
 // tickCmd 每秒触发一次重绘，用于任务面板显示实时耗时。
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+func tickCmd(runID int) tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{runID: runID} })
 }
 
 // ---------- Update ----------
@@ -325,11 +339,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case planMsg:
-		if msg.seq != m.planSeq {
+		if m.running || msg.seq != m.planSeq {
 			return m, nil // 过期的 Plan 结果直接丢弃
+		}
+		if m.planCancel != nil {
+			m.planCancel()
+			m.planCancel = nil
 		}
 		m.planLoading = false
 		m.previewDone = true
+		m.plan = msg.plan
 		if msg.err != nil {
 			m.planErr = msg.err
 			m.files = nil
@@ -339,46 +358,81 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.planErr = nil
-		m.files = buildFileItems(msg.cmds)
+		if msg.plan == nil {
+			return m, nil
+		}
+		m.files = buildFileItems(msg.plan.Jobs)
 		m.fileCursor = 0
 		m.runIdx = -1
-		m.previewSummary = m.summaryText(msg.cmds)
+		m.previewSummary = m.summaryText(msg.plan.Commands())
+		m.refreshRunHeights()
 		m.syncPreview()
 		m.vp.GotoTop()
 		return m, nil
 
 	case planDebounceMsg:
-		if msg.seq == m.planSeq && m.planGenerate {
+		if !m.running && msg.seq == m.planSeq && m.planGenerate {
 			return m, m.runPlan()
 		}
 		return m, nil
 
 	case eventMsg:
+		if !m.running || msg.runID != m.runID {
+			return m, nil
+		}
 		cmds := []tea.Cmd{m.handleEvent(msg.event)}
 		if m.eventing {
-			cmds = append(cmds, listenEvents(m.evCh))
+			cmds = append(cmds, listenEvents(m.ctx, m.evCh))
 		}
 		return m, tea.Batch(cmds...)
 
 	case doneMsg:
+		if !m.running || msg.runID != m.runID {
+			return m, nil
+		}
 		m.eventing = false
 		m.runErr = msg.err
 		m.elapsed = time.Since(m.startAt).Round(time.Second)
 		m.running = false
-		if msg.err != nil {
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		if errors.Is(msg.err, context.Canceled) || errors.Is(msg.err, context.DeadlineExceeded) {
+			for i := range m.files {
+				if m.files[i].state == filePending || m.files[i].state == fileRunning {
+					m.files[i].state = fileCanceled
+					m.canceled++
+				}
+			}
+			m.statusMsg = "批处理已取消，配置与日志已保留"
+		} else if msg.err != nil {
 			m.statusMsg = "× 批处理已结束: " + msg.err.Error()
 		} else {
 			m.statusMsg = "✔ 批处理完成，可直接修改配置后按 x 重跑"
 		}
+		m.current = ""
+		m.runIdx = -1
+		m.logDirty = false
+		m.logRefreshScheduled = false
+		m.refreshRunHeights()
+		m.syncPreview()
+		m.syncLogPane()
 		return m, nil
 
-	case batchStartedMsg:
-		m.eventing = true
-		return m, tea.Batch(listenEvents(m.evCh), listenDone(m.doneCh), tickCmd())
-
 	case tickMsg:
-		if m.eventing {
-			return m, tickCmd()
+		if m.eventing && msg.runID == m.runID {
+			return m, tickCmd(m.runID)
+		}
+		return m, nil
+
+	case logRefreshMsg:
+		if msg.runID == m.runID {
+			m.logRefreshScheduled = false
+			if m.logDirty {
+				m.syncLogPane()
+				m.logDirty = false
+			}
 		}
 		return m, nil
 
@@ -400,6 +454,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, m.handleKey(key)
+	}
+	if m.modal != nil {
+		return m, m.updateModal(msg)
+	}
+	if m.editing {
+		return m, m.updateFormEdit(msg)
 	}
 	return m, nil
 }
@@ -516,23 +576,44 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 		m.recordLine(e.Index, "    "+e.Message, "", logLineDefaultStyle)
 	case ffmpeg.EventCommandDone:
 		m.done++
-		m.current = ""
 		m.recordLine(e.Index, fmt.Sprintf("✔ [%d/%d] 完成", e.Index+1, e.Total), fileDone, logLineDoneStyle)
 	case ffmpeg.EventCommandFailed:
 		m.failed++
-		m.current = ""
 		m.recordLine(e.Index, fmt.Sprintf("✘ [%d/%d] 失败: %s", e.Index+1, e.Total, e.Message), fileFailed, logLineFailedStyle)
+	case ffmpeg.EventCommandCanceled:
+		m.canceled++
+		m.recordLine(e.Index, fmt.Sprintf("− [%d/%d] 已取消", e.Index+1, e.Total), fileCanceled, logLineInfoStyle)
 	}
-	var cmd tea.Cmd
-	if m.total > 0 {
-		cmd = m.bar.SetPercent(float64(m.done+m.failed) / float64(m.total))
+	if e.Type == ffmpeg.EventLog {
+		m.logDirty = true
+		if m.logRefreshScheduled {
+			return nil
+		}
+		m.logRefreshScheduled = true
+		runID := m.runID
+		return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg { return logRefreshMsg{runID: runID} })
+	}
+	if e.Type == ffmpeg.EventCommandDone || e.Type == ffmpeg.EventCommandFailed || e.Type == ffmpeg.EventCommandCanceled {
+		if e.Index == m.runIdx {
+			m.current, m.runIdx = "", -1
+			for i := len(m.files) - 1; i >= 0; i-- {
+				if m.files[i].state == fileRunning {
+					m.current, m.runIdx = m.files[i].cmd, i
+					if m.fileFollow {
+						m.fileCursor = i + 1
+					}
+					break
+				}
+			}
+		}
 	}
 	// 当前命令变化时置顶固定区域行数会变，日志视口高度需同步重算。
 	if m.running {
 		m.refreshRunHeights()
 	}
 	m.syncLogPane()
-	return cmd
+	m.logDirty = false
+	return nil
 }
 
 // recordLine 把一行输出同时写入全局日志与第 idx 个文件的日志；state 为空时不修改文件状态。
@@ -579,19 +660,11 @@ func (m model) summaryText(cmds [][]string) string {
 	return b.String()
 }
 
-// buildFileItems 从 Plan 生成的命令列表提取源文件与其命令。
-// 每条命令固定以 "-i <源文件>" 开头、以输出路径结尾（见 internal/ffmpeg 各批处理生成逻辑）。
-func buildFileItems(cmds [][]string) []fileItem {
-	items := make([]fileItem, 0, len(cmds))
-	for _, args := range cmds {
-		it := fileItem{cmd: ffmpeg.FormatCommand(args)}
-		if len(args) > 0 {
-			it.output = args[len(args)-1]
-		}
-		if len(args) >= 2 && args[0] == "-i" {
-			it.input = args[1]
-		}
-		items = append(items, it)
+// buildFileItems 直接使用计划中的结构化任务，不依赖 ffmpeg 参数的位置。
+func buildFileItems(jobs []ffmpeg.Job) []fileItem {
+	items := make([]fileItem, 0, len(jobs))
+	for _, job := range jobs {
+		items = append(items, fileItem{input: job.Input, output: job.Output, cmd: ffmpeg.FormatCommand(job.Args)})
 	}
 	return items
 }
@@ -609,6 +682,11 @@ func (m *model) schedulePlan(delay time.Duration) tea.Cmd {
 		// 执行中锁定配置，结束后如配置被改动可在停止时重新生成。
 		return nil
 	}
+	if m.planCancel != nil {
+		m.planCancel()
+		m.planCancel = nil
+	}
+	m.plan = nil
 	m.planGenerate = true
 	m.planLoading = true
 	m.planSeq++
@@ -635,11 +713,12 @@ func (m *model) runPlan() tea.Cmd {
 		m.planLoading = false
 		return nil
 	}
-	m.opt = opt
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.planCancel = cancel
 	if !m.previewDone {
 		m.previewSummary = ""
 	}
-	return tea.Batch(planCmd(m.opt, m.ops, m.planSeq), m.spin.Tick)
+	return tea.Batch(planCmd(ctx, opt, m.ops, m.planSeq), m.spin.Tick)
 }
 
 // ---------- 左右分栏尺寸与视口同步 ----------
@@ -658,6 +737,9 @@ func (m *model) resizePanes() {
 	}
 	m.leftW = min(sideW, max(12, m.width-14))
 	m.rightW = max(m.width-m.leftW-2, 12)
+	if m.width < narrowWidth {
+		m.leftW, m.rightW = m.width, m.width
+	}
 
 	m.vp.SetWidth(max(m.rightW-2, 10))
 	m.logVp.SetWidth(max(m.rightW-2, 10))
@@ -690,11 +772,22 @@ func (m model) previewHeadH() int {
 // 执行中给置顶命令与进度条留出固定行数，日志占满剩余空间。
 func (m *model) refreshRunHeights() {
 	inner := max(m.bodyH()-2, 2)
+	if h := m.narrowFilePaneH(); h > 0 {
+		inner = max(inner-h-1, 2)
+	}
 	if m.running {
 		m.logVp.SetHeight(max(inner-m.runPinH()-m.runBarH(), 2))
 		return
 	}
 	m.vp.SetHeight(max(inner-m.previewHeadH(), 1))
+}
+
+// narrowFilePaneH 是窄终端任务列表的实际行数，须给命令与日志保留空间。
+func (m model) narrowFilePaneH() int {
+	if m.width >= narrowWidth || m.focus != panelRun || len(m.files) == 0 {
+		return 0
+	}
+	return min(len(m.files)+1, max(1, min(6, m.bodyH()/4)))
 }
 
 // panelHeights 返回左侧五个面板的内容行数分配（面板边框每格占 2 行）。
@@ -707,10 +800,10 @@ func (m model) panelHeights() [panelCount]int {
 		if panel(i) == m.focus {
 			continue // 聚焦面板取剩余全部空间，最后统一赋值
 		}
-		hs[i] = min(content, 2)
+		hs[i] = min(max(h-1, 0), 2)
 		h -= hs[i]
 	}
-	hs[m.focus] = max(h, 1)
+	hs[m.focus] = h
 	return hs
 }
 
@@ -740,7 +833,16 @@ func (m model) previewContent() string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "输出: %s\n\n", it.output)
 		b.WriteString(it.cmd)
+		if len(it.logs) > 0 {
+			b.WriteString("\n\n执行日志\n")
+			b.WriteString(strings.Join(it.logs, "\n"))
+		}
 		return b.String()
+	}
+	for _, item := range m.files {
+		if len(item.logs) > 0 {
+			return m.previewSummary + "\n执行日志\n" + strings.Join(m.logs, "\n")
+		}
 	}
 	return m.previewSummary
 }
@@ -776,6 +878,9 @@ func (m *model) syncLogPane() {
 
 // quitCleanup 退出前取消仍在执行的批处理。
 func (m model) quitCleanup() {
+	if m.planCancel != nil {
+		m.planCancel()
+	}
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -787,9 +892,11 @@ func (m model) quitCleanup() {
 // 高级参数字段优先使用当前选中的预设参数。
 func (m *model) rebuildFields() {
 	defs := fieldsFor(m.ops)
-	old := make(map[string]string, len(m.fields))
+	if m.fieldValues == nil {
+		m.fieldValues = make(map[string]string)
+	}
 	for _, f := range m.fields {
-		old[f.def.key] = f.input.Value()
+		m.fieldValues[f.def.key] = f.input.Value()
 	}
 
 	base := ffmpeg.DefaultOption()
@@ -805,7 +912,7 @@ func (m *model) rebuildFields() {
 		case "fonts_path":
 			nf.input.Placeholder = "字体文件所在文件夹"
 		}
-		if v, ok := old[def.key]; ok && v != "" {
+		if v, ok := m.fieldValues[def.key]; ok {
 			nf.input.SetValue(v)
 		}
 		m.fields = append(m.fields, nf)

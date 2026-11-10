@@ -2,7 +2,6 @@ package ffmpeg
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,10 +64,10 @@ func newFixture(t *testing.T) fixtureData {
 // attachCmd 生成 fonts 字体列表对应的 -attach 参数段期望值。
 func attachCmd(fonts []string) []string {
 	cmd := make([]string, 0, len(fonts)*4)
-	for i, fontPath := range fonts {
+	for _, fontPath := range fonts {
 		cmd = append(cmd,
 			"-attach", fontPath,
-			fmt.Sprintf("-metadata:s:t:%d", i),
+			"-metadata:s:t:m:filename:"+filepath.Base(fontPath),
 			"mimetype=application/x-truetype-font",
 		)
 	}
@@ -234,12 +233,11 @@ func Test_videoBatch_GetConvertBatch(t *testing.T) {
 	fx := newFixture(t)
 	want := func(fx fixtureData) [][]string {
 		outs := outputs(fx, "mkv")
-		return [][]string{
-			{"-i", fx.mp4s[0], outs[0]},
-			{"-i", fx.mp4s[1], outs[1]},
-			{"-i", fx.mp4s[2], outs[2]},
-			{"-i", fx.mp4s[3], outs[3]},
+		var cmds [][]string
+		for i, input := range fx.mp4s {
+			cmds = append(cmds, []string{"-nostdin", "-n", "-i", input, "-map", "0", "-c:s", "copy", "-c:t", "copy", "-c:d", "copy", outs[i]})
 		}
+		return cmds
 	}
 	tests := []struct {
 		name    string
@@ -286,7 +284,7 @@ func Test_videoBatch_GetAddFontsBatch(t *testing.T) {
 		outs := outputs(fx, "mkv")
 		var cmds [][]string
 		for i, videoPath := range fx.mkvs {
-			cmd := []string{"-i", videoPath, "-c", "copy"}
+			cmd := []string{"-nostdin", "-n", "-i", videoPath, "-map", "0", "-c", "copy"}
 			cmd = append(cmd, attachCmd(fx.fonts)...)
 			cmd = append(cmd, outs[i])
 			cmds = append(cmds, cmd)

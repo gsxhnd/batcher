@@ -6,10 +6,13 @@ package presets
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gsxhnd/batcher/internal/commandline"
 )
 
 // PresetFile 用户预设文件名（位于预设文件夹内）。
@@ -56,7 +59,7 @@ func Dir() (string, error) {
 func dirFromExe() (string, error) {
 	exe, err := executablePath()
 	if err != nil {
-		return "", fmt.Errorf("resolve executable path: %w", err)
+		return "", fmt.Errorf("解析可执行文件路径: %w", err)
 	}
 	// 解析符号链接，保证 macOS 上返回真实的安装位置。
 	if eval, err := filepath.EvalSymlinks(exe); err == nil {
@@ -95,7 +98,7 @@ func Save(presets []Preset) error {
 // LoadFrom 从指定目录读取用户预设列表；文件不存在时返回空列表（非错误）。
 func LoadFrom(dir string) ([]Preset, error) {
 	if dir == "" {
-		return nil, fmt.Errorf("preset directory cannot be empty")
+		return nil, fmt.Errorf("预设目录不能为空")
 	}
 	path := filepath.Join(dir, PresetFile)
 	data, err := os.ReadFile(path)
@@ -103,25 +106,68 @@ func LoadFrom(dir string) ([]Preset, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read presets %s: %w", path, err)
+		return nil, fmt.Errorf("读取预设 %s: %w", path, err)
 	}
 	var presets []Preset
 	if err := json.Unmarshal(data, &presets); err != nil {
-		return nil, fmt.Errorf("parse presets %s: %w", path, err)
+		return nil, fmt.Errorf("解析预设 %s: %w", path, err)
 	}
-	return presets, nil
+	return normalizePresets(presets), nil
 }
 
 // SaveTo 覆写保存用户预设列表到指定目录（自动创建目录）。
 // 参数为空的条目会被丢弃；参数相同的条目只保留第一条，名称与参数均去除首尾空白。
-func SaveTo(dir string, presets []Preset) error {
+func SaveTo(dir string, presets []Preset) (saveErr error) {
 	if dir == "" {
-		return fmt.Errorf("preset directory cannot be empty")
+		return fmt.Errorf("预设目录不能为空")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create preset dir %s: %w", dir, err)
+		return fmt.Errorf("创建预设目录 %s: %w", dir, err)
 	}
+	path := filepath.Join(dir, PresetFile)
+	data, err := json.MarshalIndent(normalizePresets(presets), "", "  ")
+	if err != nil {
+		return fmt.Errorf("编码预设: %w", err)
+	}
+	file, err := os.CreateTemp(dir, ".advance_presets-*")
+	if err != nil {
+		return fmt.Errorf("创建预设临时文件: %w", err)
+	}
+	// 写入失败时关闭并清理临时文件，保留原始错误和清理错误。
+	closed := false
+	defer func() {
+		if !closed {
+			if err := file.Close(); err != nil {
+				saveErr = errors.Join(saveErr, fmt.Errorf("关闭预设临时文件: %w", err))
+			}
+		}
+		if saveErr != nil {
+			if err := os.Remove(file.Name()); err != nil && !os.IsNotExist(err) {
+				saveErr = errors.Join(saveErr, fmt.Errorf("清理预设临时文件: %w", err))
+			}
+		}
+	}()
+	if err := file.Chmod(0o644); err != nil {
+		return fmt.Errorf("设置预设文件权限: %w", err)
+	}
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("写入预设临时文件: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("同步预设文件: %w", err)
+	}
+	err = file.Close()
+	closed = true
+	if err != nil {
+		return fmt.Errorf("关闭预设文件: %w", err)
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		return fmt.Errorf("替换预设 %s: %w", path, err)
+	}
+	return nil
+}
 
+func normalizePresets(presets []Preset) []Preset {
 	seen := make(map[string]struct{}, len(presets))
 	uniq := make([]Preset, 0, len(presets))
 	for _, p := range presets {
@@ -135,20 +181,12 @@ func SaveTo(dir string, presets []Preset) error {
 		seen[p.Args] = struct{}{}
 		uniq = append(uniq, p)
 	}
-
-	path := filepath.Join(dir, PresetFile)
-	data, err := json.MarshalIndent(uniq, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode presets: %w", err)
-	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write presets %s: %w", path, err)
-	}
-	return nil
+	return uniq
 }
 
 // Upsert 向预设列表追加一条预设（按参数文本去重，已存在则保持原条目不变），返回新列表。
 func Upsert(existing []Preset, p Preset) []Preset {
+	p.Name = strings.TrimSpace(p.Name)
 	p.Args = Trim(p.Args)
 	if p.Args == "" {
 		return existing
@@ -161,7 +199,7 @@ func Upsert(existing []Preset, p Preset) []Preset {
 	return append(existing, p)
 }
 
-// Trim 规范化一条高级参数字符串（去首尾空白并压缩连续空格）。
+// Trim 规范化高级参数，保留引号内的空白和转义语义。
 func Trim(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return commandline.Normalize(s)
 }

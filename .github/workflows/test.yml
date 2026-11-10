@@ -1,6 +1,13 @@
 name: Test
 
 on:
+  # 所有 PR 都运行检查，避免问题合并后才发现。
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "LICENSE"
   push:
     branches:
       - main
@@ -30,7 +37,15 @@ jobs:
           ffmpeg -version
 
       - name: Test
-        run: go test -v -coverprofile=coverage.out -covermode=atomic ./internal/... ./cmd/batcher/...
+        run: go test -race -v -coverprofile=coverage.out -covermode=atomic ./internal/... ./cmd/batcher/...
+
+      - name: Build and vet
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l internal cmd)"
 
       # - name: Upload coverage reports to Codecov
       #   uses: codecov/codecov-action@v4

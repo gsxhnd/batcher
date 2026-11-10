@@ -1,7 +1,12 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -24,9 +29,25 @@ func badgeVersion() string {
 
 // Run 启动交互式 TUI（备用屏幕全屏模式，由 View 的 AltScreen 开启）。
 func Run() error {
-	p := tea.NewProgram(newModel())
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("tui: %w", err)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	m := newModel()
+	m.ctx = ctx
+	p := tea.NewProgram(m, tea.WithContext(ctx))
+	final, err := p.Run()
+	canceled := ctx.Err() != nil
+	cancel()
+	if final, ok := final.(model); ok {
+		final.quitCleanup()
+		// 已经启动的命令必须完成取消与资源回收；尚未启动的命令会被 ctx 拦截。
+		select {
+		case <-final.runStarted:
+			<-final.runFinished
+		default:
+		}
+	}
+	if err != nil && (!errors.Is(err, tea.ErrProgramKilled) || !canceled || errors.Is(err, tea.ErrProgramPanic)) {
+		return fmt.Errorf("运行终端界面: %w", err)
 	}
 	return nil
 }

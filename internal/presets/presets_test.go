@@ -1,9 +1,12 @@
 package presets
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gsxhnd/batcher/internal/commandline"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +17,47 @@ func TestLoadFrom_FileNotExists(t *testing.T) {
 	got, err := LoadFrom(dir)
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+func TestSavePreservesQuotedWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	args := `-metadata title="hello  world" -vf "drawtext=text='你好 世界'"`
+	require.NoError(t, SaveTo(dir, []Preset{{Args: args}}))
+	loaded, err := LoadFrom(dir)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	want, err := commandline.Parse(args)
+	require.NoError(t, err)
+	got, err := commandline.Parse(loaded[0].Args)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestSaveAtomicallyReplacesFileAndCleansTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, SaveTo(dir, []Preset{{Args: "-c copy"}}))
+	want := []Preset{{Name: "新预设", Args: "-c:v libx264"}}
+	require.NoError(t, SaveTo(dir, want))
+	got, err := LoadFrom(dir)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, PresetFile, entries[0].Name())
+
+	blocked := t.TempDir()
+	target := filepath.Join(blocked, PresetFile)
+	require.NoError(t, os.Mkdir(target, 0o755))
+	sentinel := filepath.Join(target, "原内容")
+	require.NoError(t, os.WriteFile(sentinel, []byte("保留"), 0o644))
+	require.Error(t, SaveTo(blocked, want))
+	data, err := os.ReadFile(sentinel)
+	require.NoError(t, err)
+	assert.Equal(t, "保留", string(data))
+	entries, err = os.ReadDir(blocked)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "失败时也必须清理临时文件")
 }
 
 func TestSaveToAndLoadFrom(t *testing.T) {
@@ -117,4 +161,44 @@ func TestDirDefaultExecDir(t *testing.T) {
 		dir = resolved
 	}
 	assert.Equal(t, filepath.Join(dir, "presets"), got)
+}
+
+func TestExecutablePathErrorsPropagate(t *testing.T) {
+	t.Setenv(envDir, "")
+	want := errors.New("无法定位可执行文件")
+	original := executablePath
+	executablePath = func() (string, error) { return "", want }
+	t.Cleanup(func() { executablePath = original })
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"目录", func() error { _, err := Dir(); return err }},
+		{"文件路径", func() error { _, err := FilePath(); return err }},
+		{"读取", func() error { _, err := Load(); return err }},
+		{"保存", func() error { return Save(nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assert.ErrorIs(t, tc.call(), want) })
+	}
+}
+
+func TestInvalidPresetStorage(t *testing.T) {
+	_, err := LoadFrom("")
+	assert.Error(t, err)
+	assert.Error(t, SaveTo("", nil))
+	blocked := filepath.Join(t.TempDir(), "不是目录")
+	require.NoError(t, os.WriteFile(blocked, []byte("保留"), 0o644))
+	assert.Error(t, SaveTo(blocked, nil))
+	for _, content := range []string{"{未闭合", `[{"args":42}]`, `"不是列表"`} {
+		t.Run(content, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, PresetFile), []byte(content), 0o644))
+			_, err := LoadFrom(dir)
+			assert.Error(t, err)
+		})
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, PresetFile), 0o755))
+	_, err = LoadFrom(dir)
+	assert.Error(t, err)
 }

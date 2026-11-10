@@ -13,10 +13,11 @@ type VideoBatchOption struct {
 	OutputFormat   string `json:"outputFormat"`
 	FontsPath      string `json:"fontsPath"`
 	InputSubSuffix string `json:"inputSubSuffix"`
-	InputSubNo     int    `json:"inputSubNo"`
-	InputSubTitle  string `json:"inputSubTitle"`
-	InputSubLang   string `json:"inputSubLang"`
-	// Subtitles 为多条字幕列表（TUI/GUI 组合流程使用）；为空时回退到 InputSub* 单字幕字段。
+	// InputSubNo 默认 0，新增字幕排在原字幕之前；非 0 时兼容旧版显式指定原字幕数量的映射。
+	InputSubNo    int    `json:"inputSubNo"`
+	InputSubTitle string `json:"inputSubTitle"`
+	InputSubLang  string `json:"inputSubLang"`
+	// Subtitles 为多条字幕列表；为空时回退到 InputSub* 单字幕字段。
 	Subtitles []SubtitleOption `json:"subtitles,omitempty"`
 	Advance   string           `json:"advance"`
 	Workers   int              `json:"workers"` // 并发工作数
@@ -26,7 +27,7 @@ type VideoBatchOption struct {
 	OnEvent func(Event) `json:"-"`
 }
 
-// DefaultOption 返回各字段的默认值，GUI 表单初始值来自这里。
+// DefaultOption 返回各字段的默认值，TUI 表单初始值来自这里。
 func DefaultOption() VideoBatchOption {
 	return VideoBatchOption{
 		InputPath:      "./",
@@ -55,21 +56,21 @@ type SubtitleOption struct {
 // makeDir 创建目录；路径已存在且为目录时直接成功。
 func makeDir(fullPath string) error {
 	if fullPath == "" {
-		return fmt.Errorf("path cannot be empty")
+		return fmt.Errorf("目录路径不能为空")
 	}
 
 	fs, err := os.Stat(fullPath)
 	if err == nil {
 		if !fs.IsDir() {
-			return fmt.Errorf("path exists but is not a directory: %s", fullPath)
+			return fmt.Errorf("路径已存在但不是目录: %s", fullPath)
 		}
 		return nil
 	}
 	if os.IsNotExist(err) {
 		if err := os.MkdirAll(fullPath, os.ModePerm); err != nil {
-			return fmt.Errorf("create directory: %w", err)
+			return fmt.Errorf("创建目录: %w", err)
 		}
 		return nil
 	}
-	return fmt.Errorf("stat path: %w", err)
+	return fmt.Errorf("检查目录: %w", err)
 }

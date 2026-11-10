@@ -29,6 +29,7 @@ func TestViewsRender(t *testing.T) {
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {
+			isolatePresets(t)
 			m := newModel()
 			m.width, m.height = 100, 34
 			m.ops = ffmpeg.Selection{Convert: true, AddSubtitle: true}
@@ -57,6 +58,7 @@ func (e *fakeErr) Error() string { return "测试错误" }
 
 // TestViewsRenderNarrow 窄终端下仍应正常渲染。
 func TestViewsRenderNarrow(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.width, m.height = 70, 24
 	m.rows()
@@ -67,6 +69,7 @@ func TestViewsRenderNarrow(t *testing.T) {
 
 // TestPresetsPaneScrolls 长列表超出面板高度时按光标滚动窗口，光标行始终可见。
 func TestPresetsPaneScrolls(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.presets = []presets.Preset{
 		{Args: "custom-aa"}, {Args: "custom-bb"}, {Args: "custom-cc"}, {Args: "custom-dd"},
@@ -83,6 +86,7 @@ func TestPresetsPaneScrolls(t *testing.T) {
 
 // TestPanelHeightsFillBody 焦点面板展开、其余折叠 2 行，总内容行数须恰好填满主体区。
 func TestPanelHeightsFillBody(t *testing.T) {
+	isolatePresets(t)
 	base := newModel()
 	for _, h := range []int{24, 30, 40} {
 		m := base
@@ -140,6 +144,7 @@ func TestDrawBoxWidthsAligned(t *testing.T) {
 
 // TestRenderRowsUniform 整页渲染的每一行显示宽度都应等于终端宽度。
 func TestRenderRowsUniform(t *testing.T) {
+	isolatePresets(t)
 	base := newModel()
 	for _, size := range [][2]int{{120, 30}, {100, 34}, {70, 24}, {96, 40}} {
 		m := base

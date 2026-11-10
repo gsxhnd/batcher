@@ -8,14 +8,15 @@ import (
 type EventType string
 
 const (
-	EventBatchStart    EventType = "batch_start"
-	EventCommandStart  EventType = "command_start"
-	EventCommandDone   EventType = "command_done"
-	EventCommandFailed EventType = "command_failed"
-	EventLog           EventType = "log"
+	EventBatchStart      EventType = "batch_start"
+	EventCommandStart    EventType = "command_start"
+	EventCommandDone     EventType = "command_done"
+	EventCommandFailed   EventType = "command_failed"
+	EventCommandCanceled EventType = "command_canceled"
+	EventLog             EventType = "log"
 )
 
-// Event 描述批处理执行过程中的状态变化，供 CLI / GUI 展示进度。
+// Event 描述批处理执行过程中的状态变化，供 TUI 展示进度。
 type Event struct {
 	Type    EventType `json:"type"`
 	Index   int       `json:"index"`

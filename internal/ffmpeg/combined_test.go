@@ -17,10 +17,12 @@ func buildSelection(convert, sub, fonts bool) Selection {
 // fixtureOption 基于 fixture 目录构造一个组合流程的批处理选项。
 func fixtureOption(fx fixtureData) *VideoBatchOption {
 	return &VideoBatchOption{
-		InputPath:    fx.root,
-		InputFormat:  "mp4",
-		OutputPath:   fx.out + "/", // 保持与真实配置一致的末尾斜杠
-		OutputFormat: "mkv",
+		InputPath:      fx.root,
+		InputFormat:    "mp4",
+		InputSubSuffix: "ass",
+		FontsPath:      fx.dir1,
+		OutputPath:     fx.out + "/", // 保持与真实配置一致的末尾斜杠
+		OutputFormat:   "mkv",
 	}
 }
 
@@ -99,7 +101,7 @@ func Test_videoBatch_GetCombinedBatch(t *testing.T) {
 		assert.Len(t, cmds, len(fx.mp4s))
 
 		for _, cmd := range cmds {
-			assert.True(t, contains(cmd, []string{"-map", "0", "-map", "1"}))
+			assert.True(t, contains(cmd, []string{"-map", "0", "-map", "-0:s?", "-map", "1", "-map", "0:s?"}))
 			assert.True(t, contains(cmd, []string{"-c", "copy"}))
 			assert.True(t, contains(cmd, []string{"-attach"}))
 			assert.True(t, strings.HasPrefix(cmd[len(cmd)-1], fx.out+string(filepath.Separator)))
@@ -119,7 +121,7 @@ func Test_videoBatch_GetCombinedBatch(t *testing.T) {
 
 		for _, cmd := range cmds {
 			assert.True(t, contains(cmd, []string{"-c:v", "h265", "-crf", "20"}))
-			assert.True(t, contains(cmd, []string{"-map", "0", "-map", "1"}))
+			assert.True(t, contains(cmd, []string{"-map", "0", "-map", "-0:s?", "-map", "1", "-map", "0:s?"}))
 			// 未开启转码分支：不允许出现 -c copy
 			assert.False(t, contains(cmd, []string{"-c", "copy"}))
 			assert.True(t, contains(cmd, []string{"-attach"}))
@@ -163,7 +165,7 @@ func TestPreviewCombined(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, lines, len(fx.mp4s))
 	for _, l := range lines {
-		assert.True(t, strings.HasPrefix(l, "ffmpeg -i "), "bad line: %s", l)
+		assert.True(t, strings.HasPrefix(l, "ffmpeg -nostdin -n -i "), "bad line: %s", l)
 		assert.Contains(t, l, "-c:v")
 	}
 }
@@ -267,27 +269,23 @@ func Test_videoBatch_GetCombinedBatch_SubtitleDisposition(t *testing.T) {
 	})
 }
 
-func Test_videoBatch_matchSubtitle(t *testing.T) {
+func TestListSubtitleFiles(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, "1.mp4"), "video")
 	writeFile(t, filepath.Join(tmp, "1.chi.ass"), "sub1")
 	writeFile(t, filepath.Join(tmp, "1.eng.ass"), "sub2")
 	writeFile(t, filepath.Join(tmp, "2.srt"), "sub3")
 
-	opt := &VideoBatchOption{InputPath: tmp, OutputPath: filepath.Join(tmp, "out/")}
-	b, err := NewVideoBatch(opt)
-	assert.NoError(t, err)
-	vb := b.(*videoBatch)
-
-	names, err := vb.listInputFiles()
-	assert.NoError(t, err)
-
-	// 精确匹配优先
-	assert.Equal(t, filepath.Join(tmp, "2.srt"), vb.matchSubtitle(names, "2", "srt"))
-	// 带标记的字幕取排序后的第一个（1.chi.ass < 1.eng.ass）
-	assert.Equal(t, filepath.Join(tmp, "1.chi.ass"), vb.matchSubtitle(names, "1", "ass"))
-	// 未命中回退旧版约定路径
-	assert.Equal(t, filepath.Join(tmp, "3.ass"), vb.matchSubtitle(names, "3", "ass"))
+	names, err := listFiles(tmp)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"1.mp4", "1.chi.ass", "1.eng.ass", "2.srt"}, names)
+	name, err := resolveSubtitle(names, "2", "srt")
+	require.NoError(t, err)
+	assert.Equal(t, "2.srt", name)
+	_, err = resolveSubtitle(names, "1", "ass")
+	assert.ErrorContains(t, err, "多个字幕")
+	_, err = resolveSubtitle(names, "3", "ass")
+	assert.ErrorContains(t, err, "未找到")
 }
 
 func contains(haystack, needle []string) bool {

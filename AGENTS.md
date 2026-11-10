@@ -16,7 +16,7 @@ go run ./cmd/batcher                    # 本地启动 TUI（需终端，CI 无�
 
 ## 结构与数据流
 
-- `internal/ffmpeg`：核心包，不含 UI 和预设。**`Plan`/`Preview*` 只生成命令字符串、无副作用；只有 `ExecuteBatch` 真正起 ffmpeg 进程**。命令生成集中在 `batcher.go`（单一操作）和 `combined.go`（组合操作：转码+字幕+字体必须拼进同一条 ffmpeg 命令，不要拆成多条）。
+- `internal/ffmpeg`：核心包，不含 UI 和预设。**`Plan`/`Preview*`/`BuildPlan` 只读规划，不创建目录；只有 `ExecuteBatch` 真正起 ffmpeg 进程**。`BatchPlan`/`Job` 保存预览与执行共用的快照，执行不得重扫目录。单一操作和组合操作共用 `combined.go` 构建器，所有输入必须在输出编码选项之前；转码+字幕+字体拼进同一条命令，不要拆成多条。默认禁止覆盖输出，新增字幕排在原字幕之前，避免依赖媒体探测计算字幕偏移。
 - `internal/presets`：转码参数预设。`builtin.go` 是代码内置预设（只读）；用户预设存 **可执行文件所在目录下的 `presets/advance_presets.json`**（不是 ~/.config 也不是 ~/.batcher），保存时才创建目录。
 - `internal/tui`：按职责分文件 —— `model.go`（状态/消息/事件分发）、`panels.go`（各面板按键逻辑）、`modal.go`（弹窗：预设/字幕编辑与删除确认）、`fields.go`（表单字段构建与校验）、`views.go`（全部渲染）、`styles.go`（样式）。**没有 `phase` 状态机和向导式跳转**：布局是左右分栏（左侧 [1]-[5] 面板，右侧为焦点面板的内容），状态由 `focus`（当前面板）+ `editing`（表单输入态）+ `modal`（弹窗）+ `running`（执行中）组合表达。按键分发顺序是固定优先级：弹窗 > 表单编辑 > 执行中查看 > 全局键（1-5/tab/表单中的 x/q）> 焦点面板；新增交互必须遵守这个顺序，编辑态和弹窗里的按键必须被吞掉，否则 `j/k/x/1-5` 会泄漏成全局快捷键。
 - 命令预览是实时的：任何配置变化调 `schedulePlan` 防抖生成（`planMsg.seq` 丢弃过期结果）；执行期间锁定配置不生成。改某个面板的配置时记得调 `schedulePlan`。
@@ -29,7 +29,7 @@ go run ./cmd/batcher                    # 本地启动 TUI（需终端，CI 无�
 
 ## 测试约定
 
-- 媒体测试文件是临时占位文件（仅校验按文件名/后缀生成的命令，不校验内容）：`internal/ffmpeg/ffmpeg_test.go` 的 `newFixture(t)` 在 `t.TempDir()` 自动生成，**不要新建 repo 内 testdata/，也不要手工 touch 占位文件**。期望值用 `outputs`/`attachCmd` helper 动态算，不要硬编码路径。
+- 命令单元测试使用临时占位文件：`internal/ffmpeg/ffmpeg_test.go` 的 `newFixture(t)` 在 `t.TempDir()` 自动生成；`integration_test.go` 另外运行时生成微型真实媒体，用 ffprobe 校验组合结果。**不要新建 repo 内 testdata/，也不要手工 touch 占位文件**。期望值用 `outputs`/`attachCmd` helper 动态算，不要硬编码路径。
 - `ExecuteBatch` 系列测试会真实调用 ffmpeg（`-version`、故意失败的命令），本机必须装 ffmpeg。
 - 断言用 testify（assert/require），与现有测试保持一致。
 

@@ -3,10 +3,11 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/gsxhnd/batcher/internal/presets"
 )
 
@@ -64,22 +65,21 @@ func (m *model) updatePresetsPanel(msg tea.Msg) tea.Cmd {
 	case "a", "n":
 		if m.presetCursor < offset {
 			b := m.builtins[m.presetCursor]
-			return m.openPresetModal(-1, presets.Preset{Name: b.Name, Args: b.Args})
+			return m.openPresetModal(-1, presets.Preset(b))
 		}
 		return m.openPresetModal(-1, presets.Preset{})
 	case "e":
-		if m.presetCursor >= offset && len(m.presets) > 0 {
-			idx := m.presetCursor - offset
+		if idx, ok := m.selectedUserPreset(); ok {
 			return m.openPresetModal(idx, m.presets[idx])
 		}
-		m.statusMsg = "内置预设只读，按 a 可复制为自定义预设后再编辑"
+		m.statusMsg = "仅自定义预设可编辑；内置预设按 a 复制，手动参数在面板 4 编辑"
 		return nil
 	case "d":
-		if m.presetCursor < offset {
-			m.statusMsg = "内置预设不可删除，自定义预设才可删除"
+		idx, ok := m.selectedUserPreset()
+		if !ok {
+			m.statusMsg = "仅自定义预设可删除"
 			return nil
 		}
-		idx := m.presetCursor - offset
 		name := presetDisplayName(m.presets[idx])
 		m.openConfirmModal("删除自定义预设", fmt.Sprintf("删除「%s」？enter 确认，esc 取消", name),
 			func(m *model) tea.Cmd { return m.deletePreset(idx) })
@@ -94,8 +94,18 @@ func (m *model) updatePresetsPanel(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+// selectedUserPreset 只接受自定义段，统一保护内置项与末尾的手动输入项。
+func (m model) selectedUserPreset() (int, bool) {
+	idx := m.presetCursor - m.presetUserOffset()
+	return idx, idx >= 0 && idx < len(m.presets)
+}
+
 // applyAdvanceToForm 把当前选中的预设参数写入主表单的“高级自定义参数”字段。
 func (m *model) applyAdvanceToForm() {
+	if m.fieldValues == nil {
+		m.fieldValues = make(map[string]string)
+	}
+	m.fieldValues["advance"] = m.manualAdvance
 	for i := range m.fields {
 		if m.fields[i].def.key == "advance" {
 			m.fields[i].input.SetValue(m.manualAdvance)
@@ -110,27 +120,30 @@ func (m *model) deletePreset(idx int) tea.Cmd {
 		return nil
 	}
 	removed := m.presets[idx]
+	next := slices.Delete(slices.Clone(m.presets), idx, idx+1)
+	if err := m.persistPresets(next, "已删除"); err != nil {
+		return nil
+	}
 	if m.manualAdvance == removed.Args {
 		m.manualAdvance = ""
 		m.applyAdvanceToForm()
 	}
-	m.presets = append(m.presets[:idx], m.presets[idx+1:]...)
 	m.presetCursor = min(m.presetCursor, m.presetCount()-1)
-	m.persistPresets("已删除")
 	return m.schedulePlan(planDebounceDelay)
 }
 
 // movePreset 把当前自定义预设上移（-1）或下移（+1），并保存顺序。
 func (m *model) movePreset(delta int) {
-	offset := m.presetUserOffset()
-	idx := m.presetCursor - offset
+	idx, ok := m.selectedUserPreset()
 	to := idx + delta
-	if len(m.presets) < 2 || to < 0 || to >= len(m.presets) {
+	if !ok || len(m.presets) < 2 || to < 0 || to >= len(m.presets) {
 		return
 	}
-	m.presets[idx], m.presets[to] = m.presets[to], m.presets[idx]
-	m.presetCursor = offset + to
-	m.persistPresets("已调整顺序")
+	next := slices.Clone(m.presets)
+	next[idx], next[to] = next[to], next[idx]
+	if err := m.persistPresets(next, "已调整顺序"); err == nil {
+		m.presetCursor = m.presetUserOffset() + to
+	}
 }
 
 // presetDisplayName 返回预设删除确认中显示的名称。
@@ -142,12 +155,14 @@ func presetDisplayName(p presets.Preset) string {
 }
 
 // persistPresets 写入用户预设文件，并以 action 作为成功提示前缀。
-func (m *model) persistPresets(action string) {
-	if err := presets.Save(m.presets); err != nil {
+func (m *model) persistPresets(next []presets.Preset, action string) error {
+	if err := presets.Save(next); err != nil {
 		m.statusMsg = "× 保存预设失败: " + err.Error()
-		return
+		return err
 	}
+	m.presets = next
 	m.statusMsg = action + "，已保存到 " + presetHintText()
+	return nil
 }
 
 // ---------- 面板 [3] 字幕轨道 ----------
@@ -195,7 +210,10 @@ func (m *model) updateSubsPanel(msg tea.Msg) tea.Cmd {
 	case "t":
 		// t（toggle）：把当前字幕标记/取消为默认字幕流（-disposition default）。
 		if len(m.subs) > 0 {
-			m.subs[m.subCursor].Default = !m.subs[m.subCursor].Default
+			selected := !m.subs[m.subCursor].Default
+			for i := range m.subs {
+				m.subs[i].Default = selected && i == m.subCursor
+			}
 			return m.schedulePlan(planDebounceDelay)
 		}
 		m.statusMsg = "字幕列表为空"
@@ -214,9 +232,9 @@ func (m *model) updateFormPanel(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case "up", "k":
-		return m.focusFormNo(m.focusNo - 1)
+		m.focusNo = clamp(m.focusNo-1, 0, len(m.fields)-1)
 	case "down", "j":
-		return m.focusFormNo(m.focusNo + 1)
+		m.focusNo = clamp(m.focusNo+1, 0, len(m.fields)-1)
 	case "enter":
 		return m.beginFormEdit()
 	case "ctrl+s":
@@ -229,7 +247,7 @@ func (m *model) updateFormPanel(msg tea.Msg) tea.Cmd {
 func (m *model) updateFormEdit(msg tea.Msg) tea.Cmd {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
-		return nil
+		return m.updateFormInput(msg)
 	}
 	if key.String() == "ctrl+s" {
 		return m.saveAdvancePreset()
@@ -252,11 +270,23 @@ func (m *model) updateFormEdit(msg tea.Msg) tea.Cmd {
 		m.focusNo++
 		return focusField(m.fields, m.focusNo)
 	default:
-		f := &m.fields[m.focusNo]
-		var cmd tea.Cmd
-		f.input, cmd = f.input.Update(msg)
-		return tea.Batch(cmd, m.schedulePlan(planDebounceDelay))
+		return m.updateFormInput(msg)
 	}
+}
+
+// updateFormInput 同时处理键入、终端粘贴、剪贴板结果与输入框内部消息。
+func (m *model) updateFormInput(msg tea.Msg) tea.Cmd {
+	f := &m.fields[m.focusNo]
+	before := f.input.Value()
+	var cmd tea.Cmd
+	f.input, cmd = f.input.Update(msg)
+	if before == f.input.Value() {
+		return cmd
+	}
+	if f.def.key == "advance" {
+		m.manualAdvance = f.input.Value()
+	}
+	return tea.Batch(cmd, m.schedulePlan(planDebounceDelay))
 }
 
 // saveAdvancePreset 把当前“高级自定义参数”保存为常用预设（自定义预设文件）。
@@ -276,12 +306,10 @@ func (m *model) saveAdvancePreset() tea.Cmd {
 		m.statusMsg = "× 未勾选“视频转码”，无需保存高级参数"
 		return nil
 	}
-	m.presets = presets.Upsert(m.presets, presets.Preset{Args: args})
-	if err := presets.Save(m.presets); err != nil {
-		m.statusMsg = "× 保存失败: " + err.Error()
+	next := presets.Upsert(slices.Clone(m.presets), presets.Preset{Args: args})
+	if err := m.persistPresets(next, "已保存常用预设"); err != nil {
 		return nil
 	}
-	m.statusMsg = "已保存常用预设并写入 " + presetHintText()
 	return nil
 }
 
@@ -376,12 +404,20 @@ func (m *model) copyShownCommand() tea.Cmd {
 		m.statusMsg = "✔ 已复制当前任务的完整命令到剪贴板"
 		return tea.SetClipboard(cmd)
 	}
-	if !m.previewDone || m.planErr != nil || len(m.previewContent()) == 0 {
+	if m.planLoading || !m.previewDone || m.planErr != nil || len(m.files) == 0 {
 		m.statusMsg = "× 命令尚未生成，无法复制"
 		return nil
 	}
+	var commands []string
+	if idx := m.fileCursor - 1; idx >= 0 && idx < len(m.files) {
+		commands = append(commands, m.files[idx].cmd)
+	} else {
+		for _, item := range m.files {
+			commands = append(commands, item.cmd)
+		}
+	}
 	m.statusMsg = "✔ 已复制所选命令到剪贴板"
-	return tea.SetClipboard(m.previewContent())
+	return tea.SetClipboard(strings.Join(commands, "\n"))
 }
 
 // tryStartRun 校验配置并启动执行：失败时把焦点跳到出错的面板并给出提示。
@@ -394,16 +430,33 @@ func (m *model) tryStartRun() tea.Cmd {
 		m.setFocus(panelOps)
 		return nil
 	}
-	opt, err := m.buildOption()
+	_, err := m.buildOption()
 	if err != nil {
 		m.statusMsg = "× 校验失败：" + err.Error()
 		m.setFocus(panelForm)
 		return nil
 	}
-	m.opt = opt
 	if m.ops.AddSubtitle && len(m.subs) == 0 {
 		m.statusMsg = "× 已勾选添加字幕，请至少添加一条（面板 3 按 n）"
 		m.setFocus(panelSubs)
+		return nil
+	}
+	if m.planErr != nil && !m.planLoading {
+		m.statusMsg = "× 请先修正命令预览中的错误"
+		m.setFocus(panelRun)
+		return nil
+	}
+	if m.planLoading || m.planGenerate || !m.previewDone || m.plan == nil {
+		m.statusMsg = "请等待最新命令预览生成，查看后再按 x 执行"
+		m.setFocus(panelRun)
+		if !m.planLoading {
+			return m.schedulePlan(0)
+		}
+		return nil
+	}
+	if len(m.plan.Jobs) == 0 {
+		m.statusMsg = "× 未找到匹配的视频文件，未执行任何任务"
+		m.setFocus(panelRun)
 		return nil
 	}
 	return m.startRun()
@@ -411,13 +464,22 @@ func (m *model) tryStartRun() tea.Cmd {
 
 // startRun 初始化执行状态并启动批处理，随后配置全部锁定。
 func (m *model) startRun() tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
-	m.evCh = make(chan ffmpeg.Event, 256)
-	m.doneCh = make(chan error, 1)
-	m.total, m.done, m.failed = 0, 0, 0
+	m.evCh = make(chan tea.Msg, 256)
+	m.runStarted = make(chan struct{})
+	m.runFinished = make(chan struct{})
+	m.runID++
+	if m.planCancel != nil {
+		m.planCancel()
+		m.planCancel = nil
+	}
+	m.planSeq++
+	m.planGenerate, m.planLoading = false, false
+	m.total, m.done, m.failed, m.canceled = len(m.plan.Jobs), 0, 0, 0
 	m.current = ""
 	m.logs = nil
+	m.logDirty, m.logRefreshScheduled = false, false
 	m.runErr = nil
 	m.runIdx = -1
 	m.fileFollow = true
@@ -429,10 +491,15 @@ func (m *model) startRun() tea.Cmd {
 	m.startAt = time.Now()
 	m.elapsed = 0
 	m.running = true
+	m.eventing = true
 	m.logFollow = true
 	m.setFocus(panelRun)
 	m.refreshRunHeights()
 	m.syncLogPane()
 	m.logVp.GotoBottom()
-	return startBatchCmd(ctx, m.opt, m.ops, m.evCh, m.doneCh)
+	return tea.Batch(
+		startBatchCmd(m.ctx, ctx, m.plan, m.runID, m.evCh, m.runStarted, m.runFinished),
+		listenEvents(m.ctx, m.evCh),
+		tickCmd(m.runID),
+	)
 }

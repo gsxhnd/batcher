@@ -22,6 +22,7 @@ func teaWheelDown() tea.Msg { return tea.MouseWheelMsg{Button: tea.MouseWheelDow
 
 // TestRefreshRunVpHeights 回归：视口必须设置高度，否则预览/日志渲染为空。
 func TestRefreshRunVpHeights(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.width, m.height = 100, 34
 	m.resizePanes()
@@ -40,6 +41,7 @@ func TestRefreshRunVpHeights(t *testing.T) {
 
 // TestPinnedCmdRender 执行中主体最上方应有固定的完整命令区。
 func TestPinnedCmdRender(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.width, m.height = 100, 34
 	m.resizePanes()
@@ -55,6 +57,7 @@ func TestPinnedCmdRender(t *testing.T) {
 
 // TestLogFollowManualScroll 验证日志跟随与手动滚动暂停/恢复。
 func TestLogFollowManualScroll(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.width, m.height = 100, 20
 	m.resizePanes()
@@ -90,6 +93,7 @@ func TestLogFollowManualScroll(t *testing.T) {
 
 // TestCopyShownCommand 验证 y 复制命令与提示信息。
 func TestCopyShownCommand(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.width, m.height = 100, 34
 	m.rows() // 填充预览文件列表
@@ -120,6 +124,7 @@ func TestCopyShownCommand(t *testing.T) {
 
 // TestMouseWheelPausesFollow 滚轮向上滚动后应暂停日志跟随，回到底部恢复。
 func TestMouseWheelPausesFollow(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.width, m.height = 100, 20
 	m.resizePanes()
@@ -155,6 +160,7 @@ func TestMouseWheelPausesFollow(t *testing.T) {
 
 // TestSummaryMarksDefaultSub 汇总文本应标注默认字幕轨道。
 func TestSummaryMarksDefaultSub(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.ops = ffmpeg.Selection{AddSubtitle: true}
 	m.subs = []ffmpeg.SubtitleOption{

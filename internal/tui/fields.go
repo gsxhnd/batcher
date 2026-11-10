@@ -160,7 +160,7 @@ func (m *model) buildOption() (*ffmpeg.VideoBatchOption, error) {
 		setStringOption(&opt, f.def.key, f.Value())
 	}
 
-	// 与 CLI add_fonts 子命令 --input_fonts_path Required 的行为保持一致。
+	// 添加字体时必须提供目录，避免执行时才发现未配置。
 	if m.ops.AddFonts && opt.FontsPath == "" {
 		m.setFieldErr("fonts_path", "必填（已勾选添加字体）")
 		return nil, fmt.Errorf("勾选了添加字体，必须填写字体文件夹")

@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,14 @@ func (vb *videoBatch) ExecuteBatch(ctx context.Context, cmdBatch [][]string) err
 	if len(cmdBatch) == 0 {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if vb.option.OutputPath != "" {
+		if err := makeDir(vb.option.OutputPath); err != nil {
+			return fmt.Errorf("创建输出目录: %w", err)
+		}
+	}
 
 	vb.emit(Event{Type: EventBatchStart, Total: len(cmdBatch)})
 
@@ -23,59 +32,51 @@ func (vb *videoBatch) ExecuteBatch(ctx context.Context, cmdBatch [][]string) err
 }
 
 func (vb *videoBatch) executeSequential(ctx context.Context, cmdBatch [][]string) error {
+	var errs []error
 	for i, args := range cmdBatch {
 		if err := ctx.Err(); err != nil {
-			return err
+			return errors.Join(append(errs, err)...)
 		}
 		if err := vb.executeCommand(ctx, i, len(cmdBatch), args); err != nil {
-			return fmt.Errorf("execute command: %w", err)
+			errs = append(errs, fmt.Errorf("执行第 %d 条命令: %w", i+1, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (vb *videoBatch) executeConcurrent(ctx context.Context, cmdBatch [][]string) error {
-	var (
-		wg       sync.WaitGroup
-		errOnce  sync.Once
-		firstErr error
-	)
-
-	// 信号量控制并发数
-	sem := make(chan struct{}, vb.option.Workers)
-
-	for i, args := range cmdBatch {
-		if ctx.Err() != nil {
-			break
-		}
-
+	var wg sync.WaitGroup
+	jobs := make(chan int)
+	errs := make([]error, len(cmdBatch))
+	// 固定数量的 worker，避免为大量待执行文件创建同等数量的 goroutine。
+	for range min(vb.option.Workers, len(cmdBatch)) {
 		wg.Add(1)
-		go func(i int, a []string) {
+		go func() {
 			defer wg.Done()
-
+			for i := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := vb.executeCommand(ctx, i, len(cmdBatch), cmdBatch[i]); err != nil {
+					// 每个下标只有一个 worker 写入，等待全部结束后统一读取。
+					errs[i] = fmt.Errorf("执行第 %d 条命令: %w", i+1, err)
+				}
+			}
+		}()
+	}
+	submit := func() {
+		for i := range cmdBatch {
 			select {
 			case <-ctx.Done():
 				return
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
+			case jobs <- i:
 			}
-
-			if err := vb.executeCommand(ctx, i, len(cmdBatch), a); err != nil {
-				errOnce.Do(func() {
-					firstErr = fmt.Errorf("execute command: %w", err)
-				})
-			}
-		}(i, args)
+		}
 	}
-
+	submit()
+	close(jobs)
 	wg.Wait()
-	if firstErr != nil {
-		return firstErr
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return nil
+	return errors.Join(append(errs, ctx.Err())...)
 }
 
 func (vb *videoBatch) executeCommand(ctx context.Context, index, total int, args []string) error {
@@ -84,7 +85,13 @@ func (vb *videoBatch) executeCommand(ctx context.Context, index, total int, args
 	if vb.option.OnEvent == nil {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("任务已取消: %w", ctx.Err())
+			}
+			return err
+		}
+		return nil
 	}
 
 	command := FormatCommand(args)
@@ -100,7 +107,12 @@ func (vb *videoBatch) executeCommand(ctx context.Context, index, total int, args
 	lw.Flush()
 
 	if err != nil {
-		vb.emit(Event{Type: EventCommandFailed, Index: index, Total: total, Command: command, Message: err.Error()})
+		eventType := EventCommandFailed
+		if ctx.Err() != nil {
+			err = fmt.Errorf("任务已取消: %w", ctx.Err())
+			eventType = EventCommandCanceled
+		}
+		vb.emit(Event{Type: eventType, Index: index, Total: total, Command: command, Message: err.Error()})
 		return err
 	}
 	vb.emit(Event{Type: EventCommandDone, Index: index, Total: total, Command: command})

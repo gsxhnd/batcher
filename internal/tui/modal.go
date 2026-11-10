@@ -2,11 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/gsxhnd/batcher/internal/commandline"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/gsxhnd/batcher/internal/presets"
 )
@@ -159,6 +161,18 @@ func helpText() string {
 	row("完整命令", "固定显示在主体内容最上方，长命令自动折行")
 	row("↑/↓", "切换查看文件")
 	row("q", "取消当前批处理（界面保留）")
+	if version != "" || buildDate != "" || gitCommit != "" {
+		section("构建信息")
+		if version != "" {
+			row("版本", version)
+		}
+		if buildDate != "" {
+			row("构建时间", buildDate)
+		}
+		if gitCommit != "" {
+			row("提交", gitCommit)
+		}
+	}
 	return strings.TrimPrefix(b.String(), "\n")
 }
 
@@ -214,6 +228,15 @@ func (m model) modalView() string {
 func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
+		md := m.modal
+		if md.kind == modalPreset || md.kind == modalSub {
+			f := &md.fields[md.focus]
+			if f.def.kind != fieldBool {
+				var cmd tea.Cmd
+				f.input, cmd = f.input.Update(msg)
+				return cmd
+			}
+		}
 		return nil
 	}
 	md := m.modal
@@ -299,24 +322,35 @@ func (m *model) savePresetModal() tea.Cmd {
 		md.err = "高级参数不能为空"
 		return focusField(md.fields, len(md.fields)-1)
 	}
+	if _, err := commandline.Parse(entry.Args); err != nil {
+		md.err = err.Error()
+		return focusField(md.fields, len(md.fields)-1)
+	}
 	for i, p := range m.presets {
 		if p.Args == entry.Args && i != md.editIndex {
 			md.err = "已存在相同的参数"
 			return focusField(md.fields, len(md.fields)-1)
 		}
 	}
-	if md.editIndex >= 0 && md.editIndex < len(m.presets) {
+	next := slices.Clone(m.presets)
+	if md.editIndex >= 0 && md.editIndex < len(next) {
 		// 若被编辑的正是当前使用中的预设，保存后需同步主表单里的高级参数。
 		oldArgs := m.presets[md.editIndex].Args
-		m.presets[md.editIndex] = entry
+		next[md.editIndex] = entry
+		if err := m.persistPresets(next, "已更新"); err != nil {
+			md.err = "保存失败: " + err.Error()
+			return nil
+		}
 		m.presetCursor = m.presetUserOffset() + md.editIndex
-		m.persistPresets("已更新")
 		m.syncManualAdvance(oldArgs, entry.Args)
 	} else {
 		// 新增不影响当前选中的预设参数，只把光标指向新条目。
-		m.presets = append(m.presets, entry)
+		next = append(next, entry)
+		if err := m.persistPresets(next, "已新增"); err != nil {
+			md.err = "保存失败: " + err.Error()
+			return nil
+		}
 		m.presetCursor = m.presetCount() - 2 // 手动输入项之前
-		m.persistPresets("已新增")
 	}
 	m.modal = nil
 	return m.schedulePlan(planDebounceDelay)
@@ -356,6 +390,11 @@ func (m *model) saveSubModal() tea.Cmd {
 		Lang:    lang,
 		Title:   title,
 		Default: md.fields[3].Checked(),
+	}
+	if entry.Default {
+		for i := range m.subs {
+			m.subs[i].Default = false
+		}
 	}
 	if md.editIndex >= 0 && md.editIndex < len(m.subs) {
 		m.subs[md.editIndex] = entry

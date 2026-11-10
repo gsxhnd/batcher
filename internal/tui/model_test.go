@@ -384,16 +384,17 @@ func TestTryStartRunValidation(t *testing.T) {
 
 // TestPlanMsgStaleDiscard 验证过期 Plan 结果被丢弃。
 func TestPlanMsgStaleDiscard(t *testing.T) {
+	isolatePresets(t)
 	m := newModel()
 	m.planSeq = 3
 	m.planLoading = true
 
-	next, _ := m.Update(planMsg{seq: 2, cmds: [][]string{{"-i", "a.mkv", "o.mkv"}}})
+	next, _ := m.Update(planMsg{seq: 2, plan: testPlan("a.mkv")})
 	m = next.(model)
 	assert.False(t, m.previewDone, "过期结果不应生效")
 	assert.Nil(t, m.files)
 
-	next, _ = m.Update(planMsg{seq: 3, cmds: [][]string{{"-i", "a.mkv", "o.mkv"}}})
+	next, _ = m.Update(planMsg{seq: 3, plan: testPlan("a.mkv")})
 	m = next.(model)
 	assert.True(t, m.previewDone)
 	require.Len(t, m.files, 1)

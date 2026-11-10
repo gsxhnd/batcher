@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -65,8 +67,8 @@ func (m model) wideLayout() string {
 // narrowLayout 窄终端：只渲染当前面板，任务面板附带文件列表。
 func (m model) narrowLayout() string {
 	body := m.focusedBody()
-	if m.focus == panelRun {
-		body = m.filePane(m.bodyH()/2) + body
+	if h := m.narrowFilePaneH(); h > 0 {
+		body = m.filePane(h) + "\n\n" + body
 	}
 	return drawBox(m.width, m.panelTitle(m.focus), true, true, body, m.bodyH()-2)
 }
@@ -81,6 +83,8 @@ func (m model) header() string {
 	switch {
 	case m.running:
 		right = stepActiveStyle.Render("执行中…")
+	case errors.Is(m.runErr, context.Canceled):
+		right = stepTodoStyle.Render("上次执行已取消，可修改后重跑")
 	case m.runErr != nil:
 		right = errorStyle.Render("上次执行失败，可修改后重跑")
 	case m.total > 0:
@@ -107,7 +111,7 @@ func (m model) panelTitle(p panel) string {
 		title := "5 · 任务"
 		switch {
 		case m.total > 0:
-			title = fmt.Sprintf("5 · 任务 %d/%d", m.done+m.failed, m.total)
+			title = fmt.Sprintf("5 · 任务 %d/%d", m.done+m.failed+m.canceled, m.total)
 		case m.previewDone && m.planErr == nil && len(m.files) > 0:
 			title = fmt.Sprintf("5 · 任务（%d 个文件）", len(m.files))
 		}
@@ -388,7 +392,8 @@ func (m model) runBody() string {
 		// 主体内容最上方固定显示当前任务的完整 CLI 命令（不随日志滚动）。
 		b.WriteString(m.pinnedCmdBlock())
 		if m.total > 0 {
-			b.WriteString("  " + m.bar.View() + "\n")
+			percent := float64(m.done+m.failed+m.canceled) / float64(m.total)
+			b.WriteString("  " + m.bar.ViewAs(percent) + "\n")
 			b.WriteString(m.progressHint() + "\n")
 		} else {
 			b.WriteString("  " + subtitleStyle.Render("正在启动...") + "\n")
@@ -428,9 +433,12 @@ func statusSuffix(msg string) string {
 
 // progressHint 组合进度/耗时/当前命令的一行状态文本，超宽时截断。
 func (m model) progressHint() string {
-	hint := fmt.Sprintf("进度: %d/%d", m.done+m.failed, m.total)
+	hint := fmt.Sprintf("进度: %d/%d", m.done+m.failed+m.canceled, m.total)
 	if m.failed > 0 {
 		hint += fmt.Sprintf("，失败 %d", m.failed)
+	}
+	if m.canceled > 0 {
+		hint += fmt.Sprintf("，取消 %d", m.canceled)
 	}
 	hint += "   耗时: " + time.Since(m.startAt).Round(time.Second).String()
 	if m.fileCursor == 0 && m.current != "" {
@@ -508,7 +516,7 @@ func (m model) filePane(h int) string {
 func (m model) fileRow(idx int, name string) string {
 	focused := idx+1 == m.fileCursor
 	if idx < 0 && m.total > 0 {
-		name = fmt.Sprintf("全部（%d/%d）", m.done+m.failed, m.total)
+		name = fmt.Sprintf("全部（%d/%d）", m.done+m.failed+m.canceled, m.total)
 	}
 	if m.total > 0 {
 		state := filePending
@@ -530,6 +538,8 @@ func fileStatusMark(state string) string {
 		return logLineDoneStyle.Render("✔")
 	case fileFailed:
 		return logLineFailedStyle.Render("✘")
+	case fileCanceled:
+		return descStyle.Render("−")
 	default:
 		return descStyle.Render("○")
 	}
@@ -586,7 +596,9 @@ func drawBox(w int, title string, focused, enabled bool, content string, content
 	if content != "" && len(lines) == 1 && lines[0] == "" {
 		lines = nil
 	}
-	if contentH >= 0 {
+	if contentH == 0 {
+		lines = nil
+	} else if contentH > 0 {
 		if len(lines) > contentH {
 			more := len(lines) - contentH
 			clipped := make([]string, 0, contentH)
@@ -654,5 +666,5 @@ func (m model) footer() string {
 		}
 		keys = append(keys, helpKeyStyle.Render(k)+" "+helpDescStyle.Render(v))
 	}
-	return divider + "\n" + " " + strings.Join(keys, helpSepStyle.Render("  ·  "))
+	return divider + "\n " + ansi.Truncate(strings.Join(keys, helpSepStyle.Render("  ·  ")), max(m.width-2, 1), "…")
 }
