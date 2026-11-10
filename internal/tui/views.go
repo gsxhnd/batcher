@@ -119,7 +119,8 @@ func (m model) panelTitle(p panel) string {
 			}
 			title = fmt.Sprintf("5 · 任务（%d 批次）", batches)
 		case m.total > 0:
-			title = fmt.Sprintf("5 · 任务 %d/%d", m.processedCount(), m.total)
+			settled, _, _, _, total, _ := m.progressNumbers()
+			title = fmt.Sprintf("5 · 任务 %d/%d", settled, total)
 		case m.previewDone && m.planErr == nil && len(m.files) > 0:
 			title = fmt.Sprintf("5 · 任务（%d 个文件）", len(m.files))
 		}
@@ -398,25 +399,13 @@ func (m model) formBody() string {
 func (m model) runBody() string {
 	var b strings.Builder
 	if m.running || m.queueViewActive() {
-		// 主体内容最上方固定显示所选任务的完整 CLI 命令（不随日志滚动）。
-		b.WriteString(m.pinnedCmdBlock())
-		if m.total > 0 {
-			if m.running {
-				percent := float64(m.processedCount()) / float64(m.total)
-				b.WriteString("  " + m.bar.ViewAs(percent) + "\n")
-				b.WriteString(m.progressHint() + "\n")
-			} else {
-				head := fmt.Sprintf("上次执行: %d/%d 完成，耗时 %s",
-					m.processedCount(), m.total, m.elapsedNow().Round(time.Second).String())
-				style := descStyle
-				if m.runErr != nil {
-					style = errorStyle
-				}
-				b.WriteString("  " + style.Render(head) + "\n")
-			}
+		if row, ok := m.focusedBatchRow(); ok {
+			b.WriteString(m.batchOverviewBlock(row))
 		} else {
-			b.WriteString("  " + subtitleStyle.Render("正在启动...") + "\n")
+			// 主体内容最上方固定显示所选任务的完整 CLI 命令（不随日志滚动）。
+			b.WriteString(m.pinnedCmdBlock())
 		}
+		b.WriteString(m.progressBlock())
 		b.WriteString(m.logVp.View())
 		return statusSuffix(m.statusMsg) + b.String()
 	}
@@ -450,23 +439,46 @@ func statusSuffix(msg string) string {
 	return "\n  " + statusStyle.Render(msg) + "\n"
 }
 
-// progressHint 组合进度/耗时/当前命令的一行状态文本，超宽时截断。
+// progressBlock 渲染进度条与说明，行数与 runBarH 一致。
+// 完成数不计仍可重试的失败项，所以失败后按 r 不会把进度再往前推一格。
+func (m model) progressBlock() string {
+	settled, failed, _, _, total, paused := m.progressNumbers()
+	if total <= 0 {
+		return "  " + subtitleStyle.Render("正在启动...") + "\n"
+	}
+	if !m.running && !paused {
+		head := fmt.Sprintf("进度: %d/%d 完成，耗时 %s", settled, total, m.elapsedNow().Round(time.Second).String())
+		if failed > 0 {
+			head += fmt.Sprintf("，失败 %d", failed)
+		}
+		style := descStyle
+		if m.runErr != nil || failed > 0 {
+			style = errorStyle
+		}
+		return "  " + style.Render(head) + "\n"
+	}
+	percent := float64(settled) / float64(total)
+	return "  " + m.bar.ViewAs(percent) + "\n" + m.progressHint() + "\n"
+}
+
+// progressHint 组合进度/耗时的一行状态文本，超宽时截断。
 func (m model) progressHint() string {
-	hint := fmt.Sprintf("进度: %d/%d", m.processedCount(), m.total)
-	if m.failed > 0 {
-		hint += fmt.Sprintf("，失败 %d", m.failed)
+	settled, failed, skipped, canceled, total, paused := m.progressNumbers()
+	hint := fmt.Sprintf("进度: %d/%d", settled, total)
+	if failed > 0 {
+		hint += fmt.Sprintf("，失败 %d", failed)
 	}
-	if m.canceled > 0 {
-		hint += fmt.Sprintf("，取消 %d", m.canceled)
+	if canceled > 0 {
+		hint += fmt.Sprintf("，取消 %d", canceled)
 	}
-	if m.skipped > 0 {
-		hint += fmt.Sprintf("，跳过 %d", m.skipped)
+	if skipped > 0 {
+		hint += fmt.Sprintf("，跳过 %d", skipped)
 	}
 	hint += "   耗时: " + m.elapsedNow().Round(time.Second).String()
-	if !m.pausedAt.IsZero() && m.pausedBatch != "" {
+	if paused {
 		hint += "（已暂停）"
 	}
-	if m.fileCursor == 0 && m.current != "" {
+	if len(m.roster) == 0 && m.fileCursor == 0 && m.current != "" {
 		hint += "   当前: " + m.current
 	}
 	hint = subtitleStyle.Render(hint)
@@ -505,8 +517,31 @@ func (m model) pinnedCmdBlock() string {
 	return b.String()
 }
 
-// runPinH 置顶命令块占用的行数（说明行 + 折行后的命令），与 pinnedCmdBlock 一致。
+// batchOverviewBlock 渲染主任务总览，固定 4 行，与 runPinH 一致。
+func (m model) batchOverviewBlock(row rosterRow) string {
+	line := func(s string) string {
+		return "  " + descStyle.Render(truncateText(s, max(m.rightW-4, 4))) + "\n"
+	}
+	if m.queue == nil {
+		return line("主任务") + line("") + line("") + line("")
+	}
+	snap, ok := m.queue.BatchCopy(row.batchID)
+	if !ok || snap == nil {
+		return line("主任务已不在队列中") + line("") + line("") + line("")
+	}
+	c := snap.Counts()
+	return line(fmt.Sprintf("主任务 · %s", snap.Name)) +
+		line(fmt.Sprintf("状态：%s    完成 %d / 失败 %d / 跳过 %d / 取消 %d，共 %d",
+			batchStateText(snap.Status), c.Done, c.Failed, c.Skipped, c.Canceled, c.Total)) +
+		line("输入: "+snap.InputDir) +
+		line("输出: "+snap.OutputDir)
+}
+
+// runPinH 置顶区域占用的行数：主任务行为总览，子任务行为完整命令。
 func (m model) runPinH() int {
+	if _, ok := m.focusedBatchRow(); ok {
+		return 4
+	}
 	cmd := m.pinnedCmdText()
 	if cmd == "" {
 		return 2
@@ -514,12 +549,16 @@ func (m model) runPinH() int {
 	return 1 + len(strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n"))
 }
 
-// runBarH 执行中进度条/提示占用的行数。
+// runBarH 进度区占用的行数，与 progressBlock 一致。
 func (m model) runBarH() int {
-	if m.total > 0 {
-		return 2
+	_, _, _, _, total, paused := m.progressNumbers()
+	if total <= 0 {
+		return 1
 	}
-	return 1
+	if !m.running && !paused {
+		return 1
+	}
+	return 2
 }
 
 // truncate 截断到指定显示宽度。
@@ -567,7 +606,8 @@ func (m model) rosterRowView(idx int, row rosterRow) string {
 func (m model) fileRow(idx int, name string) string {
 	focused := idx+1 == m.fileCursor
 	if idx < 0 && m.total > 0 {
-		name = fmt.Sprintf("全部（%d/%d）", m.processedCount(), m.total)
+		settled, _, _, _, total, _ := m.progressNumbers()
+		name = fmt.Sprintf("全部（%d/%d）", settled, total)
 	}
 	if m.total > 0 {
 		state := filePending
@@ -585,6 +625,8 @@ func fileStatusMark(state string) string {
 	switch state {
 	case fileRunning:
 		return subtitleStyle.Render("▶")
+	case filePaused:
+		return subtitleStyle.Render("‖")
 	case fileDone:
 		return logLineDoneStyle.Render("✔")
 	case fileFailed:
@@ -692,8 +734,13 @@ func (m model) footer() string {
 		}
 	case m.editing:
 		hints = []string{"↑/↓/Tab 切换", "enter 下一项", "esc 完成", "ctrl+s 另存预设"}
-	case m.running:
-		hints = []string{"↑/↓ 切换文件", "f 跟随当前", "pgup/pgdn/滚轮 滚动", "y 复制当前命令", "q 取消执行"}
+	case m.running || (m.focus == panelRun && m.queueViewActive()):
+		hints = []string{"↑/↓ 切换", "r 重试任务", "d 删除子任务/主任务", "c 取消任务", "s 跳过", "a 中止", "y 复制", "f 跟随"}
+		if m.running {
+			hints = append(hints, "q 取消执行")
+		} else {
+			hints = append(hints, "? 帮助", "q 退出")
+		}
 	case m.focus == panelOps:
 		hints = []string{"space 勾选", "2-4 配置面板", "? 快捷键", "x 执行", "q 退出"}
 	case m.focus == panelPresets:

@@ -66,6 +66,7 @@ var features = []feature{
 const (
 	filePending  = ""         // 待执行
 	fileRunning  = "running"  // 执行中
+	filePaused   = "paused"   // 主任务暂停，等待重试/跳过/中止
 	fileDone     = "done"     // 完成
 	fileFailed   = "failed"   // 失败
 	fileCanceled = "canceled" // 已取消
@@ -562,13 +563,10 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 	case ffmpeg.EventLog:
 		m.recordLine(e.Index, "    "+e.Message, "", logLineDefaultStyle)
 	case ffmpeg.EventCommandDone:
-		m.done++
 		m.recordLine(e.Index, fmt.Sprintf("✔ [%d/%d] 完成", e.Index+1, e.Total), fileDone, logLineDoneStyle)
 	case ffmpeg.EventCommandFailed:
-		m.failed++
 		m.recordLine(e.Index, fmt.Sprintf("✘ [%d/%d] 失败: %s", e.Index+1, e.Total, e.Message), fileFailed, logLineFailedStyle)
 	case ffmpeg.EventCommandCanceled:
-		m.canceled++
 		m.recordLine(e.Index, fmt.Sprintf("− [%d/%d] 已取消", e.Index+1, e.Total), fileCanceled, logLineInfoStyle)
 	}
 	if e.Type == ffmpeg.EventLog {
@@ -610,10 +608,27 @@ func (m *model) recordLine(idx int, line, state string, s lipgloss.Style) {
 		return
 	}
 	it := &m.files[idx]
-	if state != "" {
+	if state != "" && state != it.state {
+		// 同一子任务重试时先离开失败态，避免失败和完成各算一次进度。
+		m.adjustCount(it.state, -1)
+		m.adjustCount(state, 1)
 		it.state = state
 	}
 	it.logs = appendFileLog(it.logs, line, s)
+}
+
+// adjustCount 按文件状态增减进度计数。空状态与执行中不计入结果。
+func (m *model) adjustCount(state string, delta int) {
+	switch state {
+	case fileDone:
+		m.done += delta
+	case fileFailed:
+		m.failed += delta
+	case fileCanceled:
+		m.canceled += delta
+	case fileSkipped:
+		m.skipped += delta
+	}
 }
 
 // appendFileLog 向单个文件的日志缓冲追加一行（带样式），超过上限时丢弃旧行。
@@ -818,6 +833,9 @@ func (m *model) moveFilePane(delta int) {
 		m.fileFollow = false
 	}
 	m.pinRosterCursor()
+	if m.width > 0 && (m.running || len(m.roster) > 0) {
+		m.refreshRunHeights()
+	}
 	m.syncPreview()
 	m.vp.GotoTop()
 	m.syncLogPane()
@@ -1071,8 +1089,10 @@ func itemState(s task.Status) string {
 // batchState 汇总主任务行使用的状态标记。
 func batchState(s task.Status) string {
 	switch s {
-	case task.StatusRunning, task.StatusPaused:
+	case task.StatusRunning:
 		return fileRunning
+	case task.StatusPaused:
+		return filePaused
 	case task.StatusDone:
 		return fileDone
 	case task.StatusFailed:
@@ -1118,9 +1138,14 @@ func (m *model) syncRoster() {
 			continue
 		}
 		c := b.Counts()
+		settled := c.Done + c.Skipped + c.Canceled
+		title := fmt.Sprintf("%s（%s %d/%d）", b.Name, batchStateText(b.Status), settled, c.Total)
+		if c.Failed > 0 {
+			title = fmt.Sprintf("%s（%s %d/%d 失败%d）", b.Name, batchStateText(b.Status), settled, c.Total, c.Failed)
+		}
 		rows = append(rows, rosterRow{
 			batchID: b.ID,
-			title:   fmt.Sprintf("%s（%s，%d/%d）", b.Name, batchStateText(b.Status), c.Done+c.Skipped, c.Total),
+			title:   title,
 			state:   batchState(b.Status),
 		})
 		explanded, seen := m.expanded[b.ID]
@@ -1131,6 +1156,9 @@ func (m *model) syncRoster() {
 			continue
 		}
 		for _, it := range b.Items {
+			if it.Removed {
+				continue
+			}
 			rows = append(rows, rosterRow{
 				batchID: b.ID,
 				itemID:  it.ID,
@@ -1142,13 +1170,16 @@ func (m *model) syncRoster() {
 	}
 	m.roster = rows
 	// 恢复光标到钉住的行；找不到时夹取到有效范围。
+	m.fileCursor = clamp(m.fileCursor, 0, max(len(rows)-1, 0))
 	for i, row := range rows {
 		if row.batchID == m.rosterPinBatch && row.itemID == m.rosterPinItem {
 			m.fileCursor = i
-			return
+			break
 		}
 	}
-	m.fileCursor = clamp(m.fileCursor, 0, max(len(rows)-1, 0))
+	if m.width > 0 && (m.running || len(rows) > 0) {
+		m.refreshRunHeights()
+	}
 }
 
 // applyPlan 保存最新生成的计划；运行期间先暂存到 pendingPlan，批次结束后再应用，
@@ -1238,9 +1269,52 @@ func (m *model) handleDone(err error) tea.Cmd {
 	return nil
 }
 
-// processedCount 返回已出结果的子任务数量（完成/失败/取消/跳过）。
-func (m model) processedCount() int {
-	return m.done + m.failed + m.canceled + m.skipped
+// progressNumbers 返回当前应展示的进度。队列视图以光标所在主任务的快照为准，
+// 完成数只计完成、跳过和取消；失败单独显示，重试不会把同一次失败再算进去。
+func (m model) progressNumbers() (settled, failed, skipped, canceled, total int, paused bool) {
+	if snap, ok := m.focusedSnapshot(); ok {
+		c := snap.Counts()
+		return c.Done + c.Skipped + c.Canceled, c.Failed, c.Skipped, c.Canceled, c.Total, snap.Status == task.StatusPaused
+	}
+	return m.done + m.skipped + m.canceled, m.failed, m.skipped, m.canceled, m.total, m.pausedBatch != ""
+}
+
+// focusedSnapshot 返回光标所在主任务；没有队列列表时返回当前正在执行的批次。
+func (m model) focusedSnapshot() (*task.Batch, bool) {
+	if m.queue == nil {
+		return nil, false
+	}
+	id := m.activeBatch
+	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
+		id = m.roster[m.fileCursor].batchID
+	}
+	if id == "" {
+		return nil, false
+	}
+	return m.queue.BatchCopy(id)
+}
+
+// focusedBatchRow 返回光标所在的主任务行。
+func (m model) focusedBatchRow() (rosterRow, bool) {
+	if len(m.roster) == 0 || m.fileCursor < 0 || m.fileCursor >= len(m.roster) {
+		return rosterRow{}, false
+	}
+	row := m.roster[m.fileCursor]
+	if row.itemID != "" {
+		return rosterRow{}, false
+	}
+	return row, true
+}
+
+// queueEventWhenIdle 报告该事件在没有批次执行时也要刷新任务列表。
+func queueEventWhenIdle(t task.QueueEventType) bool {
+	switch t {
+	case task.QueueBatchAdded, task.QueueBatchStarted, task.QueueBatchRemoved, task.QueueStopped,
+		task.QueueBatchCanceled, task.QueueBatchDone, task.QueueBatchFailed, task.QueueItemCanceled:
+		return true
+	default:
+		return false
+	}
 }
 
 // elapsedNow 返回当前执行耗时；暂停等待决策期间冻结到暂停时刻，
@@ -1251,6 +1325,13 @@ func (m model) elapsedNow() time.Duration {
 		end = m.pausedAt
 	}
 	return end.Sub(m.startAt)
+}
+
+// clearPause 在决策已经发出后结束界面上的暂停态，避免连按被当成下一次决策。
+func (m *model) clearPause(msg string) {
+	m.pausedBatch = ""
+	m.resumeTimer()
+	m.statusMsg = msg
 }
 
 // pauseTimer 在进入暂停等待决策时冻结计时。
@@ -1317,10 +1398,9 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		}
 		return nil
 	}
-	// BatchAdded（入队）、BatchStarted（开始）、BatchRemoved（删除）与终态事件
-	// 都需要在空闲时也能更新列表。
-	if e.Type != task.QueueBatchAdded && e.Type != task.QueueBatchStarted &&
-		e.Type != task.QueueBatchRemoved && e.Type != task.QueueStopped && !m.running {
+	// 入队、开始、删除、取消以及子任务删除都要在空闲时刷新列表。
+	// 正在执行的批次的结束事件仍走下面的收尾；其他批次的结束只刷新列表。
+	if !m.running && !queueEventWhenIdle(e.Type) {
 		return nil
 	}
 	var cmd tea.Cmd
@@ -1333,6 +1413,7 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		m.rosterPinBatch, m.rosterPinItem = e.BatchID, ""
 	case task.QueueItemStarted:
 		// 决策（重试/跳过）已生效，队列恢复执行：把暂停时长从总耗时扣除。
+		m.pausedBatch = ""
 		m.resumeTimer()
 		if idx := itemIndexOf(e.ItemID); idx >= 0 && idx < len(m.files) {
 			cmd = m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandStart, Index: idx, Total: m.total, Command: m.files[idx].cmd})
@@ -1353,26 +1434,33 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 			cmd = m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandFailed, Index: idx, Total: m.total, Message: msg})
 		}
 	case task.QueueItemCanceled:
-		if idx := itemIndexOf(e.ItemID); idx >= 0 && idx < len(m.files) {
-			cmd = m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandCanceled, Index: idx, Total: m.total})
-		}
-	case task.QueueItemRetry:
-		if idx := itemIndexOf(e.ItemID); idx >= 0 && idx < len(m.files) {
-			m.recordLine(idx, fmt.Sprintf("↻ [%d/%d] 重试", idx+1, m.total), fileRunning, logLineInfoStyle)
+		if m.running && e.BatchID == m.activeBatch {
+			if idx := itemIndexOf(e.ItemID); idx >= 0 && idx < len(m.files) {
+				cmd = m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandCanceled, Index: idx, Total: m.total})
+			}
 		}
 	case task.QueueItemSkipped:
 		m.resumeTimer()
+		m.pausedBatch = ""
 		if idx := itemIndexOf(e.ItemID); idx >= 0 && idx < len(m.files) {
 			m.recordLine(idx, fmt.Sprintf("− [%d/%d] 已跳过", idx+1, m.total), fileSkipped, logLineInfoStyle)
-			m.skipped++
 			m.syncLogPane()
+		}
+	case task.QueueItemRetry:
+		m.pausedBatch = ""
+		m.resumeTimer()
+		if idx := itemIndexOf(e.ItemID); idx >= 0 && idx < len(m.files) {
+			m.recordLine(idx, fmt.Sprintf("↻ [%d/%d] 重试", idx+1, m.total), fileRunning, logLineInfoStyle)
 		}
 	case task.QueueBatchPaused:
 		m.pausedBatch = e.BatchID
 		m.pauseTimer()
-		m.statusMsg = "任务已暂停：r 重试 / s 跳过 / a 中止"
+		m.statusMsg = "任务已暂停：r 重试 / d 删除 / c 取消"
 	case task.QueueBatchDone, task.QueueBatchFailed, task.QueueBatchCanceled:
-		cmd = m.applyBatchFinish(e)
+		// 只有正在执行时才收尾；取消队列里等待中的其他批次只刷新列表。
+		if m.running {
+			cmd = m.applyBatchFinish(e)
+		}
 	case task.QueueStopped:
 		// 由 quitCleanup 或程序 ctx 触发，无需界面处理。
 	}
@@ -1402,7 +1490,7 @@ func (m *model) applyBatchStart(batchID string) tea.Cmd {
 	m.running = true
 	m.eventing = true
 	m.runErr = nil
-	m.total = len(snap.Items)
+	m.total = snap.Counts().Total
 	m.done, m.failed, m.canceled, m.skipped = 0, 0, 0, 0
 	m.logs = nil
 	m.logDirty, m.logRefreshScheduled = false, false
@@ -1437,9 +1525,13 @@ func (m *model) applyBatchFinish(e task.QueueEvent) tea.Cmd {
 			}
 			m.files[i].state = states[i].state
 		}
-		// 按快照状态修正对账：事件计数可能遗漏未启动的子任务。
-		m.done, m.failed, m.skipped = snap.Counts().Done, snap.Counts().Failed, snap.Counts().Skipped
-		m.canceled = snap.Counts().Canceled
+		// 按快照状态修正对账：事件计数可能遗漏未启动的子任务，删除的子任务不再计入总数。
+		c := snap.Counts()
+		m.done, m.failed, m.skipped = c.Done, c.Failed, c.Skipped
+		m.canceled = c.Canceled
+		if c.Total > 0 {
+			m.total = c.Total
+		}
 	}
 	var err error
 	switch e.Type {

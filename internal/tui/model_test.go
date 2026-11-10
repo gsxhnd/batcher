@@ -452,8 +452,10 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	waitBatchEvent(t, &m, task.QueueBatchPaused)
 	press(&m, "r")
 	assert.Contains(t, m.statusMsg, "重试")
+	m.pausedBatch = batch.ID
 	press(&m, "s")
 	assert.Contains(t, m.statusMsg, "跳过")
+	m.pausedBatch = batch.ID
 	press(&m, "a")
 	assert.Contains(t, m.statusMsg, "中止")
 

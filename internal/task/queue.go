@@ -50,6 +50,7 @@ const (
 	DecisionRetry PauseDecision = "retry"
 	DecisionSkip  PauseDecision = "skip"
 	DecisionAbort PauseDecision = "abort" // 中止当前主任务，转入下一个
+	DecisionDrop  PauseDecision = "drop"  // 删除当前失败的子任务，主任务继续
 )
 
 // Queue 是串行任务队列：同一时刻只运行一个 ffmpeg 子任务，子任务失败时暂停等待决策。
@@ -317,8 +318,115 @@ func copyBatch(src *Batch) *Batch {
 func (q *Queue) Decide(d PauseDecision) {
 	select {
 	case q.decision <- d:
+		return
 	default:
 	}
+	// 通道里已有一条还没被取走的决策时，保留最新的一次按键。
+	select {
+	case <-q.decision:
+	default:
+	}
+	select {
+	case q.decision <- d:
+	default:
+	}
+}
+
+// drainDecision 丢掉执行期间多按留下的决策。
+// 只在宣布下一次暂停之前调用，避免把用户针对本次暂停的按键清掉。
+func (q *Queue) drainDecision() {
+	select {
+	case <-q.decision:
+	default:
+	}
+}
+
+// CancelBatch 取消指定主任务。正在执行或暂停的批次停止当前 ffmpeg，剩余子任务记为取消；
+// 尚未开始的批次直接标为取消，不再执行。已结束的批次返回错误。
+func (q *Queue) CancelBatch(batchID string) error {
+	q.mu.Lock()
+	var b *Batch
+	for _, other := range q.batches {
+		if other.ID == batchID {
+			b = other
+			break
+		}
+	}
+	if b == nil {
+		q.mu.Unlock()
+		return fmt.Errorf("未找到任务 %s", batchID)
+	}
+	switch b.Status {
+	case StatusRunning, StatusPaused:
+		cancel := q.batchCancel
+		q.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return nil
+	case StatusPending:
+		for _, it := range b.Items {
+			if !it.Status.Terminal() {
+				it.Status = StatusCanceled
+			}
+		}
+		b.Status = StatusCanceled
+		b.FinishedAt = time.Now()
+		q.mu.Unlock()
+		q.emit(QueueEvent{Type: QueueBatchCanceled, BatchID: b.ID})
+		_ = b.Save()
+		q.wake()
+		return nil
+	default:
+		q.mu.Unlock()
+		return fmt.Errorf("任务已结束，无法取消")
+	}
+}
+
+// DiscardItem 从主任务中删除一个子任务。正在执行的子任务不能删；
+// 暂停中的失败子任务由消费者收尾为取消并继续后续子任务；其余子任务立即从列表消失。
+func (q *Queue) DiscardItem(batchID, itemID string) error {
+	q.mu.Lock()
+	var b *Batch
+	var it *Item
+	for _, other := range q.batches {
+		if other.ID != batchID {
+			continue
+		}
+		b = other
+		for _, item := range other.Items {
+			if item.ID == itemID {
+				it = item
+				break
+			}
+		}
+		break
+	}
+	if b == nil || it == nil {
+		q.mu.Unlock()
+		return fmt.Errorf("未找到子任务 %s", itemID)
+	}
+	if it.Removed {
+		q.mu.Unlock()
+		return fmt.Errorf("子任务已删除")
+	}
+	if it.Status == StatusRunning {
+		q.mu.Unlock()
+		return fmt.Errorf("子任务正在执行，无法删除")
+	}
+	if b.Status == StatusPaused && it.Status == StatusFailed {
+		q.mu.Unlock()
+		q.Decide(DecisionDrop)
+		return nil
+	}
+	it.Removed = true
+	if !it.Status.Terminal() {
+		it.Status = StatusCanceled
+	}
+	q.mu.Unlock()
+	_ = b.Save()
+	q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: batchID, ItemID: itemID})
+	return nil
 }
 
 // RemovePending 从队列中移除一个仍处于 pending 状态的主任务；已启动的任务不可移除。
@@ -402,18 +510,22 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 	bctx, cancelBatch := context.WithCancel(ctx)
 	q.mu.Lock()
 	q.batchCancel = cancelBatch
+	if b.Status != StatusPending {
+		// 入队后、真正开跑前被取消：不要覆盖成执行中。
+		q.batchCancel = nil
+		q.mu.Unlock()
+		cancelBatch()
+		q.wake()
+		return true
+	}
+	b.Status = StatusRunning
+	b.StartedAt = time.Now()
 	q.mu.Unlock()
 	defer func() {
 		q.mu.Lock()
 		q.batchCancel = nil
 		q.mu.Unlock()
 	}()
-
-	now := time.Now()
-	q.mu.Lock()
-	b.Status = StatusRunning
-	b.StartedAt = now
-	q.mu.Unlock()
 	q.emit(QueueEvent{Type: QueueBatchStarted, BatchID: b.ID})
 	_ = b.Save()
 
@@ -436,42 +548,58 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 		return false
 	}
 
-	for _, it := range b.Items {
+	// pauseFor 宣布暂停并等待本次决策。调用前先丢掉执行期间多按的 r，
+	// 那些按键不属于这次暂停。返回 false 表示批次已经收尾，调用方应立刻返回。
+	pauseFor := func(it *Item) (PauseDecision, bool) {
+		q.drainDecision()
 		q.mu.Lock()
-		remaining := !it.Status.Terminal()
+		b.Status = StatusPaused
+		itemErr := it.Error
 		q.mu.Unlock()
-		if !remaining {
-			continue
+		var err error
+		if itemErr != "" {
+			err = fmt.Errorf("%s", itemErr)
+		}
+		q.emit(QueueEvent{Type: QueueBatchPaused, BatchID: b.ID, ItemID: it.ID, Err: err})
+		_ = b.Save()
+		decision := q.waitDecision(bctx)
+		if q.completeDiscard(b) {
+			q.wake()
+			return "", false
 		}
 		if bctx.Err() != nil {
+			// 等待期间批次被取消，剩余子任务标 canceled，主任务不应记为失败。
 			q.cancelRemainingItems(b)
 			finish(StatusCanceled)
-			return true
+			return "", false
 		}
-		if !continueItem(it) {
-			return true
-		}
-		q.mu.Lock()
-		failed := it.Status == StatusFailed
-		q.mu.Unlock()
-		if failed {
-			// 暂停等待决策
-			q.mu.Lock()
-			b.Status = StatusPaused
-			itemErr := it.Error
-			q.mu.Unlock()
-			q.emit(QueueEvent{Type: QueueBatchPaused, BatchID: b.ID, ItemID: it.ID, Err: fmt.Errorf("%s", itemErr)})
-			_ = b.Save()
-			decision := q.waitDecision(bctx)
+		return decision, true
+	}
 
-			if q.completeDiscard(b) {
-				q.wake()
-				return true
-			}
+	for _, it := range b.Items {
+		for {
 			if bctx.Err() != nil {
-				// 等待期间批次被取消，剩余子任务标 canceled，主任务不应记为失败。
 				q.cancelRemainingItems(b)
 				finish(StatusCanceled)
+				return true
+			}
+			q.mu.Lock()
+			settled := it.Removed || it.Status.Terminal()
+			q.mu.Unlock()
+			if settled {
+				break
+			}
+			if !continueItem(it) {
+				return true
+			}
+			q.mu.Lock()
+			failed := it.Status == StatusFailed
+			q.mu.Unlock()
+			if !failed {
+				break
+			}
+			decision, cont := pauseFor(it)
+			if !cont {
 				return true
 			}
 			switch decision {
@@ -479,60 +607,34 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 				q.mu.Lock()
 				it.Status = StatusPending
 				it.PartialOutput = false
+				it.Error = ""
 				b.Status = StatusRunning
 				q.mu.Unlock()
 				q.emit(QueueEvent{Type: QueueItemRetry, BatchID: b.ID, ItemID: it.ID})
-				if !continueItem(it) {
-					return true
-				}
-				q.mu.Lock()
-				stillFailed := it.Status == StatusFailed
-				q.mu.Unlock()
-				if stillFailed {
-					q.mu.Lock()
-					b.Status = StatusPaused
-					retryErr := it.Error
-					q.mu.Unlock()
-					q.emit(QueueEvent{Type: QueueBatchPaused, BatchID: b.ID, ItemID: it.ID, Err: fmt.Errorf("%s", retryErr)})
-					_ = b.Save()
-					decision = q.waitDecision(bctx)
-					if q.completeDiscard(b) {
-						q.wake()
-						return true
-					}
-					if bctx.Err() != nil {
-						q.cancelRemainingItems(b)
-						finish(StatusCanceled)
-						return true
-					}
-					if decision == DecisionRetry {
-						// 重试后再次失败时只能跳过或中止，避免无限循环。
-						decision = DecisionSkip
-					}
-					if decision == DecisionAbort {
-						q.cancelRemainingItems(b)
-						finish(StatusFailed)
-						return true
-					}
-					// 此时 decision 必为跳过。
-					q.mu.Lock()
-					it.Status = StatusSkipped
-					b.Status = StatusRunning
-					q.mu.Unlock()
-					q.emit(QueueEvent{Type: QueueItemSkipped, BatchID: b.ID, ItemID: it.ID})
-				}
+				continue
 			case DecisionSkip:
 				q.mu.Lock()
 				it.Status = StatusSkipped
 				b.Status = StatusRunning
 				q.mu.Unlock()
 				q.emit(QueueEvent{Type: QueueItemSkipped, BatchID: b.ID, ItemID: it.ID})
+			case DecisionDrop:
+				q.mu.Lock()
+				it.Status = StatusCanceled
+				it.Removed = true
+				it.PartialOutput = false
+				b.Status = StatusRunning
+				q.mu.Unlock()
+				q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID})
 			case DecisionAbort:
 				q.cancelRemainingItems(b)
 				finish(StatusFailed)
 				return true
+			default:
+				// 未识别的决策：保留失败状态，继续后面的子任务。
 			}
 			_ = b.Save()
+			break
 		}
 	}
 	q.mu.Lock()
@@ -599,6 +701,7 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 
 	q.mu.Lock()
 	it.Status = StatusDone
+	it.Error = ""
 	it.PartialOutput = false
 	it.DurationMs = elapsed.Milliseconds()
 	q.mu.Unlock()

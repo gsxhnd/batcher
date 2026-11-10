@@ -192,7 +192,7 @@ func TestRosterShowsBatchesAndItemStates(t *testing.T) {
 	// 默认展开运行中的批次：1 批次行 + 2 子任务行
 	require.Len(t, m.roster, 3, "1 批次行 + 2 子任务行")
 	assert.Empty(t, m.roster[0].itemID, "第一行是批次行")
-	assert.Equal(t, fileRunning, m.roster[0].state, "暂停中的批次按运行态展示")
+	assert.Equal(t, filePaused, m.roster[0].state, "暂停中的批次应显示为暂停")
 	assert.Equal(t, fileFailed, m.roster[1].state, "失败的子任务应可见")
 	assert.Equal(t, filePending, m.roster[2].state, "未开始的子任务应可见")
 	assert.True(t, strings.HasPrefix(m.roster[1].cmd, "ffmpeg"), "子任务行携带完整命令")
@@ -606,4 +606,45 @@ func TestPlanCommandReturnsReadOnlySnapshot(t *testing.T) {
 	require.Len(t, msg.plan.Jobs, 1)
 	assert.Equal(t, input, msg.plan.Jobs[0].Input)
 	assert.NoDirExists(t, opt.OutputPath)
+}
+
+func TestRunningFooterShowsTaskKeys(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 140, 30
+	m.running = true
+	m.roster = []rosterRow{{batchID: "b", title: "任务"}}
+	text := m.footer()
+	assert.Contains(t, text, "重试任务")
+	assert.Contains(t, text, "删除子任务/主任务")
+	assert.Contains(t, text, "取消任务")
+}
+
+func TestRetryDoesNotAdvanceSettledProgress(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.files = []fileItem{{}, {}, {}}
+	m.total = 3
+	m.running = true
+
+	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandFailed, Index: 0, Total: 3, Message: "失败"})
+	settled, failed, _, _, total, _ := m.progressNumbers()
+	assert.Equal(t, 0, settled, "失败还没结束，不应算进完成进度")
+	assert.Equal(t, 1, failed)
+	assert.Equal(t, 3, total)
+
+	m.recordLine(0, "重试", fileRunning, logLineInfoStyle)
+	settled, failed, _, _, _, _ = m.progressNumbers()
+	assert.Equal(t, 0, settled, "重试不应增加进度")
+	assert.Equal(t, 0, failed)
+
+	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandFailed, Index: 0, Total: 3, Message: "再次失败"})
+	settled, failed, _, _, _, _ = m.progressNumbers()
+	assert.Equal(t, 0, settled, "同一子任务再次失败不应把进度往前推")
+	assert.Equal(t, 1, failed)
+
+	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandDone, Index: 0, Total: 3})
+	settled, failed, _, _, _, _ = m.progressNumbers()
+	assert.Equal(t, 1, settled)
+	assert.Equal(t, 0, failed)
 }

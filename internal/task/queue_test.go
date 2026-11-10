@@ -387,6 +387,37 @@ func TestRetryBatchOnPausedRetriesFailedItem(t *testing.T) {
 	assert.Equal(t, StatusSkipped, done.Items[0].Status)
 }
 
+// TestRetryAgainDoesNotSkip 连续重试失败的子任务时，每一次 r 都再跑一次，不能改成跳过并进入下一项。
+func TestRetryAgainDoesNotSkip(t *testing.T) {
+	plan := singlePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	waitPaused(t, col)
+
+	require.NoError(t, q.RetryBatch(b.ID))
+	col.waitPausedCount(t, 2, 10*time.Second)
+	// 第二次暂停后再重试一次：必须仍停在这个子任务，不能被改成跳过。
+	require.NoError(t, q.RetryBatch(b.ID))
+	col.waitPausedCount(t, 3, 10*time.Second)
+
+	snap, ok := q.BatchCopy(b.ID)
+	require.True(t, ok)
+	assert.Equal(t, StatusPaused, snap.Status, "多次重试后仍应停在当前子任务")
+	require.Len(t, snap.Items, 1)
+	assert.Equal(t, StatusFailed, snap.Items[0].Status)
+	assert.Equal(t, 3, snap.Items[0].Attempts)
+
+	q.Decide(DecisionSkip)
+	done := waitBatchTerminal(t, q, b.ID, 10*time.Second)
+	require.NotNil(t, done)
+	assert.Equal(t, StatusSkipped, done.Items[0].Status)
+}
+
 func TestRetryBatchAfterAbortRequeuesWholeBatch(t *testing.T) {
 	plan := singlePlan(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

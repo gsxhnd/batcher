@@ -395,57 +395,123 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-// runTaskKeys 处理队列视图下 r/s/a/d 的任务操作；按光标所在行分发：
-// 子任务行：暂停时 r 重试 / s 跳过 / a 中止；
-// 批次行：r 重试整个任务（暂停中=重试失败子任务，已结束批次=失败项重新排队），d 删除任务。
+// runTaskKeys 处理队列视图下的任务操作。按光标所在行分发：
+// r 重试（暂停中的失败子任务，或已结束主任务里失败/取消的子任务）；
+// d 删除子任务或整个主任务；c 取消主任务；暂停时 s 跳过、a 中止。
 // 返回是否消费了该按键。
 func (m *model) runTaskKeys(key string) bool {
-	if !m.queueViewActive() || m.queue == nil {
+	if m.queue == nil {
+		return false
+	}
+	if key == "c" && !m.queueViewActive() {
+		if !m.running {
+			return false
+		}
+		m.queue.CancelCurrent()
+		m.statusMsg = "已发送取消请求，等待正在执行的任务结束…"
+		return true
+	}
+	if !m.queueViewActive() {
 		return false
 	}
 	if m.fileCursor < 0 || m.fileCursor >= len(m.roster) {
 		return false
 	}
 	row := m.roster[m.fileCursor]
-	if row.itemID != "" {
-		if m.pausedBatch == "" {
-			// 只在暂停等待决策时接受子任务级决策；否则不消费，交给全局键。
-			return key == "d" // 子任务行不支持删除，落回未处理
-		}
-		switch key {
-		case "r":
-			m.queue.Decide(task.DecisionRetry)
-			m.statusMsg = "已发送重试指令"
-			return true
-		case "s":
-			m.queue.Decide(task.DecisionSkip)
-			m.statusMsg = "已发送跳过指令"
-			return true
-		case "a":
-			m.queue.Decide(task.DecisionAbort)
-			m.statusMsg = "已发送中止指令"
-			return true
-		}
+	switch key {
+	case "c":
+		return m.cancelFocused(row)
+	case "d":
+		return m.deleteFocused(row)
+	case "r":
+		return m.retryFocused(row)
+	case "s":
+		return m.pauseDecision(row, task.DecisionSkip, "已发送跳过指令")
+	case "a":
+		return m.pauseDecision(row, task.DecisionAbort, "已发送中止指令")
+	default:
 		return false
 	}
-	// 批次行操作
-	switch key {
-	case "r":
-		if err := m.queue.RetryBatch(row.batchID); err != nil {
-			m.statusMsg = "× 重试失败: " + err.Error()
-		} else {
-			m.statusMsg = "已发送重试指令，等待执行"
-		}
-		return true
-	case "d":
-		if err := m.queue.Discard(row.batchID); err != nil {
-			m.statusMsg = "× 删除失败: " + err.Error()
-		} else {
-			m.statusMsg = "已删除任务（记录文件保留在输出目录）"
-		}
+}
+
+// retryFocused 重试光标所在任务。暂停中重试当前失败的子任务；已结束的主任务把失败项重新排队。
+func (m *model) retryFocused(row rosterRow) bool {
+	if row.itemID != "" && m.pausedBatch != row.batchID {
+		return false
+	}
+	if row.itemID != "" {
+		m.queue.Decide(task.DecisionRetry)
+		m.clearPause("已发送重试指令")
 		return true
 	}
-	return false
+	if err := m.queue.RetryBatch(row.batchID); err != nil {
+		m.statusMsg = "× 重试失败: " + err.Error()
+		return true
+	}
+	if m.pausedBatch == row.batchID {
+		m.clearPause("已发送重试指令，等待执行")
+		return true
+	}
+	m.statusMsg = "已发送重试指令，等待执行"
+	return true
+}
+
+// pauseDecision 在暂停等待时发送跳过或中止。子任务行与主任务行都作用于当前暂停的批次。
+func (m *model) pauseDecision(row rosterRow, d task.PauseDecision, msg string) bool {
+	if m.pausedBatch == "" || m.pausedBatch != row.batchID {
+		return false
+	}
+	m.queue.Decide(d)
+	m.clearPause(msg)
+	return true
+}
+
+// deleteFocused 删除光标所在的子任务，或把整个主任务移出队列。
+func (m *model) deleteFocused(row rosterRow) bool {
+	if row.itemID == "" {
+		if err := m.queue.Discard(row.batchID); err != nil {
+			m.statusMsg = "× 删除失败: " + err.Error()
+			return true
+		}
+		if m.pausedBatch == row.batchID {
+			m.clearPause("已删除任务（记录文件保留在输出目录）")
+			return true
+		}
+		m.statusMsg = "已删除任务（记录文件保留在输出目录）"
+		return true
+	}
+	pausedItem := false
+	if snap, ok := m.queue.BatchCopy(row.batchID); ok && snap.Status == task.StatusPaused {
+		for _, it := range snap.Items {
+			if it.ID == row.itemID && it.Status == task.StatusFailed {
+				pausedItem = true
+			}
+		}
+	}
+	if err := m.queue.DiscardItem(row.batchID, row.itemID); err != nil {
+		m.statusMsg = "× 删除失败: " + err.Error()
+		return true
+	}
+	if pausedItem {
+		m.clearPause("已删除子任务")
+		return true
+	}
+	m.statusMsg = "已删除子任务"
+	return true
+}
+
+// cancelFocused 取消光标所在的主任务：执行中的停止当前命令，等待中的不再开始。
+func (m *model) cancelFocused(row rosterRow) bool {
+	if err := m.queue.CancelBatch(row.batchID); err != nil {
+		m.statusMsg = "× 取消失败: " + err.Error()
+		return true
+	}
+	if m.pausedBatch == row.batchID {
+		m.clearPause("已发送取消请求，等待任务结束")
+		return true
+	}
+	m.statusMsg = "已发送取消请求"
+	return true
 }
 
 // batchCommands 返回指定批次全部子任务的完整命令行。
