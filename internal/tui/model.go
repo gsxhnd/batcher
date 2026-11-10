@@ -198,10 +198,16 @@ type model struct {
 
 func newModel() model {
 	m := model{
-		ctx:      context.Background(),
-		focus:    panelOps,
-		bar:      progress.New(progress.WithDefaultBlend()),
-		spin:     spinner.New(spinner.WithSpinner(spinner.Dot)),
+		ctx:   context.Background(),
+		focus: panelOps,
+		bar: progress.New(
+			progress.WithColors(lipgloss.Color("81"), lipgloss.Color("114")),
+			progress.WithScaled(true),
+		),
+		spin: spinner.New(
+			spinner.WithSpinner(spinner.Dot),
+			spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("81"))),
+		),
 		builtins: presets.Builtins(),
 		runIdx:   -1,
 	}
@@ -210,6 +216,8 @@ func newModel() model {
 		m.statusMsg = "× 读取自定义预设失败: " + err.Error()
 	}
 	m.presets = user
+	m.bar.EmptyColor = lipgloss.Color("238")
+	m.bar.PercentageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
 	m.rebuildFields()
 	return m
 }
@@ -781,13 +789,14 @@ func (m model) bodyH() int {
 
 // sideW 左侧面板栏宽度，rightW 右侧内容区宽度。
 func (m *model) resizePanes() {
+	const gutter = 1
 	sideW := 34
-	// 保证右侧内容区至少 46 列，窄终端时压缩左侧。
-	if right := m.width - sideW - 2; right < 46 {
-		sideW = max(24, m.width-48)
+	// 保证右侧内容区至少 46 列，窄终端时压缩左侧。左右之间留一列间隔。
+	if right := m.width - sideW - gutter; right < 46 {
+		sideW = max(24, m.width-46-gutter)
 	}
 	m.leftW = min(sideW, max(12, m.width-14))
-	m.rightW = max(m.width-m.leftW-2, 12)
+	m.rightW = max(m.width-m.leftW-gutter, 12)
 	if m.width < narrowWidth {
 		m.leftW, m.rightW = m.width, m.width
 	}

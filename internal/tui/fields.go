@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/gsxhnd/batcher/internal/command"
 )
 
@@ -67,9 +69,26 @@ type field struct {
 // newField 构建一个可编辑的表单项，默认提示文字为字段标签。
 func newField(def fieldDef) field {
 	ti := textinput.New()
+	ti.SetStyles(fieldInputStyles())
+	ti.Prompt = "› "
 	ti.Placeholder = def.label
 	ti.CharLimit = 512
 	return field{def: def, input: ti}
+}
+
+// fieldInputStyles 让输入框在浏览和编辑时都有清晰的提示符与光标。
+func fieldInputStyles() textinput.Styles {
+	s := textinput.DefaultDarkStyles()
+	accent := lipgloss.Color(cAccent)
+	s.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	s.Focused.Prompt = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	s.Blurred.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(cText))
+	s.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	s.Blurred.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(cTextDim))
+	s.Cursor.Color = accent
+	s.Cursor.Shape = tea.CursorBar
+	return s
 }
 
 // Checked 返回 bool 字段的勾选状态；非 bool 字段恒为 false。

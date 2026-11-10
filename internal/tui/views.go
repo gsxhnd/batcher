@@ -60,8 +60,23 @@ func (m model) wideLayout() string {
 	for p := panel(0); p < panelCount; p++ {
 		boxes = append(boxes, m.sidebarBox(p, hs[p]))
 	}
+	left := lipgloss.JoinVertical(lipgloss.Left, boxes...)
 	right := drawBox(m.rightW, m.panelTitle(m.focus), true, true, m.focusedBody(), m.bodyH()-2)
-	return lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.JoinVertical(lipgloss.Left, boxes...), right)
+	gutter := gutterColumn(max(lipgloss.Height(left), lipgloss.Height(right)))
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, gutter, right)
+}
+
+// gutterColumn 在左右面板之间留出一列间隔，避免两边框贴在一起。
+func gutterColumn(h int) string {
+	if h <= 0 {
+		return ""
+	}
+	line := gutterStyle.Render(" ")
+	lines := make([]string, h)
+	for i := range lines {
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // narrowLayout 窄终端：只渲染当前面板，任务面板附带文件列表。
@@ -78,22 +93,35 @@ func (m model) narrowLayout() string {
 // header 顶部标题栏：左侧应用徽标，右侧显示当前操作组合或执行状态。
 func (m model) header() string {
 	left := appBadgeStyle.Render("batcher" + badgeVersion())
+	right := m.headerStatus()
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		right = ansi.Truncate(right, max(m.width-lipgloss.Width(left)-1, 1), "…")
+		gap = max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 0)
+	}
+	return fitWidth(left+headerBarStyle.Render(strings.Repeat(" ", gap))+right, m.width, headerBarStyle)
+}
 
-	var right string
+// headerStatus 右侧状态胶囊，文案与原先一致，只改颜色和底色。
+func (m model) headerStatus() string {
+	var text string
+	style := stepTodoStyle
 	switch {
 	case m.running:
-		right = stepActiveStyle.Render("执行中…")
+		text = "执行中…"
+		style = stepActiveStyle
 	case errors.Is(m.runErr, context.Canceled):
-		right = stepTodoStyle.Render("上次执行已取消，可修改后重跑")
+		text = "上次执行已取消，可修改后重跑"
 	case m.runErr != nil:
-		right = errorStyle.Render("上次执行失败，可修改后重跑")
+		text = "上次执行失败，可修改后重跑"
+		style = stepErrStyle
 	case m.total > 0:
-		right = successStyle.Render(fmt.Sprintf("上次执行 %d/%d 成功，可修改后重跑", m.done, m.total))
+		text = fmt.Sprintf("上次执行 %d/%d 成功，可修改后重跑", m.done, m.total)
+		style = stepOkStyle
 	default:
-		right = stepTodoStyle.Render(displaySel(m.ops))
+		text = displaySel(m.ops)
 	}
-	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-2, 1)
-	return left + strings.Repeat(" ", gap) + right + " "
+	return style.Padding(0, 1).Render(text)
 }
 
 // panelTitle 返回面板标题（含编号与动态状态）。
@@ -177,12 +205,16 @@ func sidebarRows(rows []string, cur, h int) string {
 func (m model) opsPane(h int) string {
 	rows := make([]string, 0, len(features))
 	for i, feat := range features {
-		mark := uncheckedStyle.Render("[ ]")
+		mark := "[ ]"
+		markStyled := uncheckedStyle.Render(mark)
 		if feat.selected(m.ops) {
-			mark = checkedStyle.Render("[✔]")
+			mark = "[✔]"
+			markStyled = checkedStyle.Render(mark)
 		}
 		focused := i == m.featCursor
-		rows = append(rows, cursorMark(focused)+mark+" "+itemStyle(focused).Render(feat.label))
+		plain := mark + " " + feat.label
+		styled := m.mark(panelOps, focused) + markStyled + " " + m.rowStyle(panelOps, focused).Render(feat.label)
+		rows = append(rows, m.barLine(m.focus == panelOps, focused, plain, styled))
 	}
 	return sidebarRows(rows, m.featCursor, h)
 }
@@ -191,32 +223,37 @@ func (m model) opsPane(h int) string {
 func (m model) presetsPane(h int) string {
 	rows := make([]string, 0, m.presetCount())
 	for i, bp := range m.builtins {
-		extra := descStyle.Render("内置 · " + bp.Args)
-		rows = append(rows, presetsRow(i == m.presetCursor, bp.Name, extra))
+		rows = append(rows, m.presetsRow(i == m.presetCursor, bp.Name, "内置 · "+bp.Args))
 	}
 	for i, p := range m.presets {
 		title := p.Args
+		extra := ""
 		if p.Name != "" {
-			title = p.Name + "  " + descStyle.Render(p.Args)
+			title = p.Name
+			extra = p.Args
 		}
-		rows = append(rows, presetsRow(m.presetUserOffset()+i == m.presetCursor, title, ""))
+		rows = append(rows, m.presetsRow(m.presetUserOffset()+i == m.presetCursor, title, extra))
 	}
 	manual := m.presetUserOffset() + len(m.presets)
 	extra := ""
 	if len(m.presets) == 0 {
-		extra = descStyle.Render("按 a 复制内置")
+		extra = "按 a 复制内置"
 	}
-	rows = append(rows, presetsRow(m.presetCursor == manual, "(手动输入)", extra))
+	rows = append(rows, m.presetsRow(m.presetCursor == manual, "(手动输入)", extra))
 	return sidebarRows(rows, m.presetCursor, h)
 }
 
 // presetsRow 渲染一条预设列表行（不带换行），extra 为灰色说明。
-func presetsRow(focused bool, label, extra string) string {
-	line := itemStyle(focused).Render(label)
+func (m model) presetsRow(focused bool, label, extra string) string {
+	plain := label
 	if extra != "" {
-		line += " " + extra
+		plain += "  " + extra
 	}
-	return cursorMark(focused) + line
+	line := m.rowStyle(panelPresets, focused).Render(label)
+	if extra != "" {
+		line += " " + descStyle.Render(extra)
+	}
+	return m.barLine(m.focus == panelPresets, focused, plain, m.mark(panelPresets, focused)+line)
 }
 
 // subsPane 字幕列表。
@@ -231,11 +268,15 @@ func (m model) subsPane(h int) string {
 	rows := make([]string, 0, len(m.subs))
 	for i, sub := range m.subs {
 		focused := i == m.subCursor
-		line := fmt.Sprintf("%d. .%s  %s", i+1, sub.Suffix, sub.Lang)
+		plain := fmt.Sprintf("%d. .%s  %s", i+1, sub.Suffix, sub.Lang)
+		if sub.Default {
+			plain += " [默认]"
+		}
+		line := m.rowStyle(panelSubs, focused).Render(fmt.Sprintf("%d. .%s  %s", i+1, sub.Suffix, sub.Lang))
 		if sub.Default {
 			line += " " + checkedStyle.Render("[默认]")
 		}
-		rows = append(rows, cursorMark(focused)+itemStyle(focused).Render(line))
+		rows = append(rows, m.barLine(m.focus == panelSubs, focused, plain, m.mark(panelSubs, focused)+line))
 	}
 	return sidebarRows(rows, m.subCursor, h)
 }
@@ -246,9 +287,68 @@ func (m model) formPane(h int) string {
 	for i := range m.fields {
 		f := &m.fields[i]
 		focused := i == m.focusNo
-		rows = append(rows, cursorMark(focused)+itemStyle(focused).Render(f.def.label))
+		rows = append(rows, m.barLine(m.focus == panelForm, focused, f.def.label, m.mark(panelForm, focused)+m.rowStyle(panelForm, focused).Render(f.def.label)))
 	}
 	return sidebarRows(rows, m.focusNo, h)
+}
+
+// barLine 在当前面板里把选中行铺成整行高亮。其他面板仍只用文字颜色，避免五条高亮叠在一起。
+func (m model) barLine(active, focused bool, plain, styled string) string {
+	if !active || !focused || m.leftW < 8 {
+		return styled
+	}
+	return fillLine(m.leftW-2, selectedRowStyle, "▸ "+plain)
+}
+
+// fillLine 把文本补齐或截断到 width 后套上样式，使底色铺满这一行。
+func fillLine(width int, style lipgloss.Style, text string) string {
+	if width < 4 {
+		return style.Render(text)
+	}
+	if lipgloss.Width(text) > width {
+		text = ansi.Truncate(text, width, "…")
+	}
+	if pad := width - lipgloss.Width(text); pad > 0 {
+		text += strings.Repeat(" ", pad)
+	}
+	return style.Render(text)
+}
+
+// fitWidth 把一行补齐到指定显示宽度，补上的空格沿用 pad 的底色。
+func fitWidth(line string, width int, pad lipgloss.Style) string {
+	w := lipgloss.Width(line)
+	if w == width || width <= 0 {
+		return line
+	}
+	if w > width {
+		return ansi.Truncate(line, width, "…")
+	}
+	return line + pad.Render(strings.Repeat(" ", width-w))
+}
+
+// inputWidth 是表单输入框的可视宽度。
+// 扣掉边框、两格缩进、16 列标签、间隔、两列提示符，以及文本框自带的一列光标。
+func inputWidth(boxW int) int {
+	return max(boxW-24, 8)
+}
+func titleLine(text string) string {
+	return " " + titleMarkStyle.Render("▌ ") + taskTitleStyle.Render(text)
+}
+
+// mark 只在当前面板标出光标，其它面板保持安静。
+func (m model) mark(p panel, focused bool) string {
+	if focused && m.focus == p {
+		return selectedMark.Render("▸ ")
+	}
+	return "  "
+}
+
+// rowStyle 当前面板的光标行用强调色，其它面板用正文色。
+func (m model) rowStyle(p panel, focused bool) lipgloss.Style {
+	if focused && m.focus == p {
+		return selectedStyle
+	}
+	return normalStyle
 }
 
 // cursorMark 返回列表行的光标前缀。
@@ -290,14 +390,14 @@ func (m model) focusedBody() string {
 func (m model) opsBody() string {
 	var b strings.Builder
 	feat := features[m.featCursor]
-	b.WriteString(taskTitleStyle.Render(feat.label) + "\n")
+	b.WriteString(titleLine(feat.label) + "\n")
 	b.WriteString(subtitleStyle.Render(feat.desc) + "\n\n")
 	for i := range features {
 		mark := uncheckedStyle.Render("[ ]")
 		if features[i].selected(m.ops) {
 			mark = checkedStyle.Render("[✔]")
 		}
-		b.WriteString(mark + " " + itemStyle(i == m.featCursor).Render(features[i].label) + "\n")
+		b.WriteString("  " + mark + " " + itemStyle(i == m.featCursor).Render(features[i].label) + "\n")
 	}
 	b.WriteString("\n  空格 勾选；已选 " + selectedStyle.Render(displaySel(m.ops)) + "\n")
 	if !m.ops.Any() {
@@ -313,13 +413,13 @@ func (m model) opsBody() string {
 // presetsBody 预设面板：选中项详情与提示。
 func (m model) presetsBody() string {
 	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render("视频转码 · 参数选择") + "\n")
+	b.WriteString(titleLine("视频转码 · 参数选择") + "\n")
 	offset := m.presetUserOffset()
 	switch {
 	case m.presetCursor < offset:
 		bp := m.builtins[m.presetCursor]
 		b.WriteString(subtitleStyle.Render("内置预设："+bp.Name+"（只读，按 a 可复制微调）") + "\n\n")
-		b.WriteString("  " + bp.Args + "\n")
+		b.WriteString("  " + codeStyle.Render(bp.Args) + "\n")
 	case m.presetCursor < offset+len(m.presets):
 		p := m.presets[m.presetCursor-offset]
 		label := p.Name
@@ -327,7 +427,7 @@ func (m model) presetsBody() string {
 			label = "（无名称）"
 		}
 		b.WriteString(subtitleStyle.Render("自定义预设："+label) + "\n\n")
-		b.WriteString("  " + p.Args + "\n")
+		b.WriteString("  " + codeStyle.Render(p.Args) + "\n")
 	default:
 		b.WriteString(subtitleStyle.Render("手动输入：enter 后在面板 [4] 直接编辑高级参数") + "\n\n")
 		b.WriteString("  " + descStyle.Render("ctrl+s 可把已填参数另存为预设") + "\n")
@@ -338,7 +438,7 @@ func (m model) presetsBody() string {
 // subsBody 字幕面板：列表详情与匹配说明。
 func (m model) subsBody() string {
 	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render("添加字幕 · 字幕轨道") + "\n")
+	b.WriteString(titleLine("添加字幕 · 字幕轨道") + "\n")
 	b.WriteString(subtitleStyle.Render("字幕按 <视频名>.<后缀> 或 <视频名>.<标记>.<后缀> 匹配") + "\n\n")
 	if len(m.subs) == 0 {
 		b.WriteString("  " + descStyle.Render("字幕列表为空，按 n 新增一条") + "\n")
@@ -362,7 +462,7 @@ func (m model) subsBody() string {
 // formBody 参数面板：表单字段（浏览态显示值，编辑态显示输入框）。
 func (m model) formBody() string {
 	var b strings.Builder
-	b.WriteString(taskTitleStyle.Render(displaySel(m.ops)+" · 参数") + "\n")
+	b.WriteString(titleLine(displaySel(m.ops)+" · 参数") + "\n")
 	if m.editing {
 		b.WriteString(subtitleStyle.Render("↑/↓/Tab 切换字段，enter 下一项，esc 完成") + "\n")
 	} else {
@@ -372,6 +472,7 @@ func (m model) formBody() string {
 
 	for i := range m.fields {
 		f := &m.fields[i]
+		f.input.SetWidth(inputWidth(m.rightW))
 		lbl := labelStyle.Render(f.def.label)
 		if i == m.focusNo {
 			lbl = labelFocusedStyle.Render(f.def.label)
@@ -509,7 +610,7 @@ func (m model) pinnedCmdText() string {
 func (m model) pinnedCmdBlock() string {
 	cmd := m.pinnedCmdText()
 	var b strings.Builder
-	b.WriteString("  " + descStyle.Render("固定 · 当前任务完整命令（y 复制）") + "\n")
+	b.WriteString("  " + sectionTitleStyle.Render("固定 · 当前任务完整命令（y 复制）") + "\n")
 	if cmd == "" {
 		b.WriteString("  " + subtitleStyle.Render("等待任务开始…") + "\n")
 	} else {
@@ -526,7 +627,7 @@ func (m model) outputDivider() string {
 	pad := max(width-lipgloss.Width(title), 0)
 	left, right := pad/2, pad-pad/2
 	line := strings.Repeat("─", left) + title + strings.Repeat("─", right)
-	return descStyle.Render(truncateText(line, width)) + "\n"
+	return sectionTitleStyle.Render(truncateText(line, width)) + "\n"
 }
 
 // batchBody 是主任务自己的主体：状态、进度和子任务列表，没有输出区。
@@ -534,7 +635,7 @@ func (m model) batchBody(row rosterRow) string {
 	var b strings.Builder
 	b.WriteString(m.batchOverviewBlock(row))
 	b.WriteString(m.progressBlock())
-	b.WriteString("  " + descStyle.Render("子任务") + "\n")
+	b.WriteString("  " + sectionTitleStyle.Render("子任务") + "\n")
 	b.WriteString(m.logVp.View())
 	return b.String()
 }
@@ -544,7 +645,7 @@ func (m model) subtaskBody() string {
 	var b strings.Builder
 	b.WriteString(m.pinnedCmdBlock())
 	b.WriteString(m.progressBlock())
-	b.WriteString("  " + descStyle.Render("次数") + "\n")
+	b.WriteString("  " + sectionTitleStyle.Render("次数") + "\n")
 	b.WriteString(m.logVp.View())
 	return b.String()
 }
@@ -672,8 +773,9 @@ func (m model) rosterRowView(idx int, row rosterRow) string {
 	default:
 		name = truncateText(row.title, m.leftW-6)
 	}
-	name += " " + fileStatusMark(row.state)
-	return cursorMark(focused) + itemStyle(focused).Render(name)
+	name += " " + fileStatusGlyph(row.state)
+	styled := m.mark(panelRun, focused) + m.rowStyle(panelRun, focused).Render(strings.TrimSuffix(name, " "+fileStatusGlyph(row.state))+" "+fileStatusMark(row.state))
+	return m.barLine(m.focus == panelRun, focused, name, styled)
 }
 
 // fileRow 渲染文件列表一行（不带换行）；idx 为文件下标（-1 表示“全部”）。
@@ -683,32 +785,65 @@ func (m model) fileRow(idx int, name string) string {
 		settled, _, _, _, total, _ := m.progressNumbers()
 		name = fmt.Sprintf("全部（%d/%d）", settled, total)
 	}
+	glyph := ""
 	if m.total > 0 {
 		state := filePending
 		if idx >= 0 && idx < len(m.files) {
 			state = m.files[idx].state
 		}
-		name += " " + fileStatusMark(state)
+		glyph = fileStatusGlyph(state)
 	}
-	name = truncateText(name, m.leftW-4)
-	return cursorMark(focused) + itemStyle(focused).Render(name)
+	plain := name
+	shown := name
+	if glyph != "" {
+		plain += " " + glyph
+		shown += " " + fileStatusMark(fileStateOf(m, idx))
+	}
+	limit := max(m.leftW-4, 4)
+	plain = truncateText(plain, limit)
+	shown = truncateText(shown, limit)
+	return m.barLine(m.focus == panelRun, focused, plain, m.mark(panelRun, focused)+m.rowStyle(panelRun, focused).Render(shown))
+}
+
+// fileStateOf 返回文件列表行对应的执行状态。idx < 0 表示“全部”。
+func fileStateOf(m model, idx int) string {
+	if idx >= 0 && idx < len(m.files) {
+		return m.files[idx].state
+	}
+	return filePending
 }
 
 // fileStatusMark 渲染文件执行状态标记。
 func fileStatusMark(state string) string {
 	switch state {
 	case fileRunning:
-		return subtitleStyle.Render("▶")
+		return logLineInfoStyle.Render(fileStatusGlyph(state))
 	case filePaused:
-		return subtitleStyle.Render("‖")
+		return statusStyle.Render(fileStatusGlyph(state))
 	case fileDone:
-		return logLineDoneStyle.Render("✔")
+		return logLineDoneStyle.Render(fileStatusGlyph(state))
 	case fileFailed:
-		return logLineFailedStyle.Render("✘")
-	case fileCanceled, fileSkipped:
-		return descStyle.Render("−")
+		return logLineFailedStyle.Render(fileStatusGlyph(state))
 	default:
-		return descStyle.Render("○")
+		return descStyle.Render(fileStatusGlyph(state))
+	}
+}
+
+// fileStatusGlyph 是状态标记的纯文本，选中行高亮时不再套一层颜色。
+func fileStatusGlyph(state string) string {
+	switch state {
+	case fileRunning:
+		return "▶"
+	case filePaused:
+		return "‖"
+	case fileDone:
+		return "✔"
+	case fileFailed:
+		return "✘"
+	case fileCanceled, fileSkipped:
+		return "−"
+	default:
+		return "○"
 	}
 }
 
@@ -733,18 +868,17 @@ func wrapText(s string, width int) string {
 // drawBox 手绘圆角边框盒子（带内嵌标题），内容按行截断/补齐到 contentH 行；
 // contentH < 0 表示按内容自然高度。
 func drawBox(w int, title string, focused, enabled bool, content string, contentH int) string {
-	borderColor := "238"
+	borderColor := cBorder
+	titleStyle := panelTitleIdleStyle
 	switch {
 	case !enabled:
-		borderColor = "236"
+		borderColor = cBorderDim
+		titleStyle = descStyle
 	case focused:
-		borderColor = "39"
+		borderColor = cAccent
+		titleStyle = panelTitleStyle
 	}
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor))
-	titleStyle := descStyle
-	if focused && enabled {
-		titleStyle = selectedStyle
-	}
 
 	innerW := max(w-2, 2)
 	var head string
@@ -831,14 +965,18 @@ func (m model) footer() string {
 		hints = []string{"1-5/tab 切面板", "? 快捷键", "q 退出"}
 	}
 	divider := dividerStyle.Render(strings.Repeat("─", max(m.width, 1)))
+	desc := helpDescStyle.Background(lipgloss.Color(cHeaderBg))
+	sep := helpSepStyle.Background(lipgloss.Color(cHeaderBg))
 	keys := make([]string, 0, len(hints))
 	for _, h := range hints {
 		k, v, ok := strings.Cut(h, " ")
 		if !ok {
-			keys = append(keys, helpDescStyle.Render(h))
+			keys = append(keys, desc.Render(h))
 			continue
 		}
-		keys = append(keys, helpKeyStyle.Render(k)+" "+helpDescStyle.Render(v))
+		keys = append(keys, helpKeyStyle.Render(k)+footerPadStyle.Render(" ")+desc.Render(v))
 	}
-	return divider + "\n " + ansi.Truncate(strings.Join(keys, helpSepStyle.Render("  ·  ")), max(m.width-2, 1), "…")
+	line := footerPadStyle.Render(" ") + strings.Join(keys, sep.Render("  ·  "))
+	line = ansi.Truncate(line, max(m.width, 1), "…")
+	return divider + "\n" + fitWidth(line, m.width, footerPadStyle)
 }

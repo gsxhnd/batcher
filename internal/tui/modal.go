@@ -219,6 +219,7 @@ func (m model) modalView() string {
 				b.WriteString("\n")
 				continue
 			}
+			f.input.SetWidth(inputWidth(w))
 			b.WriteString("  " + lbl + " " + f.input.View() + "\n")
 			if f.err != "" {
 				b.WriteString("  " + errorStyle.Render("× "+f.err) + "\n")
