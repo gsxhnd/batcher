@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -428,26 +429,39 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	m.ops.Convert = true
 	m.rebuildFields()
 	testQueue(t, &m)
+	plan := testPlanOut(t, "a.mkv")
+	batch, err := m.queue.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
 	// 执行中允许切换面板（新语义：不锁定配置与面板）。
 	m.running = true
 	m.focus = panelRun
 	press(&m, "1")
 	assert.Equal(t, panelOps, m.focus, "执行中允许切换面板编辑配置")
-
-	// q/esc 取消当前批次：未暂停时走 CancelCurrent，暂停时发中止决策。
 	m.focus = panelRun
-	press(&m, "q")
-	assert.Contains(t, m.statusMsg, "取消请求")
-	assert.True(t, m.running, "取消是异步的，界面保持执行态直到结束")
 
-	// 暂停中按 r/s/a 发出决策指令。
-	m.pausedBatch = "测试批次"
+	// 执行中按 x / enter 不得重复入队（需求：同一时间只接受一个批次）。
+	before := len(m.queue.Snapshot())
+	press(&m, "x")
+	assert.Contains(t, m.statusMsg, "再按 x 入队")
+	press(&m, "enter")
+	assert.Equal(t, before, len(m.queue.Snapshot()), "执行中回车不得再入队")
+
+	// 等真实暂停后再测 r/s/a（光标在该批次行上），避免竞态。
+	m.roster = []rosterRow{{batchID: batch.ID, state: fileRunning, cmd: ""}}
+	m.pausedBatch = batch.ID
+	waitBatchEvent(t, &m, task.QueueBatchPaused)
 	press(&m, "r")
 	assert.Contains(t, m.statusMsg, "重试")
 	press(&m, "s")
 	assert.Contains(t, m.statusMsg, "跳过")
 	press(&m, "a")
 	assert.Contains(t, m.statusMsg, "中止")
+
+	// q/esc 取消当前批次：非暂停时走 CancelCurrent，界面保持执行态直到结束。
+	m.pausedBatch = ""
+	press(&m, "q")
+	assert.Contains(t, m.statusMsg, "取消请求")
+	assert.True(t, m.running, "取消是异步的，界面保持执行态直到结束")
 }
 
 func TestIsISO639Code(t *testing.T) {

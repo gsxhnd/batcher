@@ -342,22 +342,9 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		m.moveFilePane(1)
 		return nil
 	}
-	// 暂停等待决策时：r 重试 / s 跳过 / a 中止当前主任务。
-	if m.pausedBatch != "" {
-		switch key.String() {
-		case "r":
-			m.queue.Decide(task.DecisionRetry)
-			m.statusMsg = "已发送重试指令"
-			return nil
-		case "s":
-			m.queue.Decide(task.DecisionSkip)
-			m.statusMsg = "已发送跳过指令"
-			return nil
-		case "a":
-			m.queue.Decide(task.DecisionAbort)
-			m.statusMsg = "已发送中止指令"
-			return nil
-		}
+	// 队列视图的任务操作键：按光标所在行分发（子任务/批次行）。
+	if m.runTaskKeys(key.String()) {
+		return nil
 	}
 	switch key.String() {
 	case "f":
@@ -406,6 +393,59 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		return m.copyShownCommand()
 	}
 	return nil
+}
+
+// runTaskKeys 处理队列视图下 r/s/a/d 的任务操作；按光标所在行分发：
+// 子任务行：暂停时 r 重试 / s 跳过 / a 中止；
+// 批次行：r 重试整个任务（暂停中=重试失败子任务，已结束批次=失败项重新排队），d 删除任务。
+// 返回是否消费了该按键。
+func (m *model) runTaskKeys(key string) bool {
+	if !m.queueViewActive() || m.queue == nil {
+		return false
+	}
+	if m.fileCursor < 0 || m.fileCursor >= len(m.roster) {
+		return false
+	}
+	row := m.roster[m.fileCursor]
+	if row.itemID != "" {
+		if m.pausedBatch == "" {
+			// 只在暂停等待决策时接受子任务级决策；否则不消费，交给全局键。
+			return key == "d" // 子任务行不支持删除，落回未处理
+		}
+		switch key {
+		case "r":
+			m.queue.Decide(task.DecisionRetry)
+			m.statusMsg = "已发送重试指令"
+			return true
+		case "s":
+			m.queue.Decide(task.DecisionSkip)
+			m.statusMsg = "已发送跳过指令"
+			return true
+		case "a":
+			m.queue.Decide(task.DecisionAbort)
+			m.statusMsg = "已发送中止指令"
+			return true
+		}
+		return false
+	}
+	// 批次行操作
+	switch key {
+	case "r":
+		if err := m.queue.RetryBatch(row.batchID); err != nil {
+			m.statusMsg = "× 重试失败: " + err.Error()
+		} else {
+			m.statusMsg = "已发送重试指令，等待执行"
+		}
+		return true
+	case "d":
+		if err := m.queue.Discard(row.batchID); err != nil {
+			m.statusMsg = "× 删除失败: " + err.Error()
+		} else {
+			m.statusMsg = "已删除任务（记录文件保留在输出目录）"
+		}
+		return true
+	}
+	return false
 }
 
 // batchCommands 返回指定批次全部子任务的完整命令行。
@@ -464,8 +504,12 @@ func (m *model) copyShownCommand() tea.Cmd {
 }
 
 // tryStartRun 校验配置并把计划加入任务队列：失败时把焦点跳到出错的面板并给出提示。
-// 队列执行中同样可以入队新批次，使用最新生成的计划。
+// 队列执行中（含暂停等待决策）不得重复入队：同一时间只接受一个批次。
 func (m *model) tryStartRun() tea.Cmd {
+	if m.running {
+		m.statusMsg = "队列正在执行（或等待暂停决策），任务结束后再按 x 入队"
+		return nil
+	}
 	if !m.ops.Any() {
 		m.featErr = "请至少勾选一项操作"
 		m.setFocus(panelOps)

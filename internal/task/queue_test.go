@@ -41,6 +41,43 @@ func (c *collector) has(t QueueEventType) bool {
 	return slices.Contains(c.types(), t)
 }
 
+// waitFor 轮询等待指定事件出现（事件由队列异步发出）。
+func (c *collector) waitFor(t *testing.T, typ QueueEventType, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if c.has(typ) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("等待事件 %s 超时", string(typ))
+}
+
+// count 返回指定事件已出现的次数。
+func (c *collector) count(typ QueueEventType) int {
+	n := 0
+	for _, e := range c.types() {
+		if e == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// waitPausedCount 等待暂停事件出现至少 n 次。
+func (c *collector) waitPausedCount(t *testing.T, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if c.count(QueueBatchPaused) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("等待第 %d 次暂停超时", n)
+}
+
 // newTestQueue 创建带事件收集的测试队列。
 func newTestQueue(ctx context.Context) (*Queue, *collector) {
 	col := &collector{}
@@ -296,7 +333,157 @@ func TestCancelCurrentCancelsBatchAndRunsNext(t *testing.T) {
 	assert.Equal(t, StatusCanceled, s2)
 }
 
+// TestQueuePauseRetry 之上补充：批次级 RetryBatch 与 Discard。
+
+// singlePlan 构造只有一个子任务的转码计划（占位文件，ffmpeg 必然失败）。
+func singlePlan(t *testing.T) *command.BatchPlan {
+	t.Helper()
+	plan, _ := fixturePlan(t)
+	plan.Jobs = plan.Jobs[:1]
+	plan.Jobs[0].Output = filepath.Join(t.TempDir(), "输出", "a.mkv")
+	return plan
+}
+
+// waitPaused 等待队列出现暂停事件。
+func waitPaused(t *testing.T, col *collector) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		if col.has(QueueBatchPaused) {
+			return
+		}
+	}
+	t.Fatal("等待批次暂停超时")
+}
+
+func TestRetryBatchOnPausedRetriesFailedItem(t *testing.T) {
+	plan := singlePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	batchID := b.ID
+	waitPaused(t, col)
+
+	// r：暂停中重试当前失败的子任务，再次失败又暂停
+	require.NoError(t, q.RetryBatch(batchID))
+	col.waitPausedCount(t, 2, 10*time.Second)
+	assert.True(t, col.has(QueueItemRetry))
+	snap, _ := q.BatchCopy(batchID)
+	require.NotNil(t, snap)
+	assert.Equal(t, StatusPaused, snap.Status)
+	assert.Equal(t, StatusFailed, snap.Items[0].Status)
+	assert.Equal(t, 2, snap.Items[0].Attempts, "第二次失败应累计尝试次数")
+
+	// s：跳过后批次收尾（无失败项 → done）
+	q.Decide(DecisionSkip)
+	done := waitBatchTerminal(t, q, batchID, 10*time.Second)
+	require.NotNil(t, done)
+	assert.Equal(t, StatusDone, done.Status, "跳过唯一失败项后批次应完成")
+	assert.Equal(t, StatusSkipped, done.Items[0].Status)
+}
+
+func TestRetryBatchAfterAbortRequeuesWholeBatch(t *testing.T) {
+	plan := singlePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	batchID := b.ID
+	waitPaused(t, col)
+
+	// a：中止 → 批次失败（终态）
+	q.Decide(DecisionAbort)
+	failedBatch := waitBatchTerminal(t, q, batchID, 10*time.Second)
+	require.Equal(t, StatusFailed, failedBatch.Status)
+
+	// r：重试整个任务 → failed 子任务重置 pending，批次重新排队 → 再次失败暂停
+	require.NoError(t, q.RetryBatch(batchID))
+	requeued, _ := q.BatchCopy(batchID)
+	require.NotNil(t, requeued)
+	assert.Equal(t, StatusPending, requeued.Status, "批次应重新排队")
+	assert.Equal(t, StatusPending, requeued.Items[0].Status)
+	col.waitPausedCount(t, 2, 10*time.Second)
+
+	// s：跳过收尾
+	q.Decide(DecisionSkip)
+	done := waitBatchTerminal(t, q, batchID, 10*time.Second)
+	require.NotNil(t, done)
+	assert.Equal(t, StatusDone, done.Status)
+	assert.Equal(t, 2, done.Items[0].Attempts)
+}
+
+func TestDiscardPausesBatchMarksCanceledAndRemoves(t *testing.T) {
+	plan := singlePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	batchID := b.ID
+	recordPath := b.RecordPath()
+	waitPaused(t, col)
+
+	require.NoError(t, q.Discard(batchID))
+
+	// 已从队列移除，且发出移除事件；剩余子任务与批次记为 canceled。
+	col.waitFor(t, QueueBatchRemoved, 5*time.Second)
+	assert.True(t, col.has(QueueBatchRemoved))
+	_, ok := q.BatchCopy(batchID)
+	assert.False(t, ok, "删除后不应再在队列中")
+	snapshot := q.Snapshot()
+	for _, s := range snapshot {
+		assert.NotEqual(t, batchID, s.ID)
+	}
+	onDisk, err := Load(recordPath)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCanceled, onDisk.Status)
+	for _, it := range onDisk.Items {
+		assert.True(t, it.Status.Terminal(), "删除后不应有子任务卡在非终态")
+	}
+}
+
+func TestDiscardPendingAndTerminalBatches(t *testing.T) {
+	plan1 := singlePlan(t)
+	plan2 := singlePlan(t)
+	plan3 := singlePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	_, err := q.Enqueue(plan1, command.Selection{Convert: true})
+	require.NoError(t, err)
+	b2, err := q.Enqueue(plan2, command.Selection{Convert: true})
+	require.NoError(t, err)
+	_, err = q.Enqueue(plan3, command.Selection{Convert: true})
+	require.NoError(t, err)
+
+	// 等第一个暂停，此时 b2 大概率 pending、b3 pending
+	waitPaused(t, col)
+	if s, _ := q.BatchStatus(b2.ID); s == StatusPending {
+		require.NoError(t, q.Discard(b2.ID))
+		_, ok := q.BatchCopy(b2.ID)
+		assert.False(t, ok, "pending 批次删除后应直接移除")
+		assert.True(t, col.has(QueueBatchRemoved))
+	}
+
+	// 删除不存在/未知的批次报错
+	assert.Error(t, q.Discard("不存在的批次"))
+	_ = col
+}
+
 func TestQueueCancelStopsExecution(t *testing.T) {
+
 	fx := newMediaFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

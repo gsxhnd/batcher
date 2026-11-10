@@ -466,8 +466,8 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 				m.statusMsg = "已发送取消请求，等待正在执行的任务结束…"
 			}
 			return nil
-		case "1", "2", "3", "4", "5", "tab", "shift+tab", "shift+down", "shift+up", "down", "up", "j", "k", "enter":
-			// 面板切换与焦点移动不受执行影响，交给下方全局分发。
+		case "1", "2", "3", "4", "5", "tab", "shift+tab", "shift+down", "shift+up", "down", "up", "j", "k", "?", "x":
+			// 面板切换、焦点移动、帮助与入队（x 运行中被守卫拦截）交给下方全局分发。
 		default:
 			return m.updateRunPanel(key)
 		}
@@ -1317,9 +1317,10 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		}
 		return nil
 	}
-	// BatchAdded（入队）、BatchStarted（开始）与终态事件都需要在空闲时也能更新列表。
+	// BatchAdded（入队）、BatchStarted（开始）、BatchRemoved（删除）与终态事件
+	// 都需要在空闲时也能更新列表。
 	if e.Type != task.QueueBatchAdded && e.Type != task.QueueBatchStarted &&
-		e.Type != task.QueueStopped && !m.running {
+		e.Type != task.QueueBatchRemoved && e.Type != task.QueueStopped && !m.running {
 		return nil
 	}
 	var cmd tea.Cmd
