@@ -336,11 +336,24 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case "up", "k":
+		if m.outputFocus {
+			m.scrollOutput(-1)
+			return nil
+		}
 		m.moveFilePane(-1)
 		return nil
 	case "down", "j":
+		if m.outputFocus {
+			m.scrollOutput(1)
+			return nil
+		}
 		m.moveFilePane(1)
 		return nil
+	case "esc":
+		if m.outputFocus {
+			m.leaveOutput()
+			return nil
+		}
 	}
 	// 队列视图的任务操作键：按光标所在行分发（子任务/批次行）。
 	if m.runTaskKeys(key.String()) {
@@ -353,7 +366,15 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		return nil
 	case "enter":
 		if m.queueViewActive() {
-			// 批次行=展开/折叠子任务；子任务行=折叠其批次。
+			if m.outputFocus {
+				m.leaveOutput()
+				return nil
+			}
+			if m.fileCursor >= 0 && m.fileCursor < len(m.roster) && m.roster[m.fileCursor].itemID != "" {
+				m.openOutput()
+				return nil
+			}
+			// 主任务行：展开/折叠子任务。
 			m.toggleRosterExpand()
 			return nil
 		}

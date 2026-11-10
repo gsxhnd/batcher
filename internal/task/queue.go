@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -664,7 +666,12 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 		evt := e
 		q.emit(QueueEvent{Type: QueueFFmpeg, BatchID: b.ID, ItemID: it.ID, FFmpegEvt: &evt})
 	}}
+	idx := 0
+	if n, err := strconv.Atoi(strings.TrimSpace(it.ID)); err == nil && n > 0 {
+		idx = n - 1
+	}
 	call := ffmpeg.Call{
+		Index:   idx,
 		Total:   len(b.Items),
 		Command: command.FormatCommand(it.PlanArgs),
 		Args:    it.PlanArgs, // Runner.Run 会通过 ExecArgs 注入进度选项

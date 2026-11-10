@@ -648,3 +648,64 @@ func TestRetryDoesNotAdvanceSettledProgress(t *testing.T) {
 	assert.Equal(t, 1, settled)
 	assert.Equal(t, 0, failed)
 }
+
+func TestBatchRowHidesSubtaskLogs(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	m.roster = []rosterRow{{batchID: "b", title: "主任务"}}
+	m.fileCursor = 0
+	m.logs = []string{"ffmpeg-detail-UNIQUE"}
+	m.files = []fileItem{{logs: []string{"child-output-UNIQUE"}}}
+	m.syncLogPane()
+	view := m.logVp.View()
+	assert.NotContains(t, view, "ffmpeg-detail-UNIQUE")
+	assert.NotContains(t, view, "child-output-UNIQUE")
+	assert.Contains(t, view, "暂无任务状态")
+}
+
+func TestFFmpegLogUsesItemID(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.running = true
+	m.activeBatch = "b"
+	m.filesBatch = "b"
+	m.total = 2
+	m.files = []fileItem{{input: "a.mkv"}, {input: "b.mkv"}}
+	evt := ffmpeg.Event{Type: ffmpeg.EventLog, Index: 0, Message: "second-output"}
+	m.handleQueueEvent(task.QueueEvent{
+		Type: task.QueueFFmpeg, BatchID: "b", ItemID: "002", FFmpegEvt: &evt,
+	})
+	assert.NotContains(t, strings.Join(m.files[0].logs, "\n"), "second-output")
+	assert.Contains(t, strings.Join(m.files[1].logs, "\n"), "second-output")
+}
+
+func TestEnterSubtaskScrollsOutput(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	m.focus = panelRun
+	m.filesBatch = "b"
+	m.roster = []rosterRow{{batchID: "b", itemID: "001", title: "a.mkv"}}
+	logs := make([]string, 0, 20)
+	for i := range 20 {
+		logs = append(logs, fmt.Sprintf("输出行 %02d", i+1))
+	}
+	m.files = []fileItem{{input: "a.mkv", logs: logs}}
+	m.logVp.SetHeight(4)
+
+	press(&m, "enter")
+	assert.True(t, m.outputFocus, "子任务回车应进入输出")
+	assert.Equal(t, 0, m.fileCursor)
+	before := m.logVp.YOffset()
+	require.Positive(t, before, "输出应能向下滚出视口")
+
+	press(&m, "up")
+	assert.Less(t, m.logVp.YOffset(), before, "上下键应滚动输出")
+	assert.Equal(t, 0, m.fileCursor, "查看输出时不应改动左侧光标")
+
+	press(&m, "esc")
+	assert.False(t, m.outputFocus)
+}

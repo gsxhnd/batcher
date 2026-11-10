@@ -141,9 +141,11 @@ type model struct {
 	files      []fileItem
 	fileCursor int  // 光标：0 = 全部汇总，1.. = 第 i 个源文件
 	fileFollow bool // 执行时右侧自动跟随正在执行的文件（手动切换后停止）
-	runIdx     int  // 正在执行的文件下标（files 内），-1 表示当前无执行中任务
-	leftW      int  // 左侧面板栏宽度
-	rightW     int  // 右侧内容区宽度
+	// outputFocus 为真时，上下键滚动当前子任务的输出，而不是移动左侧列表。
+	outputFocus bool
+	runIdx      int // 正在执行的文件下标（files 内），-1 表示当前无执行中任务
+	leftW       int // 左侧面板栏宽度
+	rightW      int // 右侧内容区宽度
 
 	// 执行
 	running             bool
@@ -264,8 +266,9 @@ func (m *model) setFocus(p panel) {
 		m.blurForm()
 	}
 	if m.focus == panelRun && p != panelRun {
-		// 离开任务面板时取消自动跟随（下次执行前重新开启）。
+		// 离开任务面板时取消自动跟随，并退出输出查看。
 		m.fileFollow = false
+		m.outputFocus = false
 	}
 	m.focus = p
 	m.refreshRunHeights()
@@ -456,6 +459,10 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		// 运行期间允许查看其他面板与编辑配置；q/esc 取消当前批次，队列继续处理后续任务。
 		switch s {
 		case "q", "esc":
+			if s == "esc" && m.outputFocus {
+				m.leaveOutput()
+				return nil
+			}
 			if m.pausedBatch != "" {
 				// 暂停中等待决策：q/esc 视作中止当前主任务。
 				m.queue.Decide(task.DecisionAbort)
@@ -497,6 +504,10 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		m.nextPanel(-1)
 		return nil
 	case "q":
+		if m.outputFocus {
+			m.leaveOutput()
+			return nil
+		}
 		return tea.Quit
 	case "?":
 		m.openHelpModal()
@@ -504,6 +515,9 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 	case "x":
 		return m.tryStartRun()
 	case "enter":
+		if m.focus == panelRun && (m.queueViewActive() || m.outputFocus) {
+			return m.updateRunPanel(key)
+		}
 		if m.focus == panelRun {
 			return m.tryStartRun()
 		}
@@ -874,8 +888,34 @@ func (m *model) toggleRosterExpand() {
 	m.syncRoster()
 }
 
-// followRunningItem 把光标跳到当前正在执行的子任务行（f 键），并恢复自动跟随。
+// leaveOutput 退出子任务输出查看，上下键恢复为移动左侧列表。
+func (m *model) leaveOutput() {
+	m.outputFocus = false
+	m.statusMsg = ""
+}
+
+// openOutput 进入当前子任务的输出查看。
+func (m *model) openOutput() {
+	m.outputFocus = true
+	m.fileFollow = false
+	m.logFollow = true
+	m.pinRosterCursor()
+	m.syncLogPane()
+	m.logVp.GotoBottom()
+	m.statusMsg = "↑/↓ 滚动输出，esc 返回"
+}
+
+// scrollOutput 在输出查看中按行滚动，离开底部后暂停跟随新输出。
+func (m *model) scrollOutput(delta int) {
+	if delta < 0 {
+		m.logVp.ScrollUp(-delta)
+	} else if delta > 0 {
+		m.logVp.ScrollDown(delta)
+	}
+	m.logFollow = m.logVp.AtBottom()
+}
 func (m *model) followRunningItem() {
+	m.outputFocus = false
 	if len(m.roster) == 0 {
 		if m.runIdx >= 0 && m.runIdx < len(m.files) && m.files[m.runIdx].state == fileRunning {
 			m.fileFollow = true
@@ -959,8 +999,8 @@ func (m *model) syncLogPane() {
 	}
 }
 
-// syncRosterLogPane 按批次列表光标刷新日志：批次行=汇总（当前批次实时日志或无日志提示），
-// 子任务行=当前批次的实时日志或历史批次的错误尾部。
+// syncRosterLogPane 按批次列表光标刷新右侧内容。
+// 主任务行只展示各子任务的状态，不放执行明细；子任务行展示该任务自己的输出。
 func (m *model) syncRosterLogPane() {
 	if len(m.roster) == 0 {
 		return
@@ -968,9 +1008,9 @@ func (m *model) syncRosterLogPane() {
 	row := m.roster[clamp(m.fileCursor, 0, len(m.roster)-1)]
 	var lines []string
 	switch {
-	case row.itemID == "" && row.batchID == m.filesBatch:
-		lines = m.logs // 运行中/刚结束批次的汇总日志
-	case row.itemID != "" && row.batchID == m.filesBatch:
+	case row.itemID == "":
+		lines = m.batchStatusLines(row.batchID)
+	case row.batchID == m.filesBatch:
 		if idx := itemIndexOf(row.itemID); idx >= 0 && idx < len(m.files) {
 			lines = m.files[idx].logs
 		} else {
@@ -982,6 +1022,72 @@ func (m *model) syncRosterLogPane() {
 	m.logVp.SetContent(wrapText(strings.Join(lines, "\n"), m.rightW-2))
 	if m.logFollow {
 		m.logVp.GotoBottom()
+	}
+}
+
+// batchStatusLines 是主任务行的内容：每个子任务一行状态，不包含 ffmpeg 输出。
+func (m model) batchStatusLines(batchID string) []string {
+	if m.queue == nil {
+		return []string{descStyle.Render("暂无任务状态")}
+	}
+	b, ok := m.queue.BatchCopy(batchID)
+	if !ok {
+		return []string{descStyle.Render("任务已不在队列中")}
+	}
+	c := b.Counts()
+	lines := []string{
+		descStyle.Render(fmt.Sprintf("状态：%s    完成 %d / 失败 %d / 跳过 %d / 取消 %d，共 %d",
+			batchStateText(b.Status), c.Done, c.Failed, c.Skipped, c.Canceled, c.Total)),
+		descStyle.Render("输入: " + b.InputDir),
+		descStyle.Render("输出: " + b.OutputDir),
+		"",
+	}
+	for _, it := range b.Items {
+		if it.Removed {
+			continue
+		}
+		line := fmt.Sprintf("%s  %s", itemStateText(it.Status), filepath.Base(it.Input))
+		if it.Status == task.StatusFailed && it.Error != "" {
+			errLine := it.Error
+			if i := strings.IndexByte(errLine, '\n'); i >= 0 {
+				errLine = errLine[:i]
+			}
+			line += "  " + errLine
+		}
+		style := descStyle
+		switch it.Status {
+		case task.StatusFailed:
+			style = logLineFailedStyle
+		case task.StatusDone:
+			style = logLineDoneStyle
+		case task.StatusRunning:
+			style = subtitleStyle
+		}
+		lines = append(lines, style.Render(line))
+	}
+	if len(lines) == 4 {
+		lines = append(lines, descStyle.Render("没有子任务"))
+	}
+	return lines
+}
+
+// itemStateText 返回子任务状态的中文名。
+func itemStateText(s task.Status) string {
+	switch s {
+	case task.StatusRunning:
+		return "执行中"
+	case task.StatusDone:
+		return "已完成"
+	case task.StatusFailed:
+		return "失败"
+	case task.StatusSkipped:
+		return "已跳过"
+	case task.StatusCanceled:
+		return "已取消"
+	case task.StatusInterrupted:
+		return "已中断"
+	default:
+		return "等待"
 	}
 }
 
@@ -1175,6 +1281,12 @@ func (m *model) syncRoster() {
 		if row.batchID == m.rosterPinBatch && row.itemID == m.rosterPinItem {
 			m.fileCursor = i
 			break
+		}
+	}
+	if m.outputFocus {
+		rowOK := m.fileCursor >= 0 && m.fileCursor < len(m.roster) && m.roster[m.fileCursor].itemID != ""
+		if !rowOK {
+			m.outputFocus = false
 		}
 	}
 	if m.width > 0 && (m.running || len(rows) > 0) {
@@ -1394,7 +1506,15 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 			return nil
 		}
 		if e.FFmpegEvt.Type == ffmpeg.EventLog {
-			return m.handleEvent(*e.FFmpegEvt)
+			evt := *e.FFmpegEvt
+			// 执行器发出的日志下标可能是 0；以子任务 ID 为准，避免第二条任务的输出写进第一条。
+			if idx := itemIndexOf(e.ItemID); idx >= 0 {
+				evt.Index = idx
+			}
+			if m.total > 0 {
+				evt.Total = m.total
+			}
+			return m.handleEvent(evt)
 		}
 		return nil
 	}

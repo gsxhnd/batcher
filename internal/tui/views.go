@@ -732,6 +732,8 @@ func (m model) footer() string {
 				hints = []string{"↑/↓/Tab 切换", "enter 下一项/保存", "space 切换默认轨道", "esc 取消"}
 			}
 		}
+	case m.outputFocus:
+		hints = []string{"↑/↓ 滚动输出", "pgup/pgdn 翻页", "esc 返回", "y 复制"}
 	case m.editing:
 		hints = []string{"↑/↓/Tab 切换", "enter 下一项", "esc 完成", "ctrl+s 另存预设"}
 	case m.running || (m.focus == panelRun && m.queueViewActive()):
