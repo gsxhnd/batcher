@@ -367,14 +367,20 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	case "enter":
 		if m.queueViewActive() {
 			if m.outputFocus {
-				m.leaveOutput()
 				return nil
 			}
-			if m.fileCursor >= 0 && m.fileCursor < len(m.roster) && m.roster[m.fileCursor].itemID != "" {
+			if m.fileCursor < 0 || m.fileCursor >= len(m.roster) {
+				return nil
+			}
+			row := m.roster[m.fileCursor]
+			if row.attempt > 0 {
 				m.openOutput()
 				return nil
 			}
-			// 主任务行：展开/折叠子任务。
+			if row.itemID != "" {
+				m.toggleItemAttempts(row)
+				return nil
+			}
 			m.toggleRosterExpand()
 			return nil
 		}

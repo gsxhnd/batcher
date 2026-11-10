@@ -2,3 +2,4 @@ testdata
 result
 
 .DS_Store
+internal/tui/o

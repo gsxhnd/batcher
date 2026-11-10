@@ -29,13 +29,13 @@ func TestRefreshRunVpHeights(t *testing.T) {
 	assert.Positive(t, m.vp.Height(), "预览视口应有高度")
 	assert.Positive(t, m.logVp.Height(), "日志视口应有高度")
 
-	// 执行中：日志高度 = 主体内容 - 固定区 - 进度 - 分隔线。
+	// 执行中的子任务：日志高度 = 主体内容 - 固定区（命令、进度、分隔线）。
 	m.running = true
 	m.total = 3
 	m.current = "ffmpeg -i a.mkv -c copy out/a.mkv"
 	m.resizePanes()
 	inner := max(m.bodyH()-2, 2)
-	assert.Equal(t, inner-m.runPinH()-m.runBarH()-m.outputSplitH(), m.logVp.Height())
+	assert.Equal(t, inner-m.taskChromeH(), m.logVp.Height())
 	assert.GreaterOrEqual(t, m.logVp.Height(), 2, "日志视口至少保留 2 行")
 }
 

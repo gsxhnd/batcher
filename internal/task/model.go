@@ -50,7 +50,8 @@ type Item struct {
 	Args     []string `json:"args"`
 	PlanArgs []string `json:"planArgs"`
 	Status   Status   `json:"status"`
-	Attempts int      `json:"attempts"`
+	// Attempts 是这个子任务已经开始执行的次数，含正在进行的这一次。
+	Attempts int `json:"attempts"`
 	// Removed 为真时子任务已从队列列表删除：执行会跳过，计数与界面不再统计。
 	Removed bool `json:"removed,omitempty"`
 	// PartialOutput 在子任务启动前置真、成功后置回假：崩溃后据此判断输出是不是半成品。

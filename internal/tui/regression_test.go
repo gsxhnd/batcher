@@ -189,12 +189,20 @@ func TestRosterShowsBatchesAndItemStates(t *testing.T) {
 	require.True(t, m.running)
 	require.True(t, m.queueViewActive(), "入队后应显示队列视图")
 
-	// 默认展开运行中的批次：1 批次行 + 2 子任务行
-	require.Len(t, m.roster, 3, "1 批次行 + 2 子任务行")
+	// 默认展开暂停中的批次，失败的子任务再展开次数。
+	require.GreaterOrEqual(t, len(m.roster), 4, "批次 + 失败子任务 + 第 1 次 + 未开始子任务")
 	assert.Empty(t, m.roster[0].itemID, "第一行是批次行")
 	assert.Equal(t, filePaused, m.roster[0].state, "暂停中的批次应显示为暂停")
 	assert.Equal(t, fileFailed, m.roster[1].state, "失败的子任务应可见")
-	assert.Equal(t, filePending, m.roster[2].state, "未开始的子任务应可见")
+	assert.Equal(t, 1, m.roster[2].attempt, "失败子任务下应挂出第 1 次")
+	assert.Equal(t, m.roster[1].itemID, m.roster[2].itemID)
+	var pending bool
+	for _, row := range m.roster {
+		if row.attempt == 0 && row.itemID != "" && row.state == filePending {
+			pending = true
+		}
+	}
+	assert.True(t, pending, "未开始的子任务应可见")
 	assert.True(t, strings.HasPrefix(m.roster[1].cmd, "ffmpeg"), "子任务行携带完整命令")
 
 	// 光标停在失败子任务上：置顶显示该子任务的完整命令（与正在执行与否无关）
@@ -662,7 +670,7 @@ func TestBatchRowHidesSubtaskLogs(t *testing.T) {
 	view := m.logVp.View()
 	assert.NotContains(t, view, "ffmpeg-detail-UNIQUE")
 	assert.NotContains(t, view, "child-output-UNIQUE")
-	assert.Contains(t, view, "主任务只保留状态")
+	assert.Contains(t, view, "暂无子任务")
 }
 
 func TestFFmpegLogUsesItemID(t *testing.T) {
@@ -688,12 +696,12 @@ func TestEnterSubtaskScrollsOutput(t *testing.T) {
 	m.resizePanes()
 	m.focus = panelRun
 	m.filesBatch = "b"
-	m.roster = []rosterRow{{batchID: "b", itemID: "001", title: "a.mkv"}}
+	m.roster = []rosterRow{{batchID: "b", itemID: "001", attempt: 1, title: "第 1 次"}}
 	logs := make([]string, 0, 20)
 	for i := range 20 {
 		logs = append(logs, fmt.Sprintf("输出行 %02d", i+1))
 	}
-	m.files = []fileItem{{input: "a.mkv", logs: logs}}
+	m.files = []fileItem{{input: "a.mkv", attempts: []attemptLog{{n: 1, status: fileRunning, lines: logs}}}}
 	m.logVp.SetHeight(4)
 
 	press(&m, "enter")
@@ -706,8 +714,83 @@ func TestEnterSubtaskScrollsOutput(t *testing.T) {
 	assert.Less(t, m.logVp.YOffset(), before, "上下键应滚动输出")
 	assert.Equal(t, 0, m.fileCursor, "查看输出时不应改动左侧光标")
 
+	press(&m, "q")
+	assert.True(t, m.outputFocus, "输出里按 q 不返回上一级")
+
 	press(&m, "esc")
 	assert.False(t, m.outputFocus)
+}
+
+func TestBatchBodyHasNoOutputPane(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 34
+	m.resizePanes()
+	m.focus = panelRun
+	m.running = true
+	m.total = 2
+	m.roster = []rosterRow{{batchID: "b", title: "主任务"}}
+	m.fileCursor = 0
+	m.refreshRunHeights()
+	m.syncLogPane()
+
+	body := m.runBody()
+	assert.Contains(t, body, "子任务")
+	assert.NotContains(t, body, "固定 · 当前任务完整命令")
+	assert.NotContains(t, body, "── 输出 ──")
+	assert.NotContains(t, body, "ffmpeg-detail-UNIQUE")
+}
+
+func TestRetryAttemptsAreNumberedAndFoldable(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 34
+	m.resizePanes()
+	m.focus = panelRun
+	m.running = true
+	m.total = 1
+	m.filesBatch = "b"
+	m.files = []fileItem{{input: "a.mkv", cmd: "ffmpeg -i a.mkv o.mkv"}}
+	m.roster = []rosterRow{{batchID: "b", itemID: "001", title: "a.mkv", cmd: "ffmpeg -i a.mkv o.mkv"}}
+	m.fileCursor = 0
+
+	start := func(msg string) {
+		m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandStart, Index: 0, Total: 1, Command: "ffmpeg -i a.mkv o.mkv"})
+		m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventLog, Index: 0, Message: msg})
+		m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandFailed, Index: 0, Total: 1, Message: "失败"})
+	}
+	start("first-output-UNIQUE")
+	start("second-output-UNIQUE")
+
+	require.Len(t, m.files[0].attempts, 2)
+	assert.Equal(t, 1, m.files[0].attempts[0].n)
+	assert.Equal(t, 2, m.files[0].attempts[1].n)
+	assert.NotContains(t, strings.Join(m.files[0].logs, "\n"), "[1/1] 重试")
+
+	m.syncLogPane()
+	parent := m.subtaskBody()
+	assert.Contains(t, parent, "次数")
+	assert.Contains(t, parent, "第 1 次")
+	assert.Contains(t, parent, "第 2 次")
+	assert.NotContains(t, parent, "── 输出 ──")
+	assert.NotContains(t, parent, "first-output-UNIQUE")
+	assert.NotContains(t, parent, "second-output-UNIQUE")
+
+	m.roster = []rosterRow{
+		{batchID: "b", itemID: "001", title: "a.mkv", cmd: "ffmpeg -i a.mkv o.mkv"},
+		{batchID: "b", itemID: "001", attempt: 1, title: "第 1 次", state: fileFailed, cmd: "ffmpeg -i a.mkv o.mkv"},
+		{batchID: "b", itemID: "001", attempt: 2, title: "第 2 次", state: fileFailed, cmd: "ffmpeg -i a.mkv o.mkv"},
+	}
+	m.fileCursor = 1
+	m.logFollow = false
+	m.syncLogPane()
+	assert.Contains(t, m.logVp.View(), "first-output-UNIQUE")
+	assert.NotContains(t, m.logVp.View(), "second-output-UNIQUE")
+
+	m.fileCursor = 2
+	m.syncLogPane()
+	assert.Contains(t, m.logVp.View(), "second-output-UNIQUE")
+	assert.NotContains(t, m.logVp.View(), "first-output-UNIQUE")
 }
 
 func TestTaskPanelXDoesNotEnqueue(t *testing.T) {

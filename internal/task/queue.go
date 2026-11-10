@@ -658,6 +658,7 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 	q.mu.Lock()
 	it.Status = StatusRunning
 	it.PartialOutput = true
+	it.Attempts++
 	q.mu.Unlock()
 	q.emit(QueueEvent{Type: QueueItemStarted, BatchID: b.ID, ItemID: it.ID})
 	_ = b.Save()
@@ -722,7 +723,6 @@ func (q *Queue) failItem(b *Batch, it *Item, start time.Time, msg string) {
 	it.Status = StatusFailed
 	it.PartialOutput = false
 	it.Error = msg
-	it.Attempts++
 	it.DurationMs = time.Since(start).Milliseconds()
 	q.mu.Unlock()
 	q.emit(QueueEvent{Type: QueueItemFailed, BatchID: b.ID, ItemID: it.ID, Err: fmt.Errorf("%s", msg)})

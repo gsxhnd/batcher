@@ -394,19 +394,20 @@ func (m model) formBody() string {
 	return statusSuffix(m.statusMsg) + b.String()
 }
 
-// runBody 任务面板：命令预览（浏览态）或置顶命令 + 进度与日志（执行中）。
-// 队列视图激活（入队后）一直显示置顶命令/进度与日志，结束后可继续查看各批次。
+// runBody 任务面板：命令预览，或队列里的主任务 / 子任务主体。
+// 主任务只放状态与子任务列表；子任务才有固定命令和可折叠的输出。
 func (m model) runBody() string {
 	var b strings.Builder
 	if m.running || m.queueViewActive() {
 		if row, ok := m.focusedBatchRow(); ok {
-			b.WriteString(m.batchOverviewBlock(row))
+			b.WriteString(m.batchBody(row))
+		} else if _, ok := m.focusedAttemptRow(); ok {
+			b.WriteString(m.attemptBody())
+		} else if _, ok := m.focusedItemRow(); ok {
+			b.WriteString(m.subtaskBody())
 		} else {
-			b.WriteString(m.pinnedCmdBlock())
+			b.WriteString(m.itemBody())
 		}
-		b.WriteString(m.progressBlock())
-		b.WriteString(m.outputDivider())
-		b.WriteString(m.logVp.View())
 		return statusSuffix(m.statusMsg) + b.String()
 	}
 	switch {
@@ -518,9 +519,9 @@ func (m model) pinnedCmdBlock() string {
 	return b.String()
 }
 
-// outputDivider 把不滚动的状态区和下面的输出区隔开，固定一行。
+// outputDivider 把子任务的固定信息和下面的输出区隔开，固定一行。
 func (m model) outputDivider() string {
-	title := " 输出 "
+	title := "── 输出 ──"
 	width := max(m.rightW-2, lipgloss.Width(title))
 	pad := max(width-lipgloss.Width(title), 0)
 	left, right := pad/2, pad-pad/2
@@ -528,12 +529,62 @@ func (m model) outputDivider() string {
 	return descStyle.Render(truncateText(line, width)) + "\n"
 }
 
-// outputSplitH 是状态区与输出区之间分隔线的行数。
-func (m model) outputSplitH() int {
-	if m.running || m.queueViewActive() {
-		return 1
+// batchBody 是主任务自己的主体：状态、进度和子任务列表，没有输出区。
+func (m model) batchBody(row rosterRow) string {
+	var b strings.Builder
+	b.WriteString(m.batchOverviewBlock(row))
+	b.WriteString(m.progressBlock())
+	b.WriteString("  " + descStyle.Render("子任务") + "\n")
+	b.WriteString(m.logVp.View())
+	return b.String()
+}
+
+// subtaskBody 是子任务行的主体：命令和次数列表，没有 ffmpeg 输出。
+func (m model) subtaskBody() string {
+	var b strings.Builder
+	b.WriteString(m.pinnedCmdBlock())
+	b.WriteString(m.progressBlock())
+	b.WriteString("  " + descStyle.Render("次数") + "\n")
+	b.WriteString(m.logVp.View())
+	return b.String()
+}
+
+// attemptBody 是某一次执行的主体：固定信息下面只放这一次的输出。
+func (m model) attemptBody() string {
+	var b strings.Builder
+	b.WriteString(m.pinnedCmdBlock())
+	b.WriteString(m.progressBlock())
+	b.WriteString(m.outputDivider())
+	b.WriteString(m.logVp.View())
+	return b.String()
+}
+
+// itemBody 是还没有队列列表时的执行主体。
+func (m model) itemBody() string {
+	var b strings.Builder
+	b.WriteString(m.pinnedCmdBlock())
+	b.WriteString(m.progressBlock())
+	b.WriteString(m.outputDivider())
+	b.WriteString(m.logVp.View())
+	return b.String()
+}
+
+// taskChromeH 是滚动区域以上的固定行数。主任务和子任务各自计算。
+func (m model) taskChromeH() int {
+	if _, ok := m.focusedBatchRow(); ok {
+		return m.batchFixedH()
 	}
-	return 0
+	return m.itemFixedH()
+}
+
+// batchFixedH 与 batchBody 里视口之前的行数一致。
+func (m model) batchFixedH() int {
+	return 4 + m.runBarH() + 1
+}
+
+// itemFixedH 与 itemBody 里视口之前的行数一致。
+func (m model) itemFixedH() int {
+	return m.runPinH() + m.runBarH() + 1
 }
 
 // batchOverviewBlock 渲染主任务总览，固定 4 行，与 runPinH 一致。
@@ -613,10 +664,13 @@ func (m model) filePane(h int) string {
 func (m model) rosterRowView(idx int, row rosterRow) string {
 	focused := idx == m.fileCursor
 	var name string
-	if row.itemID == "" {
-		name = truncateText(row.title, m.leftW-6)
-	} else {
+	switch {
+	case row.attempt > 0:
+		name = "    " + truncateText(row.title, m.leftW-10)
+	case row.itemID != "":
 		name = "  " + truncateText(row.title, m.leftW-8)
+	default:
+		name = truncateText(row.title, m.leftW-6)
 	}
 	name += " " + fileStatusMark(row.state)
 	return cursorMark(focused) + itemStyle(focused).Render(name)
@@ -753,7 +807,7 @@ func (m model) footer() string {
 			}
 		}
 	case m.outputFocus:
-		hints = []string{"↑/↓ 滚动输出", "pgup/pgdn 翻页", "esc 返回", "y 复制"}
+		hints = []string{"↑/↓ 滚动输出", "esc 返回", "y 复制"}
 	case m.editing:
 		hints = []string{"↑/↓/Tab 切换", "enter 下一项", "esc 完成", "ctrl+s 另存预设"}
 	case m.running || (m.focus == panelRun && m.queueViewActive()):
