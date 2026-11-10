@@ -287,7 +287,7 @@ func (m model) opsBody() string {
 		b.WriteString(mark + " " + itemStyle(i == m.featCursor).Render(features[i].label) + "\n")
 	}
 	b.WriteString("\n  空格 勾选；已选 " + selectedStyle.Render(displaySel(m.ops)) + "\n")
-	if m.ops.String() == "无" {
+	if !m.ops.Any() {
 		b.WriteString("  " + errorStyle.Render("× 请至少勾选一项") + "\n")
 	}
 	b.WriteString("\n  按 2/3/4 配置面板，完成后按 x 执行。\n")

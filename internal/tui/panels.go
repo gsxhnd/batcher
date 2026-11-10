@@ -24,7 +24,7 @@ func (m *model) updateOpsPanel(msg tea.Msg) tea.Cmd {
 		m.featCursor = (m.featCursor + 1) % len(features)
 	case "enter", " ", "space":
 		features[m.featCursor].toggle(&m.ops)
-		if m.ops.String() != "无" {
+		if m.ops.Any() {
 			m.featErr = ""
 		}
 		m.rebuildFields()
@@ -389,7 +389,7 @@ func (m *model) tryStartRun() tea.Cmd {
 	if m.running {
 		return nil
 	}
-	if m.ops.String() == "无" {
+	if !m.ops.Any() {
 		m.featErr = "请至少勾选一项操作"
 		m.setFocus(panelOps)
 		return nil

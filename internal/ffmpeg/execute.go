@@ -41,7 +41,7 @@ func (vb *videoBatch) executeConcurrent(ctx context.Context, cmdBatch [][]string
 		firstErr error
 	)
 
-	// 使用信号量控制并发数
+	// 信号量控制并发数
 	sem := make(chan struct{}, vb.option.Workers)
 
 	for i, args := range cmdBatch {
@@ -72,7 +72,10 @@ func (vb *videoBatch) executeConcurrent(ctx context.Context, cmdBatch [][]string
 	if firstErr != nil {
 		return firstErr
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (vb *videoBatch) executeCommand(ctx context.Context, index, total int, args []string) error {

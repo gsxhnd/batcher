@@ -43,11 +43,7 @@ func Preview(task Task, opt *VideoBatchOption) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := make([]string, 0, len(cmds))
-	for _, c := range cmds {
-		lines = append(lines, FormatCommand(c))
-	}
-	return lines, nil
+	return formatLines(cmds), nil
 }
 
 // Run 生成并执行批处理。
@@ -81,11 +77,16 @@ func PreviewCombined(opt *VideoBatchOption, sel Selection) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return formatLines(cmds), nil
+}
+
+// formatLines 将命令参数列表格式化为可读的命令字符串列表。
+func formatLines(cmds [][]string) []string {
 	lines := make([]string, 0, len(cmds))
 	for _, c := range cmds {
 		lines = append(lines, FormatCommand(c))
 	}
-	return lines, nil
+	return lines
 }
 
 // RunCombined 生成并执行操作组合的批处理。

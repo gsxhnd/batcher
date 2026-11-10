@@ -13,6 +13,11 @@ type Selection struct {
 	AddFonts    bool // 添加字体：把 FontsPath 下的字体文件内嵌到视频
 }
 
+// Any 返回是否至少勾选了一项操作。
+func (s Selection) Any() bool {
+	return s.Convert || s.AddSubtitle || s.AddFonts
+}
+
 // String 返回选中操作的可读描述，用于日志与界面标题。
 func (s Selection) String() string {
 	var parts []string
@@ -128,33 +133,32 @@ func (vb *videoBatch) subtitleInputs() ([]subtitleInput, error) {
 // 再映射视频自身的全部流与各字幕流，最后写入字幕语言与标题元数据；
 // 勾选了默认字幕流时追加 -disposition:s:<n> 设置默认轨道。
 func (vb *videoBatch) subtitleArgs(subs []subtitleInput, names []string, base string) []string {
+	// 第一遍：为每条字幕追加 -sub_charenc / -i 输入参数。
 	var args []string
 	for _, sub := range subs {
 		args = append(args, "-sub_charenc", "UTF-8", "-i", vb.matchSubtitle(names, base, sub.Suffix))
 	}
-	// 保留视频与其内所有原流（视频、音轨、章节等）。
+
+	// 保留视频与其内所有原流（视频、音轨、章节等），然后逐一 map 字幕流。
+	// 输入 0 为视频，字幕输入从 1 开始。
 	args = append(args, "-map", "0")
 	for i := range subs {
-		// 输入 0 为视频，字幕输入从 1 开始。
 		args = append(args, "-map", strconv.Itoa(i+1))
 	}
-	for _, sub := range subs {
-		args = append(args,
-			fmt.Sprintf("-metadata:s:s:%d", sub.streamNo),
-			fmt.Sprintf("language=%s", sub.Lang),
-			fmt.Sprintf("-metadata:s:s:%d", sub.streamNo),
-			fmt.Sprintf("title=%s", sub.Title),
-		)
-	}
-	// 默认轨道：勾选了默认字幕时输出 disposition（默认轨道为 default，其余显式置 0，
-	// 避免输出中出现多重默认轨道）；未勾选时不额外生成参数，命令保持兼容。
+
+	// 第二遍：同时收集 metadata 参数和是否存在默认轨道，避免多次遍历。
 	hasDefault := false
 	for _, sub := range subs {
+		args = append(args,
+			fmt.Sprintf("-metadata:s:s:%d", sub.streamNo), fmt.Sprintf("language=%s", sub.Lang),
+			fmt.Sprintf("-metadata:s:s:%d", sub.streamNo), fmt.Sprintf("title=%s", sub.Title),
+		)
 		if sub.Default {
 			hasDefault = true
-			break
 		}
 	}
+
+	// 有默认轨道时才写 disposition，其余轨道显式置 0 以防多重默认。
 	if hasDefault {
 		for _, sub := range subs {
 			flag := "0"

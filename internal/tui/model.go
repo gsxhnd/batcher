@@ -391,18 +391,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
-		// 鼠标滚轮：任务面板滚动命令/日志，帮助弹窗滚动帮助文本，其余面板忽略。
-		var cmd tea.Cmd
-		switch {
-		case m.modal != nil && m.modal.kind == modalHelp:
-			m.modal.vp, cmd = m.modal.vp.Update(msg)
-		case m.focus == panelRun && m.running:
-			m.logVp, cmd = m.logVp.Update(msg)
-			m.logFollow = m.logVp.AtBottom()
-		case m.focus == panelRun && m.previewDone && m.planErr == nil:
-			m.vp, cmd = m.vp.Update(msg)
-		}
-		return m, cmd
+		return m, m.handleMouse(msg)
 	}
 
 	if key, ok := msg.(tea.KeyPressMsg); ok {
@@ -491,6 +480,21 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		return m.updateRunPanel(key)
 	}
 	return nil
+}
+
+// handleMouse 处理鼠标滚轮事件：任务面板滚动命令/日志，帮助弹窗滚动帮助文本，其余面板忽略。
+func (m *model) handleMouse(msg tea.MouseWheelMsg) tea.Cmd {
+	var cmd tea.Cmd
+	switch {
+	case m.modal != nil && m.modal.kind == modalHelp:
+		m.modal.vp, cmd = m.modal.vp.Update(msg)
+	case m.focus == panelRun && m.running:
+		m.logVp, cmd = m.logVp.Update(msg)
+		m.logFollow = m.logVp.AtBottom()
+	case m.focus == panelRun && m.previewDone && m.planErr == nil:
+		m.vp, cmd = m.vp.Update(msg)
+	}
+	return cmd
 }
 
 // handleEvent 将 ffmpeg 事件写入全局日志与对应文件的日志，并更新进度条。
@@ -615,7 +619,7 @@ func (m *model) schedulePlan(delay time.Duration) tea.Cmd {
 // runPlan 根据当前配置生成命令列表。配置不完整/非法时把原因展示在任务面板，不报询问弹窗。
 func (m *model) runPlan() tea.Cmd {
 	m.planGenerate = false
-	if m.ops.String() == "无" {
+	if !m.ops.Any() {
 		m.planErr = fmt.Errorf("请在面板 1 勾选至少一项操作")
 		m.planLoading = false
 		return nil
