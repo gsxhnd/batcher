@@ -110,6 +110,14 @@ func (m model) panelTitle(p panel) string {
 	case panelRun:
 		title := "5 · 任务"
 		switch {
+		case len(m.roster) > 0:
+			batches := 0
+			for _, row := range m.roster {
+				if row.itemID == "" {
+					batches++
+				}
+			}
+			title = fmt.Sprintf("5 · 任务（%d 批次）", batches)
 		case m.total > 0:
 			title = fmt.Sprintf("5 · 任务 %d/%d", m.processedCount(), m.total)
 		case m.previewDone && m.planErr == nil && len(m.files) > 0:
@@ -386,20 +394,31 @@ func (m model) formBody() string {
 }
 
 // runBody 任务面板：命令预览（浏览态）或置顶命令 + 进度与日志（执行中）。
+// 队列视图激活（入队后）一直显示置顶命令/进度与日志，结束后可继续查看各批次。
 func (m model) runBody() string {
 	var b strings.Builder
-	if m.running {
-		// 主体内容最上方固定显示当前任务的完整 CLI 命令（不随日志滚动）。
+	if m.running || m.queueViewActive() {
+		// 主体内容最上方固定显示所选任务的完整 CLI 命令（不随日志滚动）。
 		b.WriteString(m.pinnedCmdBlock())
 		if m.total > 0 {
-			percent := float64(m.processedCount()) / float64(m.total)
-			b.WriteString("  " + m.bar.ViewAs(percent) + "\n")
-			b.WriteString(m.progressHint() + "\n")
+			if m.running {
+				percent := float64(m.processedCount()) / float64(m.total)
+				b.WriteString("  " + m.bar.ViewAs(percent) + "\n")
+				b.WriteString(m.progressHint() + "\n")
+			} else {
+				head := fmt.Sprintf("上次执行: %d/%d 完成，耗时 %s",
+					m.processedCount(), m.total, m.elapsedNow().Round(time.Second).String())
+				style := descStyle
+				if m.runErr != nil {
+					style = errorStyle
+				}
+				b.WriteString("  " + style.Render(head) + "\n")
+			}
 		} else {
 			b.WriteString("  " + subtitleStyle.Render("正在启动...") + "\n")
 		}
 		b.WriteString(m.logVp.View())
-		return b.String()
+		return statusSuffix(m.statusMsg) + b.String()
 	}
 	switch {
 	case m.planLoading:
@@ -443,7 +462,10 @@ func (m model) progressHint() string {
 	if m.skipped > 0 {
 		hint += fmt.Sprintf("，跳过 %d", m.skipped)
 	}
-	hint += "   耗时: " + time.Since(m.startAt).Round(time.Second).String()
+	hint += "   耗时: " + m.elapsedNow().Round(time.Second).String()
+	if !m.pausedAt.IsZero() && m.pausedBatch != "" {
+		hint += "（已暂停）"
+	}
 	if m.fileCursor == 0 && m.current != "" {
 		hint += "   当前: " + m.current
 	}
@@ -451,9 +473,15 @@ func (m model) progressHint() string {
 	return "  " + ansi.Truncate(hint, max(m.rightW-2, 10), "…")
 }
 
-// pinnedCmdText 返回执行中任务面板置顶显示的完整 ffmpeg 命令：
-// 优先当前正在执行的任务（EventCommandStart 传入），其后是最近启动的任务。
+// pinnedCmdText 返回任务面板置顶显示的完整 ffmpeg 命令：
+// 队列视图激活时优先光标所在子任务的命令（无论是否正在执行，选中即可查看/复制），
+// 其次当前正在执行的任务，最后最近启动的任务。
 func (m model) pinnedCmdText() string {
+	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
+		if cmd := m.roster[m.fileCursor].cmd; cmd != "" {
+			return cmd
+		}
+	}
 	if m.current != "" {
 		return m.current
 	}
@@ -501,9 +529,16 @@ func truncateText(s string, w int) string {
 
 // ---------- 文件列表 ----------
 
-// filePane 渲染文件列表：第 0 项为“全部”汇总，其后为各源文件与执行状态；
-// 超出行数时随光标滚动窗口。
+// filePane 渲染左侧列表。队列视图激活（入队后）显示批次与展开的子任务；
+// 空闲时显示命令预览文件列表（第 0 项为“全部”汇总）。超出行数随光标滚动。
 func (m model) filePane(h int) string {
+	if len(m.roster) > 0 {
+		rows := make([]string, 0, len(m.roster))
+		for i, row := range m.roster {
+			rows = append(rows, m.rosterRowView(i, row))
+		}
+		return strings.Join(windowRows(rows, m.fileCursor, h), "\n")
+	}
 	if len(m.files) == 0 {
 		return ""
 	}
@@ -513,6 +548,19 @@ func (m model) filePane(h int) string {
 		rows = append(rows, m.fileRow(i, filepath.Base(it.input)))
 	}
 	return strings.Join(windowRows(rows, m.fileCursor, h), "\n")
+}
+
+// rosterRowView 渲染队列列表的一行：批次行显示状态与进度概要；子任务行缩进显示状态。
+func (m model) rosterRowView(idx int, row rosterRow) string {
+	focused := idx == m.fileCursor
+	var name string
+	if row.itemID == "" {
+		name = truncateText(row.title, m.leftW-6)
+	} else {
+		name = "  " + truncateText(row.title, m.leftW-8)
+	}
+	name += " " + fileStatusMark(row.state)
+	return cursorMark(focused) + itemStyle(focused).Render(name)
 }
 
 // fileRow 渲染文件列表一行（不带换行）；idx 为文件下标（-1 表示“全部”）。

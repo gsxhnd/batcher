@@ -361,21 +361,21 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case "f":
-		// 跳回正在执行的文件并恢复自动跟随。
-		if m.runIdx >= 0 && m.runIdx < len(m.files) && m.files[m.runIdx].state == fileRunning {
-			m.fileFollow = true
-			m.fileCursor = m.runIdx + 1
-			m.logFollow = true
-			m.syncLogPane()
-		}
+		// 跳回正在执行的子任务并恢复自动跟随。
+		m.followRunningItem()
 		return nil
 	case "enter":
+		if m.queueViewActive() {
+			// 批次行=展开/折叠子任务；子任务行=折叠其批次。
+			m.toggleRosterExpand()
+			return nil
+		}
 		if !m.running && !m.editing && m.modal == nil {
 			return m.tryStartRun()
 		}
 		return nil
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
-		if m.running {
+		if m.running || m.queueViewActive() {
 			var cmd tea.Cmd
 			m.logVp, cmd = m.logVp.Update(msg) // 视口自带 pgup/pgdn/半页滚动键位
 			// 手动滚动后按是否处于底部决定是否继续跟随新输出。
@@ -386,7 +386,7 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		m.vp, cmd = m.vp.Update(msg)
 		return cmd
 	case "home":
-		if m.running {
+		if m.running || m.queueViewActive() {
 			m.logVp.GotoTop()
 			m.logFollow = m.logVp.AtBottom()
 			return nil
@@ -394,7 +394,7 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		m.vp.GotoTop()
 		return nil
 	case "end":
-		if m.running {
+		if m.running || m.queueViewActive() {
 			m.logVp.GotoBottom()
 			m.logFollow = true
 			return nil
@@ -408,19 +408,43 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+// batchCommands 返回指定批次全部子任务的完整命令行。
+func (m *model) batchCommands(batchID string) []string {
+	snap, ok := m.queue.BatchCopy(batchID)
+	if !ok {
+		return nil
+	}
+	cmds := make([]string, 0, len(snap.Items))
+	for _, it := range snap.Items {
+		cmds = append(cmds, command.FormatCommand(it.PlanArgs))
+	}
+	return cmds
+}
+
 // ---------- 执行 ----------
 
 // copyShownCommand 把任务面板正在展示的命令复制到系统剪贴板：
-// 执行中固定区显示的是当前任务的完整 CLI，预览态复制所选文件的命令。
+// 队列视图复制光标所在子任务的完整 CLI（批次行=整个批次全部命令），
+// 预览态复制所选文件的命令。
 // 通过 OSC52 终端转义序列写入，无需外部依赖；由终端负责转贴到系统剪贴板。
 func (m *model) copyShownCommand() tea.Cmd {
-	if m.running {
+	if m.running || m.queueViewActive() {
+		if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) && m.roster[m.fileCursor].cmd == "" {
+			// 批次行：复制该批次全部子任务命令。
+			commands := m.batchCommands(m.roster[m.fileCursor].batchID)
+			if len(commands) == 0 {
+				m.statusMsg = "× 尚无命令可复制，等待任务开始"
+				return nil
+			}
+			m.statusMsg = fmt.Sprintf("✔ 已复制批次全部 %d 条命令到剪贴板", len(commands))
+			return tea.SetClipboard(strings.Join(commands, "\n"))
+		}
 		cmd := m.pinnedCmdText()
 		if cmd == "" {
 			m.statusMsg = "× 尚无命令可复制，等待任务开始"
 			return nil
 		}
-		m.statusMsg = "✔ 已复制当前任务的完整命令到剪贴板"
+		m.statusMsg = "✔ 已复制所选任务的完整命令到剪贴板"
 		return tea.SetClipboard(cmd)
 	}
 	if m.planLoading || !m.previewDone || m.planErr != nil || len(m.files) == 0 {

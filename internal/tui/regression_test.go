@@ -172,6 +172,85 @@ func TestExecutionRequiresLatestPreview(t *testing.T) {
 	assert.Equal(t, "a.mkv", batches[0].Items[0].Input, "入队复制的快照不受后续计划影响")
 }
 
+// TestRosterShowsBatchesAndItemStates 验证任务面板的队列视图：
+// 主任务行显示状态与进度概要，展开后可见每个子任务的状态；光标所在子任务可查看完整命令。
+func TestRosterShowsBatchesAndItemStates(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = command.Selection{Convert: true}
+	m.rebuildFields()
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a", "b"), command.Selection{Convert: true})
+	require.NoError(t, err)
+	batchID := batch.ID
+	_ = batchID
+	waitBatchEvent(t, &m, task.QueueItemStarted)
+	waitBatchEvent(t, &m, task.QueueBatchPaused) // 占位文件无法转码：首个子任务失败后暂停
+	require.True(t, m.running)
+	require.True(t, m.queueViewActive(), "入队后应显示队列视图")
+
+	// 默认展开运行中的批次：1 批次行 + 2 子任务行
+	require.Len(t, m.roster, 3, "1 批次行 + 2 子任务行")
+	assert.Empty(t, m.roster[0].itemID, "第一行是批次行")
+	assert.Equal(t, fileRunning, m.roster[0].state, "暂停中的批次按运行态展示")
+	assert.Equal(t, fileFailed, m.roster[1].state, "失败的子任务应可见")
+	assert.Equal(t, filePending, m.roster[2].state, "未开始的子任务应可见")
+	assert.True(t, strings.HasPrefix(m.roster[1].cmd, "ffmpeg"), "子任务行携带完整命令")
+
+	// 光标停在失败子任务上：置顶显示该子任务的完整命令（与正在执行与否无关）
+	idx := -1
+	for i, row := range m.roster {
+		if row.state == fileFailed {
+			idx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, idx, 0)
+	m.fileCursor = idx
+	m.pinRosterCursor()
+	assert.Equal(t, m.roster[idx].cmd, m.pinnedCmdText(), "光标子任务的命令置顶显示")
+
+	// 批次行：pinned 无命令，y 复制该批次全部命令
+	batchIdx := 0
+	for i, row := range m.roster {
+		if row.itemID == "" {
+			batchIdx = i
+			break
+		}
+	}
+	m.fileCursor = batchIdx
+	m.pinRosterCursor()
+	assert.Empty(t, m.pinnedCmdText(), "批次行不显示单条命令")
+	cmds := m.batchCommands(batch.ID)
+	require.NotEmpty(t, cmds)
+	cmd := m.copyShownCommand()
+	require.NotNil(t, cmd)
+	assert.Contains(t, fmt.Sprint(cmd()), cmds[0])
+
+	title := m.panelTitle(panelRun)
+	assert.Contains(t, title, "任务（1 批次）")
+}
+
+// TestPausedTimerFreezesElapsed 验证暂停等待决策期间计时冻结，恢复后扣除暂停时长。
+func TestPausedTimerFreezesElapsed(t *testing.T) {
+	m := newModel()
+	m.running = true
+	m.startAt = time.Now().Add(-time.Minute)
+	m.pausedBatch = "b"
+	m.pauseTimer()
+	paused := m.elapsedNow()
+	assert.InDelta(t, float64(time.Minute), float64(paused), float64(2*time.Second),
+		"暂停后耗时应冻结在暂停时刻")
+	e1 := m.elapsedNow()
+	time.Sleep(20 * time.Millisecond)
+	e2 := m.elapsedNow()
+	assert.Less(t, e2-e1, time.Duration(5*time.Millisecond), "冻结期间不再显著增长")
+
+	m.resumeTimer()
+	assert.InDelta(t, float64(time.Minute), float64(m.elapsedNow()), float64(2*time.Second),
+		"恢复后耗时不含暂停时段")
+}
+
 // TestQueueEventsFlowWhenIdle 验证队列事件监听链常驻：
 // 程序启动即由 Init 挂上监听，空闲（未在执行）时入队也能立刻进入执行。
 // 此前的缺陷是监听只在 eventing=true 时重挂，空闲时第一条事件后即断链，入队永远不执行。

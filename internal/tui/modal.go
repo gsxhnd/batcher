@@ -142,13 +142,13 @@ func helpText() string {
 	row("e", "编辑自定义预设（内置只读）")
 	row("d", "删除自定义预设（弹窗确认）")
 	row("J / K", "下移 / 上移自定义预设")
-	row("弹窗", "tab/enter 下一项 · ctrl+s 保存 · esc 取消")
+	row("弹窗", "enter 下一项（末项保存）· ctrl+s 保存 · esc 取消")
 	section("[3] 字幕轨道")
 	row("n", "新增字幕（弹窗）")
 	row("e / enter", "编辑选中的字幕")
 	row("t", "标记/取消默认字幕流（-disposition default）")
 	row("d", "删除字幕（弹窗确认）")
-	row("弹窗", "tab/enter 下一项 · ctrl+s 保存 · esc 取消")
+	row("弹窗", "enter 下一项（末项保存）· ctrl+s 保存 · esc 取消")
 	section("[4] 参数")
 	row("enter", "进入编辑 / 下一项；esc 完成")
 	row("↑/↓", "切换字段（编辑时=在字段间移动）")
@@ -222,7 +222,7 @@ func (m model) modalView() string {
 		if md.err != "" {
 			b.WriteString("  " + errorStyle.Render("× "+md.err) + "\n")
 		}
-		b.WriteString("  " + descStyle.Render("tab / enter 下一项 · ctrl+s 保存 · esc 取消") + "\n")
+		b.WriteString("  " + descStyle.Render("enter 下一项（末项保存）· ctrl+s 保存 · esc 取消") + "\n")
 		content = b.String()
 	}
 	return drawBox(w, md.title, true, true, content, -1)
@@ -282,9 +282,12 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		md.focus = (md.focus - 1 + len(md.fields)) % len(md.fields)
 		return focusField(md.fields, md.focus)
 	case "enter":
-		// enter 只用于推进到下一个字段（循环），不做确认——避免在末字段误保存；
-		// 保存改由显式的 ctrl+s 触发。
-		md.focus = (md.focus + 1) % len(md.fields)
+		// enter 在中间字段推进到下一项；在末字段（含 bool）直接保存，
+		// 避免循环跳回开头的困惑。中途任意字段也可 ctrl+s 保存。
+		if md.focus == len(md.fields)-1 {
+			return m.saveModal()
+		}
+		md.focus++
 		return focusField(md.fields, md.focus)
 	case "ctrl+s":
 		return m.saveModal()

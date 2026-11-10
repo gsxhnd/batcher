@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestModalEnterAdvancesAndCtrlSaves 验证表单弹窗：enter 永远循环推进到下一个字段，
-// 保存由显式的 ctrl+s 触发；校验失败时弹窗保持打开。
+// TestModalEnterAdvancesAndCtrlSaves 验证表单弹窗：enter 在中间字段推进，
+// 在末字段（含 bool）直接保存；中途任意字段可用 ctrl+s 保存，校验失败保持打开。
 func TestModalEnterAdvancesAndCtrlSaves(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -20,18 +20,18 @@ func TestModalEnterAdvancesAndCtrlSaves(t *testing.T) {
 	require.Equal(t, modalSub, m.modal.kind)
 	require.Equal(t, 0, m.modal.focus)
 
-	// enter 循环推进：0 → 1 → 2 → 3(bool) → 0
-	for i, want := range []int{1, 2, 3, 0} {
+	// enter 推进：0 → 1 → 2 → 3(bool，末字段)
+	for i, want := range []int{1, 2, 3} {
 		press(&m, "enter")
 		assert.Equal(t, want, m.modal.focus, "第 %d 次 enter", i+1)
 	}
 
-	// 空后缀直接 ctrl+s：校验失败，弹窗保持打开
-	press(&m, "ctrl+s")
+	// 末字段（bool）enter 直接保存：空后缀校验失败，弹窗保持打开
+	press(&m, "enter")
 	require.NotNil(t, m.modal)
 	assert.NotEmpty(t, m.modal.fields[0].err, "空后缀应有字段错误")
 
-	// 补全合法值后再 ctrl+s：保存并关闭弹窗
+	// 中途字段也可 ctrl+s：补全合法值后保存关闭
 	m.modal.fields[0].input.SetValue("chi.ass")
 	m.modal.fields[1].input.SetValue("chi")
 	m.modal.fields[2].input.SetValue("简体中文")
@@ -41,8 +41,8 @@ func TestModalEnterAdvancesAndCtrlSaves(t *testing.T) {
 	assert.Equal(t, command.SubtitleOption{Suffix: "chi.ass", Lang: "chi", Title: "简体中文"}, m.subs[0])
 }
 
-// TestModalEnterNeverSavesOnLastField 验证在最末字段（含 bool）按 enter 绝不直接保存。
-func TestModalEnterNeverSavesOnLastField(t *testing.T) {
+// TestModalEnterSavesOnLastField 验证末字段（含 bool）enter 直接保存（不循环回开头）。
+func TestModalEnterSavesOnLastField(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.ops = command.Selection{Convert: true}
@@ -51,10 +51,10 @@ func TestModalEnterNeverSavesOnLastField(t *testing.T) {
 	require.NotNil(t, m.modal)
 	require.Equal(t, modalPreset, m.modal.kind)
 
-	// 名称 → 参数（末字段）→ 回到名称，弹窗始终打开
-	press(&m, "enter")
-	assert.Equal(t, 1, m.modal.focus)
-	press(&m, "enter")
-	assert.Equal(t, 0, m.modal.focus)
-	require.NotNil(t, m.modal, "enter 不得在末字段直接确认")
+	m.modal.fields[0].input.SetValue("H.264")
+	m.modal.fields[1].input.SetValue("-c:v h264")
+	press(&m, "ctrl+s")
+	require.Nil(t, m.modal, "末字段 enter 应保存并关闭弹窗")
+	require.Len(t, m.presets, 1)
+	assert.Equal(t, "-c:v h264", m.presets[0].Args)
 }
