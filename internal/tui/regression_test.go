@@ -684,6 +684,82 @@ func TestBatchRowHidesSubtaskLogs(t *testing.T) {
 	assert.Contains(t, view, "暂无子任务")
 }
 
+func TestSubtaskProgressRendersSeparatelyFromBatch(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 36
+	m.resizePanes()
+	m.focus = panelRun
+	m.running = true
+	m.total = 2
+	m.activeBatch = "b"
+	m.filesBatch = "b"
+	m.startAt = time.Now()
+	m.files = []fileItem{
+		{input: "a.mkv", state: fileRunning, cmd: "ffmpeg -i a.mkv o.mkv", attempts: []attemptLog{{n: 1, status: fileRunning}}},
+		{input: "b.mkv"},
+	}
+	m.runIdx = 0
+	m.roster = []rosterRow{
+		{batchID: "b", title: "主任务", state: fileRunning},
+		{batchID: "b", itemID: "001", title: "a.mkv", state: fileRunning, cmd: "ffmpeg -i a.mkv o.mkv"},
+		{batchID: "b", itemID: "001", attempt: 1, title: "第 1 次", state: fileRunning, cmd: "ffmpeg -i a.mkv o.mkv"},
+		{batchID: "b", itemID: "002", title: "b.mkv", state: filePending},
+	}
+	m.fileCursor = 2
+
+	cmd := m.handleQueueEvent(task.QueueEvent{
+		Type: task.QueueFFmpeg, BatchID: "b", ItemID: "001",
+		FFmpegEvt: &ffmpeg.Event{
+			Type:  ffmpeg.EventProgress,
+			Index: 9,
+			Progress: &ffmpeg.Progress{
+				OutTime:  30 * time.Second,
+				Duration: 2 * time.Minute,
+				Speed:    1.5,
+				FPS:      24,
+			},
+		},
+	})
+	assert.Nil(t, cmd, "进度不触发日志刷新")
+	assert.False(t, m.logDirty)
+	assert.Empty(t, m.files[0].logs, "进度不能写进子任务日志")
+	assert.True(t, m.files[0].hasProgress)
+	assert.False(t, m.files[1].hasProgress, "应按子任务 ID 写入，而不是事件里的下标")
+
+	body := m.runBody()
+	assert.Contains(t, body, "25%")
+	assert.Contains(t, body, "00:30 / 02:00")
+	assert.Contains(t, body, "1.5x")
+	assert.Contains(t, body, "24 fps")
+	assert.Contains(t, m.filePane(8), "25%", "左侧正在执行的子任务要标出自己的进度")
+	assert.Equal(t, 2, m.runBarH())
+
+	m.fileCursor = 0
+	batch := m.runBody()
+	assert.Contains(t, batch, "进度: 0/2", "主任务仍显示按个数计算的总进度")
+	assert.NotContains(t, batch, "1.5x", "总进度条不混入当前子任务的速度")
+
+	m.fileCursor = 2
+	m.files[0].progress = ffmpeg.Progress{OutTime: 12 * time.Second, Speed: 2}
+	unknown := m.runBody()
+	assert.Contains(t, unknown, "已处理 00:12")
+	assert.Contains(t, unknown, "2x")
+	assert.NotContains(t, unknown, "%", "没有总时长时不显示百分比")
+	assert.Contains(t, m.filePane(8), "00:12")
+
+	m.files[0].state = fileDone
+	assert.NotContains(t, m.runBody(), "2x", "子任务结束后不再显示这一次的实时进度")
+
+	m.files[0].state = fileRunning
+	m.files[0].hasProgress = true
+	m.files[0].progress = ffmpeg.Progress{OutTime: time.Second, Duration: 4 * time.Second, Speed: 1.25}
+	m.fileCursor = 1
+	assert.Contains(t, m.runBody(), "25%")
+	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandStart, Index: 0, Total: 2, Command: "ffmpeg -i a.mkv o.mkv"})
+	assert.False(t, m.files[0].hasProgress, "下一次开始要清掉上一次的进度")
+}
+
 func TestFFmpegLogUsesItemID(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()

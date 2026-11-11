@@ -75,12 +75,14 @@ const (
 
 // fileItem 描述任务面板文件列表中的一个源文件任务。
 type fileItem struct {
-	input    string       // 源文件路径
-	output   string       // 输出文件路径
-	cmd      string       // 已格式化的完整 ffmpeg 命令
-	state    string       // filePending / fileRunning / fileDone / fileFailed / fileCanceled
-	logs     []string     // 该任务执行时的 ffmpeg 输出（按行，带样式）
-	attempts []attemptLog // 按次数分开的输出，左侧列表挂在子任务下面
+	input       string          // 源文件路径
+	output      string          // 输出文件路径
+	cmd         string          // 已格式化的完整 ffmpeg 命令
+	state       string          // filePending / fileRunning / fileDone / fileFailed / fileCanceled
+	logs        []string        // 该任务执行时的 ffmpeg 输出（按行，带样式）
+	attempts    []attemptLog    // 按次数分开的输出，左侧列表挂在子任务下面
+	progress    ffmpeg.Progress // 当前这次执行的 ffmpeg 进度
+	hasProgress bool            // 收到过进度快照；重试开始时清掉，避免沿用上一次
 }
 
 // attemptLog 是子任务的一次执行。
@@ -595,7 +597,17 @@ func (m *model) handleMouse(msg tea.MouseWheelMsg) tea.Cmd {
 func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 	switch e.Type {
 	case ffmpeg.EventProgress:
-		return nil // 进度事件不写日志，避免刷屏
+		// 进度不写日志。只更新当前子任务的快照，界面在下一次渲染时画出它自己的进度条。
+		if e.Progress == nil || e.Index < 0 || e.Index >= len(m.files) {
+			return nil
+		}
+		before := m.runBarH()
+		m.files[e.Index].progress = *e.Progress
+		m.files[e.Index].hasProgress = true
+		if m.width > 0 && m.runBarH() != before {
+			m.refreshRunHeights()
+		}
+		return nil
 	case ffmpeg.EventBatchStart:
 		m.total = e.Total
 		m.appendLog(fmt.Sprintf("开始执行批处理，共 %d 个任务", e.Total), logLineInfoStyle)
@@ -1200,6 +1212,8 @@ func (m *model) beginAttempt(idx int) {
 		}
 	}
 	it.attempts = append(it.attempts, attemptLog{n: n, status: fileRunning})
+	it.progress = ffmpeg.Progress{}
+	it.hasProgress = false
 	m.logFollow = true
 }
 
@@ -1264,6 +1278,9 @@ func (m model) batchItemLines(batchID string) []string {
 		line := itemStateText(it.Status) + "  " + filepath.Base(it.Input)
 		if it.Attempts > 0 {
 			line += fmt.Sprintf("  第 %d 次", it.Attempts)
+		}
+		if label := m.itemProgressLabel(batchID, it.ID, it.Status); label != "" {
+			line += "  " + label
 		}
 		style := descStyle
 		switch it.Status {
@@ -1711,6 +1728,51 @@ func (m model) progressNumbers() (settled, failed, skipped, canceled, total int,
 	return m.done + m.skipped + m.canceled, m.failed, m.skipped, m.canceled, m.total, m.pausedBatch != ""
 }
 
+// liveItemProgress 返回光标所在、且正在执行的那一次的 ffmpeg 进度。
+// 主任务行、已结束的子任务、以及不是当前这一次的历史输出都不带实时进度。
+func (m model) liveItemProgress() (ffmpeg.Progress, bool) {
+	return m.fileProgress(m.progressFileIndex())
+}
+
+// progressFileIndex 定位当前要展示进度的子任务。没有队列列表时用正在执行的文件。
+func (m model) progressFileIndex() int {
+	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
+		row := m.roster[m.fileCursor]
+		if row.itemID == "" || row.batchID != m.filesBatch {
+			return -1
+		}
+		idx := itemIndexOf(row.itemID)
+		if row.attempt > 0 && row.attempt != m.attemptNumber(idx) {
+			return -1
+		}
+		return idx
+	}
+	if m.runIdx >= 0 && m.runIdx < len(m.files) {
+		return m.runIdx
+	}
+	return -1
+}
+
+// fileProgress 返回仍在执行的子任务进度。结束后不再把它当成当前进度。
+func (m model) fileProgress(idx int) (ffmpeg.Progress, bool) {
+	if idx < 0 || idx >= len(m.files) || !m.files[idx].hasProgress || m.files[idx].state != fileRunning {
+		return ffmpeg.Progress{}, false
+	}
+	return m.files[idx].progress, true
+}
+
+// itemProgressLabel 给列表一行用的短进度：有总时长时是百分比，否则是已处理时长。
+func (m model) itemProgressLabel(batchID, itemID string, status task.Status) string {
+	if status != task.StatusRunning || batchID != m.filesBatch {
+		return ""
+	}
+	p, ok := m.fileProgress(itemIndexOf(itemID))
+	if !ok {
+		return ""
+	}
+	return progressLabel(p)
+}
+
 // focusedSnapshot 返回光标所在主任务；没有队列列表时返回当前正在执行的批次。
 func (m model) focusedSnapshot() (*task.Batch, bool) {
 	if m.queue == nil {
@@ -1840,16 +1902,17 @@ func buildQueueItems(items []*task.Item) []fileItem {
 	return fs
 }
 
-// handleQueueEvent 把队列事件映射到既有执行状态；ffmpeg 日志走原 handleEvent，
-// 进度事件暂不渲染（状态/日志已足够），起停状态由队列子任务事件驱动，避免重复计数。
+// handleQueueEvent 把队列事件映射到既有执行状态。ffmpeg 日志与进度都走 handleEvent；
+// 起停状态仍由队列子任务事件驱动，避免和进度快照重复计数。
 func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 	if e.Type == task.QueueFFmpeg {
 		if !m.running || e.BatchID != m.activeBatch || e.FFmpegEvt == nil {
 			return nil
 		}
-		if e.FFmpegEvt.Type == ffmpeg.EventLog {
+		switch e.FFmpegEvt.Type {
+		case ffmpeg.EventLog, ffmpeg.EventProgress:
 			evt := *e.FFmpegEvt
-			// 执行器发出的日志下标可能是 0；以子任务 ID 为准，避免第二条任务的输出写进第一条。
+			// 执行器发出的下标可能是 0；以子任务 ID 为准，避免第二条任务的输出写进第一条。
 			if idx := itemIndexOf(e.ItemID); idx >= 0 {
 				evt.Index = idx
 			}
@@ -1857,8 +1920,9 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 				evt.Total = m.total
 			}
 			return m.handleEvent(evt)
+		default:
+			return nil
 		}
-		return nil
 	}
 	// 入队、开始、删除、取消以及子任务删除都要在空闲时刷新列表。
 	// 正在执行的批次的结束事件仍走下面的收尾；其他批次的结束只刷新列表。

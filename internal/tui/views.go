@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/task"
 )
 
 // ---------- View ----------
@@ -640,7 +643,7 @@ func (m model) batchBody(row rosterRow) string {
 func (m model) subtaskBody() string {
 	var b strings.Builder
 	b.WriteString(m.pinnedCmdBlock())
-	b.WriteString(m.progressBlock())
+	b.WriteString(m.taskProgressBlock())
 	b.WriteString("  " + sectionTitleStyle.Render("次数") + "\n")
 	b.WriteString(m.logVp.View())
 	return b.String()
@@ -650,7 +653,7 @@ func (m model) subtaskBody() string {
 func (m model) attemptBody() string {
 	var b strings.Builder
 	b.WriteString(m.pinnedCmdBlock())
-	b.WriteString(m.progressBlock())
+	b.WriteString(m.taskProgressBlock())
 	b.WriteString(m.outputDivider())
 	b.WriteString(m.logVp.View())
 	return b.String()
@@ -660,7 +663,7 @@ func (m model) attemptBody() string {
 func (m model) itemBody() string {
 	var b strings.Builder
 	b.WriteString(m.pinnedCmdBlock())
-	b.WriteString(m.progressBlock())
+	b.WriteString(m.taskProgressBlock())
 	b.WriteString(m.outputDivider())
 	b.WriteString(m.logVp.View())
 	return b.String()
@@ -717,8 +720,92 @@ func (m model) runPinH() int {
 	return lines + 1 // 命令区再加一行状态
 }
 
-// runBarH 进度区占用的行数，与 progressBlock 一致。
+// taskProgressBlock 在子任务和单次执行上显示这一次的 ffmpeg 进度。
+// 还没有进度快照时仍用主任务的总进度，避免执行一开始出现空白。
+func (m model) taskProgressBlock() string {
+	if p, ok := m.liveItemProgress(); ok {
+		return m.itemProgressBlock(p)
+	}
+	return m.progressBlock()
+}
+
+// itemProgressBlock 渲染单个子任务的进度，固定两行，与 runBarH 一致。
+func (m model) itemProgressBlock(p ffmpeg.Progress) string {
+	var head string
+	if ratio, ok := p.Percent(); ok {
+		head = "  " + m.bar.ViewAs(ratio)
+	} else {
+		head = "  " + subtitleStyle.Render("处理中")
+	}
+	return head + "\n" + m.itemProgressHint(p) + "\n"
+}
+
+// itemProgressHint 写出当前子任务的百分比、已处理时长、速度和帧率。
+func (m model) itemProgressHint(p ffmpeg.Progress) string {
+	hint := "当前"
+	if n, ok := progressPercent(p); ok {
+		hint += fmt.Sprintf(" %d%%", n)
+	}
+	withHour := p.Duration >= time.Hour || p.OutTime >= time.Hour
+	switch {
+	case p.Duration > 0:
+		hint += fmt.Sprintf("  %s / %s", formatClock(p.OutTime, withHour), formatClock(p.Duration, withHour))
+	case p.OutTime > 0:
+		hint += "  已处理 " + formatClock(p.OutTime, withHour)
+	}
+	if p.Speed > 0 {
+		hint += "  " + trimFloat(p.Speed) + "x"
+	}
+	if p.FPS > 0 {
+		hint += "  " + trimFloat(p.FPS) + " fps"
+	}
+	return "  " + ansi.Truncate(subtitleStyle.Render(hint), max(m.rightW-2, 10), "…")
+}
+
+// progressLabel 是列表里用的短进度。
+func progressLabel(p ffmpeg.Progress) string {
+	if n, ok := progressPercent(p); ok {
+		return fmt.Sprintf("%d%%", n)
+	}
+	if p.OutTime > 0 {
+		return formatClock(p.OutTime, p.OutTime >= time.Hour)
+	}
+	return ""
+}
+
+func progressPercent(p ffmpeg.Progress) (int, bool) {
+	ratio, ok := p.Percent()
+	if !ok {
+		return 0, false
+	}
+	return int(ratio*100 + 0.5), true
+}
+
+func formatClock(d time.Duration, withHour bool) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+	h := int(d / time.Hour)
+	m := int(d % time.Hour / time.Minute)
+	s := int(d % time.Minute / time.Second)
+	if withHour || h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
+func trimFloat(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 2, 64)
+	s = strings.TrimRight(s, "0")
+	return strings.TrimRight(s, ".")
+}
+
+// runBarH 进度区占用的行数，与 progressBlock / itemProgressBlock 一致。
 func (m model) runBarH() int {
+	if _, ok := m.liveItemProgress(); ok {
+		return 2
+	}
 	_, _, _, _, total, paused := m.progressNumbers()
 	if total <= 0 {
 		return 1
@@ -748,20 +835,32 @@ func (m model) filePane(h int) string {
 	return strings.Join(windowRows(rows, m.fileCursor, h), "\n")
 }
 
-// rosterRowView 渲染队列列表的一行：批次行显示状态与进度概要；子任务行缩进显示状态。
+// rosterRowView 渲染队列列表的一行：批次行显示状态与进度概要；正在执行的子任务带上自己的进度。
 func (m model) rosterRowView(idx int, row rosterRow) string {
 	focused := idx == m.fileCursor
-	var name string
+	indent, budget := "", m.leftW-6
 	switch {
 	case row.attempt > 0:
-		name = "    " + truncateText(row.title, m.leftW-10)
+		indent, budget = "    ", m.leftW-10
 	case row.itemID != "":
-		name = "  " + truncateText(row.title, m.leftW-8)
-	default:
-		name = truncateText(row.title, m.leftW-6)
+		indent, budget = "  ", m.leftW-8
 	}
-	name += " " + fileStatusGlyph(row.state)
-	styled := m.mark(panelRun, focused) + m.rowStyle(panelRun, focused).Render(strings.TrimSuffix(name, " "+fileStatusGlyph(row.state))+" "+fileStatusMark(row.state))
+	extra := ""
+	if row.attempt == 0 && row.state == fileRunning {
+		extra = m.itemProgressLabel(row.batchID, row.itemID, task.StatusRunning)
+	}
+	glyph := fileStatusGlyph(row.state)
+	titleWidth := budget - lipgloss.Width(glyph) - 1
+	if extra != "" {
+		titleWidth -= lipgloss.Width(extra) + 1
+	}
+	core := truncateText(row.title, max(titleWidth, 1))
+	if extra != "" {
+		core += " " + extra
+	}
+	name := indent + core + " " + glyph
+	shown := indent + core + " " + fileStatusMark(row.state)
+	styled := m.mark(panelRun, focused) + m.rowStyle(panelRun, focused).Render(shown)
 	return m.barLine(m.focus == panelRun, focused, name, styled)
 }
 
