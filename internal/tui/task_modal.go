@@ -13,10 +13,6 @@ import (
 
 // openTaskModal 打开新建任务弹窗。转码、字幕、字体和路径都在这一个表单里，没有分步。
 func (m *model) openTaskModal() tea.Cmd {
-	if m.running || m.pausedBatch != "" {
-		m.statusMsg = "当前任务还未结束，结束后再按 a 创建"
-		return nil
-	}
 	d := command.DefaultOption()
 	defs := []fieldDef{
 		{key: "op_convert", label: "视频转码", kind: fieldBool},
@@ -362,4 +358,276 @@ func (m model) presetListContent() string {
 	}
 	b.WriteString("  " + descStyle.Render("a 新增 · e 编辑 · d 删除 · J/K 排序 · esc 关闭") + "\n")
 	return b.String()
+}
+
+// taskLine 是新建任务弹窗里的一行。field 是它所属字段的下标，-1 表示分区标题。
+type taskLine struct {
+	field int
+	text  string
+}
+
+// taskModalSize 让创建弹窗几乎铺满终端，只在四周留出一圈压暗的主界面。
+func (m model) taskModalSize() (w, contentH int) {
+	w = 48
+	if m.width >= 40 {
+		w = m.width - 4
+	}
+	if m.width > 0 && w > m.width-2 {
+		w = max(m.width-2, 12)
+	}
+	contentH = 16
+	if m.height >= 20 {
+		contentH = m.height - 6
+	}
+	if m.height > 0 && contentH+2 > m.height-1 {
+		contentH = max(m.height-3, 6)
+	}
+	return w, contentH
+}
+
+// taskModalView 渲染分区后的创建表单，并把光标所在字段滚进可视区域。
+func (m model) taskModalView() string {
+	md := m.modal
+	w, contentH := m.taskModalSize()
+	lines := m.taskModalLines(w)
+	focusAt := 0
+	for i, ln := range lines {
+		if ln.field == md.focus {
+			focusAt = i
+			break
+		}
+	}
+	pinned := 0
+	if md.err != "" {
+		pinned = 1
+	}
+	window := max(contentH-pinned, 1)
+	start := focusAt - max(window/5, 1)
+	if start < 0 {
+		start = 0
+	}
+	if start+window > len(lines) {
+		start = max(len(lines)-window, 0)
+	}
+	end := min(start+window, len(lines))
+	var b strings.Builder
+	if md.err != "" {
+		b.WriteString("  " + errorStyle.Render("× "+md.err) + "\n")
+	}
+	for _, ln := range lines[start:end] {
+		b.WriteString(ln.text)
+	}
+	title := "新建任务"
+	if len(lines) > window {
+		title = fmt.Sprintf("新建任务  %d–%d / %d", start+1, end, len(lines))
+	}
+	return drawBox(w, title, true, true, b.String(), contentH)
+}
+
+func (m model) taskModalLines(boxW int) []taskLine {
+	md := m.modal
+	if md == nil {
+		return nil
+	}
+	convertOn, subOn, fontOn := false, false, false
+	subGroups := 0
+	var ops, paths, encode, fonts, subs []int
+	for i := range md.fields {
+		switch md.fields[i].def.key {
+		case "op_convert":
+			convertOn = md.fields[i].checked
+			ops = append(ops, i)
+		case "op_subtitle":
+			subOn = md.fields[i].checked
+			ops = append(ops, i)
+		case "op_fonts":
+			fontOn = md.fields[i].checked
+			ops = append(ops, i)
+		case "input_path", "input_format", "output_path", "output_format":
+			paths = append(paths, i)
+		case "preset", "advance":
+			encode = append(encode, i)
+		case "fonts_path":
+			fonts = append(fonts, i)
+		default:
+			if md.fields[i].def.key == "sub_suffix" {
+				subGroups++
+			}
+			subs = append(subs, i)
+		}
+	}
+
+	var lines []taskLine
+	add := func(field int, text string) {
+		if !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		lines = append(lines, taskLine{field: field, text: text})
+	}
+	head := func(title, note string) {
+		text := "  " + sectionTitleStyle.Render(title)
+		if note != "" {
+			text += "  " + descStyle.Render(note)
+		}
+		add(-1, text)
+	}
+	rule := func() {
+		add(-1, "  "+dividerStyle.Render(strings.Repeat("─", max(boxW-4, 4))))
+	}
+	chip := func(on bool, name string) string {
+		if on {
+			return stepOkStyle.Render(" " + name + " ")
+		}
+		return stepTodoStyle.Render(" " + name + " ")
+	}
+	fieldsOf := func(idxs []int, extra map[string]string) {
+		for _, idx := range idxs {
+			f := &md.fields[idx]
+			for _, ln := range taskFieldLines(f, idx == md.focus, boxW, extra[f.def.key]) {
+				add(idx, ln)
+			}
+			if f.def.key == "preset" {
+				for _, ln := range presetPreviewLines(f, boxW) {
+					add(idx, ln)
+				}
+			}
+		}
+	}
+
+	add(-1, "  "+chip(convertOn, "转码")+" "+chip(subOn, "字幕")+" "+chip(fontOn, "字体"))
+	var parts []string
+	if convertOn {
+		parts = append(parts, "转码")
+	}
+	if subOn {
+		parts = append(parts, "字幕")
+	}
+	if fontOn {
+		parts = append(parts, "字体")
+	}
+	summary := "先勾选要做的事，路径、预设和字幕都在这一页"
+	if len(parts) > 0 {
+		summary = "这次会做：" + strings.Join(parts, "、")
+		if subOn {
+			summary += fmt.Sprintf("，%d 组字幕", subGroups)
+		}
+	}
+	add(-1, "  "+descStyle.Render(summary))
+	add(-1, "  "+descStyle.Render("enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕 · esc 取消"))
+
+	rule()
+	head("操作", "可以同时勾选，一次 ffmpeg 做完")
+	fieldsOf(ops, map[string]string{
+		"op_convert":  "重新编码，可选用预设或手写参数",
+		"op_subtitle": "封装外挂字幕，新字幕排在原字幕之前",
+		"op_fonts":    "把字体文件夹里的字体打进容器",
+	})
+
+	rule()
+	head("源与输出", "递归扫描视频；已有输出文件不会覆盖")
+	fieldsOf(paths, nil)
+
+	note := "未勾选转码时，这里的参数不会写入命令"
+	if convertOn {
+		note = "左右键选用预设，也可以直接改高级参数"
+	}
+	rule()
+	head("转码", note)
+	fieldsOf(encode, nil)
+
+	note = "未勾选添加字体时，不会读取这个文件夹"
+	if fontOn {
+		note = "目录里的字体都会作为附件写入"
+	}
+	rule()
+	head("字体", note)
+	fieldsOf(fonts, nil)
+
+	note = "未勾选添加字幕时，下面的字幕组不会写入命令"
+	if subOn {
+		note = "语言用三字母码，例如 chi / eng；最多一条默认字幕"
+	}
+	rule()
+	head("字幕", note)
+	if len(subs) == 0 {
+		add(-1, "  "+descStyle.Render("还没有字幕组，按 ctrl+n 添加"))
+	}
+	group := 0
+	for _, idx := range subs {
+		f := &md.fields[idx]
+		if f.def.key == "sub_suffix" {
+			group++
+			head(fmt.Sprintf("字幕 %d", group), "灰色是默认值，留空即使用")
+		}
+		extra := ""
+		if f.def.key == "sub_default" {
+			extra = "同一任务里只能有一条"
+		}
+		for _, ln := range taskFieldLines(f, idx == md.focus, boxW, extra) {
+			add(idx, ln)
+		}
+	}
+	return lines
+}
+
+func taskFieldLines(f *field, focused bool, boxW int, extra string) []string {
+	lbl := labelStyle.Render(f.def.label)
+	if focused {
+		lbl = labelFocusedStyle.Render(f.def.label)
+	}
+	lead := "  "
+	if focused {
+		lead = titleMarkStyle.Render("▌") + " "
+	}
+	var body string
+	switch f.def.kind {
+	case fieldBool:
+		mark := uncheckedStyle.Render("[ ]")
+		if f.checked {
+			mark = checkedStyle.Render("[✔]")
+		}
+		note := ""
+		if extra != "" {
+			if focused {
+				note = "  " + normalStyle.Render(extra)
+			} else {
+				note = "  " + descStyle.Render(extra)
+			}
+		}
+		body = lbl + " " + mark + note
+	case fieldChoice:
+		label := "（无）"
+		if f.choice >= 0 && f.choice < len(f.options) {
+			label = f.options[f.choice]
+		}
+		body = lbl + " " + codeStyle.Render(label) + "  " + descStyle.Render("←/→ 切换")
+	default:
+		f.input.SetWidth(inputWidth(boxW))
+		body = lbl + " " + f.input.View()
+	}
+	lines := []string{lead + body + "\n"}
+	if f.err != "" {
+		lines = append(lines, "    "+errorStyle.Render("× "+f.err)+"\n")
+	}
+	return lines
+}
+
+func presetPreviewLines(f *field, boxW int) []string {
+	args := ""
+	if f.choice >= 0 && f.choice < len(f.choiceArgs) {
+		args = strings.TrimSpace(f.choiceArgs[f.choice])
+	}
+	if args == "" {
+		return []string{"    " + descStyle.Render("当前是手动输入，创建时使用下面的高级参数") + "\n"}
+	}
+	width := max(boxW-8, 12)
+	var lines []string
+	lines = append(lines, "    "+descStyle.Render("参数预览")+"\n")
+	for _, ln := range strings.Split(wrapText(args, width), "\n") {
+		if ln == "" {
+			continue
+		}
+		lines = append(lines, "    "+codeStyle.Render(ln)+"\n")
+	}
+	return lines
 }

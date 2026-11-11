@@ -472,10 +472,15 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	m.focus = panelRun
 	before := len(m.queue.Snapshot())
 	press(&m, "a")
-	assert.Contains(t, m.statusMsg, "还未结束")
-	assert.Equal(t, before, len(m.queue.Snapshot()), "执行中不能再创建任务")
+	require.Equal(t, modalTask, m.modal.kind, "执行中仍可打开创建弹窗")
+	assert.Equal(t, before, len(m.queue.Snapshot()), "打开弹窗还不入队")
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	m.enqueue(testPlanOut(t, "b.mkv"))
+	assert.Len(t, m.queue.Snapshot(), before+1, "执行中创建的主任务排在后面")
+	assert.Contains(t, m.statusMsg, "之后")
 	press(&m, "enter")
-	assert.Equal(t, before, len(m.queue.Snapshot()), "执行中回车不得再入队")
+	assert.Len(t, m.queue.Snapshot(), before+1, "任务列表回车不入队")
 
 	// 等真实暂停后再测 r/s/x（光标在该批次行上），避免竞态。
 	m.roster = []rosterRow{{batchID: batch.ID, state: fileRunning, cmd: ""}}

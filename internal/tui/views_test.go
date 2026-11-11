@@ -25,6 +25,7 @@ func TestViewsRender(t *testing.T) {
 		"执行完成":  func(m *model) { m.total = 2; m.done = 2; m.focus = panelRun },
 		"计划失败":  func(m *model) { m.planErr = assertAnError(); m.focus = panelRun },
 		"弹窗-预设": func(m *model) { m.openPresetModal(-1, presets.Preset{}) },
+		"弹窗-创建": func(m *model) { m.openTaskModal() },
 		"弹窗-确认": func(m *model) { m.openConfirmModal("删除", "确定？", nil) },
 		"表单编辑":  func(m *model) { m.focus = panelForm; m.editing = true },
 		"勾选组合":  func(m *model) { m.rows(); m.focus = panelOps },
@@ -236,4 +237,28 @@ func TestRenderRowsUniform(t *testing.T) {
 			assert.Equal(t, size[0], lipgloss.Width(ln), "第 %d 行宽度应为 %d: %q", i+1, size[0], ln)
 		}
 	}
+}
+
+func TestTaskModalFillsTheScreen(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 40
+	m.openTaskModal()
+	box := m.taskModalView()
+	lines := strings.Split(strings.TrimSuffix(box, "\n"), "\n")
+	require.NotEmpty(t, lines)
+	assert.GreaterOrEqual(t, lipgloss.Width(lines[0]), 110, "创建弹窗应接近终端宽度")
+	assert.GreaterOrEqual(t, len(lines), 30, "创建弹窗应接近终端高度")
+	width := lipgloss.Width(lines[0])
+	for i, ln := range lines {
+		assert.Equal(t, width, lipgloss.Width(ln), "第 %d 行宽度不一致", i+1)
+	}
+	for _, word := range []string{"操作", "源与输出", "转码", "字体", "字幕 1", "手动输入"} {
+		assert.Contains(t, box, word)
+	}
+	out := m.render()
+	for i, ln := range strings.Split(out, "\n") {
+		assert.Equal(t, m.width, lipgloss.Width(ln), "压暗后的整页第 %d 行宽度不一致", i+1)
+	}
+	assert.Contains(t, out, "新建任务")
 }

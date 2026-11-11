@@ -128,7 +128,7 @@ func helpText() string {
 			helpDescStyle.Render(v) + "\n")
 	}
 
-	row("a", "新建任务")
+	row("a", "新建任务；执行中也可以创建，新任务排在当前任务之后")
 	row("p", "转码预设管理")
 	row("?", "打开/关闭本帮助")
 	row("q", "退出；执行中或暂停中=取消/中止当前任务")
@@ -179,11 +179,8 @@ func helpText() string {
 func (m model) modalView() string {
 	md := m.modal
 	w, _ := m.helpModalSize()
-	if md.kind != modalHelp {
+	if md.kind != modalHelp && md.kind != modalTask {
 		w = min(64, max(m.width-4, 12))
-	}
-	if md.kind == modalTask {
-		w = min(84, max(m.width-4, 24))
 	}
 	var content string
 	switch md.kind {
@@ -191,6 +188,8 @@ func (m model) modalView() string {
 		return drawBox(w, md.title+"（↑/↓ 滚动，esc 关闭）", true, true, md.vp.View(), -1)
 	case modalPresetList:
 		return drawBox(w, md.title, true, true, m.presetListContent(), -1)
+	case modalTask:
+		return m.taskModalView()
 	case modalConfirm:
 		var b strings.Builder
 		for _, line := range strings.Split(md.prompt, "\n") {
@@ -238,11 +237,7 @@ func (m model) modalView() string {
 		if md.kind == modalSub {
 			b.WriteString("  " + descStyle.Render("灰色为默认值，留空即使用；多语言文件可填 chi.ass") + "\n")
 		}
-		if md.kind == modalTask {
-			b.WriteString("  " + descStyle.Render("ctrl+n 增加字幕 · ctrl+d 删除当前字幕 · ctrl+s 创建") + "\n")
-		} else {
-			b.WriteString("  " + descStyle.Render("enter 下一项（末项保存）· ctrl+s 保存 · esc 取消") + "\n")
-		}
+		b.WriteString("  " + descStyle.Render("enter 下一项（末项保存）· ctrl+s 保存 · esc 取消") + "\n")
 		content = b.String()
 	}
 	return drawBox(w, md.title, true, true, content, -1)

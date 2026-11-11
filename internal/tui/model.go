@@ -672,9 +672,6 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 				m.statusMsg = "已发送取消请求，等待正在执行的任务结束…"
 			}
 			return nil
-		case "a":
-			m.statusMsg = "当前任务还未结束，结束后再按 a 创建"
-			return nil
 		}
 	}
 
@@ -699,6 +696,8 @@ func (m *model) handleMouse(msg tea.MouseWheelMsg) tea.Cmd {
 	switch {
 	case m.modal != nil && m.modal.kind == modalHelp:
 		m.modal.vp, cmd = m.modal.vp.Update(msg)
+	case m.modal != nil:
+		return nil
 	case m.running || m.queueViewActive():
 		m.logVp, cmd = m.logVp.Update(msg)
 		m.logFollow = m.logVp.AtBottom()

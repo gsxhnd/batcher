@@ -28,6 +28,18 @@ func (m model) View() tea.View {
 	return v
 }
 
+// dimScreen 去掉主界面原有颜色，铺成一层灰底，让弹窗成为唯一的焦点。
+func (m model) dimScreen(s string) string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		Background(lipgloss.Color("234"))
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = fitWidth(style.Render(ansi.Strip(line)), m.width, style)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // narrowWidth 低于该宽度时退化为单列布局（只渲染当前聚焦的面板）。
 const narrowWidth = 90
 
@@ -45,7 +57,8 @@ func (m model) render() string {
 	if m.modal == nil {
 		return assembled
 	}
-	// 弹窗居中覆盖。
+	// 弹窗打开时主界面只作底，压暗并且不再接收按键和滚轮。
+	assembled = m.dimScreen(assembled)
 	modalBox := m.modalView()
 	x := max((m.width-lipgloss.Width(modalBox))/2, 0)
 	y := max((m.height-lipgloss.Height(modalBox))/2, 0)
@@ -1148,7 +1161,7 @@ func (m model) footer() string {
 	case m.running || m.queueViewActive():
 		hints = []string{"↑/↓ 切换", "r 重试", "d 删除", "c 取消", "s 跳过", "x 中止", "y 复制", "f 跟随"}
 		if m.running || m.pausedBatch != "" {
-			hints = append(hints, "q 取消执行")
+			hints = append(hints, "a 新建", "q 取消执行")
 		} else {
 			hints = append(hints, "a 新建", "p 预设", "? 帮助")
 		}

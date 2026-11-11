@@ -721,15 +721,14 @@ func (m *model) enqueue(plan *command.BatchPlan) tea.Cmd {
 		m.statusMsg = "× 队列未就绪，请重启程序"
 		return nil
 	}
-	if m.running {
-		m.statusMsg = "队列正在执行，当前任务结束后再创建"
-		return nil
-	}
 	b, err := m.queue.Enqueue(plan, m.ops)
 	if err != nil {
 		m.statusMsg = "× 入队失败: " + err.Error()
 		return nil
 	}
 	m.statusMsg = fmt.Sprintf("已加入任务队列（%d 个任务），队列空闲时立即开始", len(b.Items))
+	if m.running || m.pausedBatch != "" {
+		m.statusMsg = fmt.Sprintf("已加入任务队列（%d 个任务），排在当前任务之后", len(b.Items))
+	}
 	return nil
 }
