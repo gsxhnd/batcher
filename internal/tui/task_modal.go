@@ -262,7 +262,7 @@ func (m model) listedPreset() (int, bool) {
 }
 
 func (m *model) notePresetList(msg string) {
-	m.statusMsg = msg
+	m.setStatus(msg)
 	if m.modal != nil && m.modal.kind == modalPresetList {
 		m.modal.err = msg
 	}
@@ -363,7 +363,7 @@ func (m *model) copyPresetModal() tea.Cmd {
 		p := m.presets[idx]
 		return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
 	}
-	m.statusMsg = "先选中一条预设，再按 c 复制"
+	m.setStatus("先选中一条预设，再按 c 复制")
 	return nil
 }
 

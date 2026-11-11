@@ -158,6 +158,42 @@ func TestMouseWheelPausesFollow(t *testing.T) {
 	assert.True(t, m.logFollow, "滚轮回到底部后应恢复跟随")
 }
 
+func TestSubtaskDetailFitsTheBox(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 34
+	m.resizePanes()
+	m.focus = panelRun
+	m.running = true
+	m.total = 1
+	m.filesBatch = "b"
+	m.files = []fileItem{{input: "a.mkv", cmd: "ffmpeg -i a.mkv -c copy " + strings.Repeat("pad ", 30) + "o.mkv"}}
+	m.roster = []rosterRow{{batchID: "b", itemID: "001", title: "a.mkv", cmd: m.files[0].cmd, state: fileRunning}}
+	m.fileCursor = 0
+	m.refreshRunHeights()
+	m.syncLogPane()
+	check := func(name string) {
+		t.Helper()
+		m.refreshRunHeights()
+		m.syncLogPane()
+		body := m.taskDetail()
+		limit := m.bodyH() - 2
+		n := len(strings.Split(strings.TrimSuffix(body, "\n"), "\n"))
+		t.Logf("%s lines=%d limit=%d chrome=%d vp=%d", name, n, limit, m.taskChromeH(), m.logVp.Height())
+		assert.LessOrEqual(t, n, limit, name)
+		assert.NotContains(t, m.render(), "行已折叠", name)
+	}
+	check("子任务")
+	m.statusMsg = "已重新排队"
+	check("有提示")
+	m.height = 16
+	m.resizePanes()
+	check("矮窗口")
+	m.roster = []rosterRow{{batchID: "b", title: "主任务"}}
+	m.fileCursor = 0
+	check("主任务")
+}
+
 // TestSummaryMarksDefaultSub 汇总文本应标注默认字幕轨道。
 func TestSummaryMarksDefaultSub(t *testing.T) {
 	isolatePresets(t)

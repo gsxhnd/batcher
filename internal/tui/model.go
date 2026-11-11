@@ -232,7 +232,7 @@ func newModel() model {
 	}
 	user, err := presets.Load()
 	if err != nil {
-		m.statusMsg = "× 读取自定义预设失败: " + err.Error()
+		m.setStatus("× 读取自定义预设失败: " + err.Error())
 	}
 	m.presets = user
 	m.bar.EmptyColor = lipgloss.Color("238")
@@ -292,11 +292,11 @@ func (m *model) setFocus(p panel) {
 	if !m.panelEnabled(p) {
 		switch p {
 		case panelPresets:
-			m.statusMsg = "未勾选「视频转码」，转码预设面板不可用"
+			m.setStatus("未勾选「视频转码」，转码预设面板不可用")
 		case panelSubs:
-			m.statusMsg = "未勾选「添加字幕」，字幕面板不可用"
+			m.setStatus("未勾选「添加字幕」，字幕面板不可用")
 		case panelRun:
-			m.statusMsg = "执行中请停留在任务面板"
+			m.setStatus("执行中请停留在任务面板")
 		}
 		return
 	}
@@ -676,12 +676,12 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 			}
 			if m.pausedBatch != "" {
 				m.queue.Decide(task.DecisionAbort)
-				m.statusMsg = "已发送中止指令"
+				m.setStatus("已发送中止指令")
 				return nil
 			}
 			if m.queue != nil {
 				m.queue.CancelCurrent()
-				m.statusMsg = "已发送取消请求，等待正在执行的任务结束…"
+				m.setStatus("已发送取消请求，等待正在执行的任务结束…")
 			}
 			return nil
 		}
@@ -1094,7 +1094,7 @@ func (m *model) toggleItemAttempts(row rosterRow) {
 // leaveOutput 退出子任务输出查看，上下键恢复为移动左侧列表。
 func (m *model) leaveOutput() {
 	m.outputFocus = false
-	m.statusMsg = ""
+	m.setStatus("")
 }
 
 // openOutput 进入当前子任务的输出查看。
@@ -1105,7 +1105,7 @@ func (m *model) openOutput() {
 	m.pinRosterCursor()
 	m.syncLogPane()
 	m.logVp.GotoBottom()
-	m.statusMsg = "↑/↓ 滚动输出，esc 返回"
+	m.setStatus("↑/↓ 滚动输出，esc 返回")
 }
 
 // scrollOutput 在输出查看中按行滚动，离开底部后暂停跟随新输出。
@@ -1763,9 +1763,9 @@ func (m *model) applyPlan(err error, plan *command.BatchPlan) tea.Cmd {
 	if m.running {
 		m.pendingPlan, m.pendingPlanErr = plan, err
 		if err != nil {
-			m.statusMsg = "× 新配置生成失败：" + err.Error()
+			m.setStatus("× 新配置生成失败：" + err.Error())
 		} else if plan != nil {
-			m.statusMsg = "配置已更新，后续批次将使用新配置"
+			m.setStatus("配置已更新，后续批次将使用新配置")
 		}
 		return nil
 	}
@@ -1819,11 +1819,11 @@ func (m *model) handleDone(err error) tea.Cmd {
 				m.canceled++
 			}
 		}
-		m.statusMsg = "批处理已取消，配置与日志已保留"
+		m.setStatus("批处理已取消，配置与日志已保留")
 	case err != nil:
-		m.statusMsg = "× 批处理已结束: " + err.Error()
+		m.setStatus("× 批处理已结束: " + err.Error())
 	default:
-		m.statusMsg = "✔ 批处理完成。按 x 进入任务列表，确认参数后再按 x 入队"
+		m.setStatus("✔ 批处理完成。按 x 进入任务列表，确认参数后再按 x 入队")
 	}
 	m.current = ""
 	m.runIdx = -1
@@ -1953,7 +1953,7 @@ func (m *model) reloadSaved() {
 	}
 	list, err := m.db.ListTasks()
 	if err != nil {
-		m.statusMsg = "× 读取任务失败: " + err.Error()
+		m.setStatus("× 读取任务失败: " + err.Error())
 		return
 	}
 	m.savedList = list
@@ -2014,11 +2014,22 @@ func (m model) elapsedNow() time.Duration {
 	return end.Sub(m.startAt)
 }
 
+// setStatus 更新临时提示，并按它是否占详情行数重算滚动区高度。
+func (m *model) setStatus(msg string) {
+	if m.statusMsg == msg {
+		return
+	}
+	m.statusMsg = msg
+	if m.width > 0 {
+		m.refreshRunHeights()
+	}
+}
+
 // clearPause 在决策已经发出后结束界面上的暂停态，避免连按被当成下一次决策。
 func (m *model) clearPause(msg string) {
 	m.pausedBatch = ""
 	m.resumeTimer()
-	m.statusMsg = msg
+	m.setStatus(msg)
 }
 
 // pauseTimer 在进入暂停等待决策时冻结计时。
@@ -2152,7 +2163,7 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 	case task.QueueBatchPaused:
 		m.pausedBatch = e.BatchID
 		m.pauseTimer()
-		m.statusMsg = "任务已暂停：r 重试 / s 跳过 / x 中止"
+		m.setStatus("任务已暂停：r 重试 / s 跳过 / x 中止")
 	case task.QueueBatchDone, task.QueueBatchFailed, task.QueueBatchCanceled:
 		// 只有正在执行时才收尾；取消队列里等待中的其他批次只刷新列表。
 		if m.running {
@@ -2180,7 +2191,7 @@ func (m *model) dropForgotten(id string) {
 		return
 	}
 	if err := m.db.DeleteTask(id); err != nil {
-		m.statusMsg = "× 删除任务记录失败: " + err.Error()
+		m.setStatus("× 删除任务记录失败: " + err.Error())
 	}
 }
 

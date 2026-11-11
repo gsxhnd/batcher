@@ -73,18 +73,18 @@ func (m *model) updatePresetsPanel(msg tea.Msg) tea.Cmd {
 			p := m.presets[idx]
 			return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
 		}
-		m.statusMsg = "先选中一条预设，再按 c 复制"
+		m.setStatus("先选中一条预设，再按 c 复制")
 		return nil
 	case "e":
 		if idx, ok := m.selectedUserPreset(); ok {
 			return m.openPresetModal(idx, m.presets[idx])
 		}
-		m.statusMsg = "内置预设只读。按 a 从空白新建，按 c 复制这条"
+		m.setStatus("内置预设只读。按 a 从空白新建，按 c 复制这条")
 		return nil
 	case "d":
 		idx, ok := m.selectedUserPreset()
 		if !ok {
-			m.statusMsg = "仅自定义预设可删除"
+			m.setStatus("仅自定义预设可删除")
 			return nil
 		}
 		name := presetDisplayName(m.presets[idx])
@@ -175,11 +175,11 @@ func presetDisplayName(p presets.Preset) string {
 // persistPresets 写入用户预设文件，并以 action 作为成功提示前缀。
 func (m *model) persistPresets(next []presets.Preset, action string) error {
 	if err := presets.Save(next); err != nil {
-		m.statusMsg = "× 保存预设失败: " + err.Error()
+		m.setStatus("× 保存预设失败: " + err.Error())
 		return err
 	}
 	m.presets = next
-	m.statusMsg = action + "，已保存到 " + presetHintText()
+	m.setStatus(action + "，已保存到 " + presetHintText())
 	return nil
 }
 
@@ -207,7 +207,7 @@ func (m *model) updateSubsPanel(msg tea.Msg) tea.Cmd {
 		if len(m.subs) > 0 {
 			return m.openSubModal(m.subCursor)
 		}
-		m.statusMsg = "字幕列表为空，按 n 新增一条"
+		m.setStatus("字幕列表为空，按 n 新增一条")
 		return nil
 	case "d":
 		if len(m.subs) > 0 {
@@ -223,7 +223,7 @@ func (m *model) updateSubsPanel(msg tea.Msg) tea.Cmd {
 				})
 			return nil
 		}
-		m.statusMsg = "字幕列表为空"
+		m.setStatus("字幕列表为空")
 		return nil
 	case "t":
 		// t（toggle）：把当前字幕标记/取消为默认字幕流（-disposition default）。
@@ -234,7 +234,7 @@ func (m *model) updateSubsPanel(msg tea.Msg) tea.Cmd {
 			}
 			return m.schedulePlan(planDebounceDelay)
 		}
-		m.statusMsg = "字幕列表为空"
+		m.setStatus("字幕列表为空")
 		return nil
 	}
 	return nil
@@ -323,11 +323,11 @@ func (m *model) saveAdvancePreset() tea.Cmd {
 		}
 	}
 	if args == "" {
-		m.statusMsg = "× 参数为空，先在“高级自定义参数”中填写，例如: -c:v h265 -crf 20 -c:a copy"
+		m.setStatus("× 参数为空，先在“高级自定义参数”中填写，例如: -c:v h265 -crf 20 -c:a copy")
 		return nil
 	}
 	if !m.ops.Convert {
-		m.statusMsg = "× 未勾选“视频转码”，无需保存高级参数"
+		m.setStatus("× 未勾选“视频转码”，无需保存高级参数")
 		return nil
 	}
 	next := presets.Upsert(slices.Clone(m.presets), presets.Preset{Args: args})
@@ -456,7 +456,7 @@ func (m *model) runTaskKeys(key string) bool {
 			return false
 		}
 		m.queue.CancelCurrent()
-		m.statusMsg = "已发送取消请求，等待正在执行的任务结束…"
+		m.setStatus("已发送取消请求，等待正在执行的任务结束…")
 		return true
 	}
 	if !m.queueViewActive() {
@@ -495,20 +495,20 @@ func (m *model) retryFocused(row rosterRow) bool {
 	if err := m.queue.RetryBatch(row.batchID); err != nil {
 		if saved, ok := m.batchByID(row.batchID); ok {
 			if err2 := m.queue.Requeue(saved); err2 != nil {
-				m.statusMsg = "× 重试失败: " + err2.Error()
+				m.setStatus("× 重试失败: " + err2.Error())
 				return true
 			}
-			m.statusMsg = "已重新排队"
+			m.setStatus("已重新排队")
 			return true
 		}
-		m.statusMsg = "× 重试失败: " + err.Error()
+		m.setStatus("× 重试失败: " + err.Error())
 		return true
 	}
 	if m.pausedBatch == row.batchID {
 		m.clearPause("已发送重试指令，等待执行")
 		return true
 	}
-	m.statusMsg = "已发送重试指令，等待执行"
+	m.setStatus("已发送重试指令，等待执行")
 	return true
 }
 
@@ -528,11 +528,11 @@ func (m *model) deleteFocused(row rosterRow) bool {
 		if _, inQueue := m.queue.BatchCopy(row.batchID); !inQueue {
 			if m.db != nil {
 				if err := m.db.DeleteTask(row.batchID); err != nil {
-					m.statusMsg = "× 删除失败: " + err.Error()
+					m.setStatus("× 删除失败: " + err.Error())
 					return true
 				}
 			}
-			m.statusMsg = "已删除任务"
+			m.setStatus("已删除任务")
 			m.syncRoster()
 			return true
 		}
@@ -542,14 +542,14 @@ func (m *model) deleteFocused(row rosterRow) bool {
 		m.forget[row.batchID] = struct{}{}
 		if err := m.queue.Discard(row.batchID); err != nil {
 			delete(m.forget, row.batchID)
-			m.statusMsg = "× 删除失败: " + err.Error()
+			m.setStatus("× 删除失败: " + err.Error())
 			return true
 		}
 		if m.pausedBatch == row.batchID {
 			m.clearPause("已删除任务")
 			return true
 		}
-		m.statusMsg = "已删除任务"
+		m.setStatus("已删除任务")
 		return true
 	}
 	pausedItem := false
@@ -561,28 +561,28 @@ func (m *model) deleteFocused(row rosterRow) bool {
 		}
 	}
 	if err := m.queue.DiscardItem(row.batchID, row.itemID); err != nil {
-		m.statusMsg = "× 删除失败: " + err.Error()
+		m.setStatus("× 删除失败: " + err.Error())
 		return true
 	}
 	if pausedItem {
 		m.clearPause("已删除子任务")
 		return true
 	}
-	m.statusMsg = "已删除子任务"
+	m.setStatus("已删除子任务")
 	return true
 }
 
 // cancelFocused 取消光标所在的主任务：执行中的停止当前命令，等待中的不再开始。
 func (m *model) cancelFocused(row rosterRow) bool {
 	if err := m.queue.CancelBatch(row.batchID); err != nil {
-		m.statusMsg = "× 取消失败: " + err.Error()
+		m.setStatus("× 取消失败: " + err.Error())
 		return true
 	}
 	if m.pausedBatch == row.batchID {
 		m.clearPause("已发送取消请求，等待任务结束")
 		return true
 	}
-	m.statusMsg = "已发送取消请求"
+	m.setStatus("已发送取消请求")
 	return true
 }
 
@@ -611,22 +611,22 @@ func (m *model) copyShownCommand() tea.Cmd {
 			// 批次行：复制该批次全部子任务命令。
 			commands := m.batchCommands(m.roster[m.fileCursor].batchID)
 			if len(commands) == 0 {
-				m.statusMsg = "× 尚无命令可复制，等待任务开始"
+				m.setStatus("× 尚无命令可复制，等待任务开始")
 				return nil
 			}
-			m.statusMsg = fmt.Sprintf("✔ 已复制批次全部 %d 条命令到剪贴板", len(commands))
+			m.setStatus(fmt.Sprintf("✔ 已复制批次全部 %d 条命令到剪贴板", len(commands)))
 			return tea.SetClipboard(strings.Join(commands, "\n"))
 		}
 		cmd := m.pinnedCmdText()
 		if cmd == "" {
-			m.statusMsg = "× 尚无命令可复制，等待任务开始"
+			m.setStatus("× 尚无命令可复制，等待任务开始")
 			return nil
 		}
-		m.statusMsg = "✔ 已复制所选任务的完整命令到剪贴板"
+		m.setStatus("✔ 已复制所选任务的完整命令到剪贴板")
 		return tea.SetClipboard(cmd)
 	}
 	if m.planLoading || !m.previewDone || m.planErr != nil || len(m.files) == 0 {
-		m.statusMsg = "× 命令尚未生成，无法复制"
+		m.setStatus("× 命令尚未生成，无法复制")
 		return nil
 	}
 	var commands []string
@@ -637,7 +637,7 @@ func (m *model) copyShownCommand() tea.Cmd {
 			commands = append(commands, item.cmd)
 		}
 	}
-	m.statusMsg = "✔ 已复制所选命令到剪贴板"
+	m.setStatus("✔ 已复制所选命令到剪贴板")
 	return tea.SetClipboard(strings.Join(commands, "\n"))
 }
 
@@ -646,7 +646,7 @@ func (m *model) copyShownCommand() tea.Cmd {
 // 队列执行中（含暂停等待决策）不得重复入队：同一时间只接受一个批次。
 func (m *model) tryStartRun() tea.Cmd {
 	if m.running {
-		m.statusMsg = "队列正在执行（或等待暂停决策），任务结束后再按 x 入队"
+		m.setStatus("队列正在执行（或等待暂停决策），任务结束后再按 x 入队")
 		return nil
 	}
 	if !m.ops.Any() {
@@ -656,12 +656,12 @@ func (m *model) tryStartRun() tea.Cmd {
 	}
 	opt, err := m.buildOption()
 	if err != nil {
-		m.statusMsg = "× 校验失败：" + err.Error()
+		m.setStatus("× 校验失败：" + err.Error())
 		m.setFocus(panelForm)
 		return m.scheduleDirList(0)
 	}
 	if m.ops.AddSubtitle && len(m.subs) == 0 {
-		m.statusMsg = "× 已勾选添加字幕，请至少添加一条（面板 3 按 n）"
+		m.setStatus("× 已勾选添加字幕，请至少添加一条（面板 3 按 n）")
 		m.setFocus(panelSubs)
 		return nil
 	}
@@ -671,12 +671,12 @@ func (m *model) tryStartRun() tea.Cmd {
 		plan, planErr = m.pendingPlan, m.pendingPlanErr
 	}
 	if planErr != nil && !m.planLoading {
-		m.statusMsg = "× 请先修正命令预览中的错误"
+		m.setStatus("× 请先修正命令预览中的错误")
 		m.setFocus(panelRun)
 		return nil
 	}
 	if m.planLoading || m.planGenerate || !m.previewDone || plan == nil {
-		m.statusMsg = "请等待最新命令预览生成，查看后再按 x 入队"
+		m.setStatus("请等待最新命令预览生成，查看后再按 x 入队")
 		m.setFocus(panelRun)
 		if !m.planLoading {
 			return m.schedulePlan(0)
@@ -684,7 +684,7 @@ func (m *model) tryStartRun() tea.Cmd {
 		return nil
 	}
 	if len(plan.Jobs) == 0 {
-		m.statusMsg = "× 未找到匹配的视频文件，未入队任何任务"
+		m.setStatus("× 未找到匹配的视频文件，未入队任何任务")
 		m.setFocus(panelRun)
 		return nil
 	}
@@ -732,17 +732,17 @@ func parameterSummary(sel command.Selection, opt *command.VideoBatchOption, jobs
 // enqueue 把计划交给任务队列，队列空闲时立即开始执行。
 func (m *model) enqueue(plan *command.BatchPlan) tea.Cmd {
 	if m.queue == nil {
-		m.statusMsg = "× 队列未就绪，请重启程序"
+		m.setStatus("× 队列未就绪，请重启程序")
 		return nil
 	}
 	b, err := m.queue.Enqueue(plan, m.ops)
 	if err != nil {
-		m.statusMsg = "× 入队失败: " + err.Error()
+		m.setStatus("× 入队失败: " + err.Error())
 		return nil
 	}
-	m.statusMsg = fmt.Sprintf("已加入任务队列（%d 个任务），队列空闲时立即开始", len(b.Items))
+	m.setStatus(fmt.Sprintf("已加入任务队列（%d 个任务），队列空闲时立即开始", len(b.Items)))
 	if m.running || m.pausedBatch != "" {
-		m.statusMsg = fmt.Sprintf("已加入任务队列（%d 个任务），排在当前任务之后", len(b.Items))
+		m.setStatus(fmt.Sprintf("已加入任务队列（%d 个任务），排在当前任务之后", len(b.Items)))
 	}
 	return nil
 }

@@ -885,12 +885,21 @@ func (m model) itemBody() string {
 	return b.String()
 }
 
-// taskChromeH 是滚动区域以上的固定行数。主任务和子任务各自计算。
+// taskChromeH 是滚动区域以上的固定行数。主任务和子任务各自计算，普通提示另占两行。
 func (m model) taskChromeH() int {
+	h := m.itemFixedH()
 	if _, ok := m.focusedBatchRow(); ok {
-		return m.batchFixedH()
+		h = m.batchFixedH()
 	}
-	return m.itemFixedH()
+	return h + m.statusBlockH()
+}
+
+// statusBlockH 是详情顶部临时提示占用的行数。错误改在右上角，不占这里。
+func (m model) statusBlockH() int {
+	if m.statusMsg == "" || isErrorNotice(m.statusMsg) {
+		return 0
+	}
+	return 2
 }
 
 // batchFixedH 与 batchBody 里视口之前的行数一致。
@@ -1167,7 +1176,7 @@ func wrapText(s string, width int) string {
 
 // ---------- 手绘边框盒子 ----------
 
-// drawBox 手绘圆角边框盒子（带内嵌标题），内容按行截断/补齐到 contentH 行；
+// drawBox 手绘圆角边框盒子（带内嵌标题）。contentH > 0 时内容超出的行直接截掉；
 // contentH < 0 表示按内容自然高度。
 func drawBox(w int, title string, focused, enabled bool, content string, contentH int) string {
 	borderColor := cBorder
@@ -1203,11 +1212,7 @@ func drawBox(w int, title string, focused, enabled bool, content string, content
 		lines = nil
 	} else if contentH > 0 {
 		if len(lines) > contentH {
-			more := len(lines) - contentH
-			clipped := make([]string, 0, contentH)
-			clipped = append(clipped, lines[:max(contentH-1, 0)]...)
-			clipped = append(clipped, descStyle.Render(fmt.Sprintf("…（%d 行已折叠，进入面板查看）", more)))
-			lines = clipped
+			lines = lines[:contentH]
 		}
 		for len(lines) < contentH {
 			lines = append(lines, "")
