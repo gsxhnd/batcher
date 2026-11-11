@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -149,8 +148,6 @@ func (m model) panelTitle(p panel) string {
 		case m.total > 0:
 			settled, _, _, _, total, _ := m.progressNumbers()
 			title = fmt.Sprintf("5 · 任务 %d/%d", settled, total)
-		case m.previewDone && m.planErr == nil && len(m.files) > 0:
-			title = fmt.Sprintf("5 · 任务（%d 个文件）", len(m.files))
 		}
 		return title
 	}
@@ -403,7 +400,7 @@ func (m model) opsBody() string {
 	if !m.ops.Any() {
 		b.WriteString("  " + errorStyle.Render("× 请至少勾选一项") + "\n")
 	}
-	b.WriteString("\n  按 2/3/4 配置面板，完成后按 x 执行。\n")
+	b.WriteString("\n  按 5 或 x 进入任务列表。列表为空，按 x 弹出确认后才会入队。\n")
 	if m.featErr != "" {
 		b.WriteString("  " + errorStyle.Render("× "+m.featErr) + "\n")
 	}
@@ -466,7 +463,7 @@ func (m model) formBody() string {
 	if m.editing {
 		b.WriteString(subtitleStyle.Render("↑/↓/Tab 切换字段，enter 下一项，esc 完成") + "\n")
 	} else {
-		b.WriteString(subtitleStyle.Render("enter 进入编辑；ctrl+s 把高级参数另存为预设") + "\n")
+		b.WriteString(subtitleStyle.Render("灰色为默认值，留空即使用；enter 进入编辑") + "\n")
 	}
 	b.WriteString("\n")
 
@@ -524,9 +521,8 @@ func (m model) runBody() string {
 			if m.runErr != nil {
 				b.WriteString("  " + errorStyle.Render("× "+m.runErr.Error()) + "\n")
 			}
-			b.WriteString("  " + descStyle.Render("↑/↓ 切换文件查看输出；直接修改配置按 x 重跑") + "\n\n")
 		}
-		b.WriteString(m.vp.View())
+		b.WriteString("  " + descStyle.Render("队列为空。按 x 弹出确认后才会入队。") + "\n")
 	default:
 		b.WriteString("  " + descStyle.Render("配置变化时自动生成命令预览") + "\n")
 	}
@@ -740,23 +736,14 @@ func truncateText(s string, w int) string {
 
 // ---------- 文件列表 ----------
 
-// filePane 渲染左侧列表。队列视图激活（入队后）显示批次与展开的子任务；
-// 空闲时显示命令预览文件列表（第 0 项为“全部”汇总）。超出行数随光标滚动。
+// filePane 渲染左侧列表。只有真正入队后才显示批次与子任务；未入队时不列出文件。
 func (m model) filePane(h int) string {
-	if len(m.roster) > 0 {
-		rows := make([]string, 0, len(m.roster))
-		for i, row := range m.roster {
-			rows = append(rows, m.rosterRowView(i, row))
-		}
-		return strings.Join(windowRows(rows, m.fileCursor, h), "\n")
+	if len(m.roster) == 0 {
+		return descStyle.Render("队列为空")
 	}
-	if len(m.files) == 0 {
-		return ""
-	}
-	rows := make([]string, 0, len(m.files)+1)
-	rows = append(rows, m.fileRow(-1, "全部"))
-	for i, it := range m.files {
-		rows = append(rows, m.fileRow(i, filepath.Base(it.input)))
+	rows := make([]string, 0, len(m.roster))
+	for i, row := range m.roster {
+		rows = append(rows, m.rosterRowView(i, row))
 	}
 	return strings.Join(windowRows(rows, m.fileCursor, h), "\n")
 }
@@ -952,7 +939,7 @@ func (m model) footer() string {
 			hints = append(hints, "? 帮助", "q 退出")
 		}
 	case m.focus == panelOps:
-		hints = []string{"space 勾选", "2-4 配置面板", "? 快捷键", "x 执行", "q 退出"}
+		hints = []string{"space 勾选", "2-4 配置面板", "? 快捷键", "x 进入任务", "q 退出"}
 	case m.focus == panelPresets:
 		hints = []string{"↑/↓ 选择", "enter 使用", "n 新增", "e 编辑", "d 删除", "? 快捷键"}
 	case m.focus == panelSubs:
@@ -960,7 +947,7 @@ func (m model) footer() string {
 	case m.focus == panelForm:
 		hints = []string{"↑/↓ 选择字段", "enter 编辑", "ctrl+s 另存预设", "? 快捷键"}
 	case m.focus == panelRun:
-		hints = []string{"↑/↓ 切换文件", "enter/x 执行", "y 复制命令", "pgup/pgdn 滚动", "? 快捷键", "q 退出"}
+		hints = []string{"↑/↓ 切换文件", "x 确认入队", "y 复制命令", "pgup/pgdn 滚动", "? 快捷键", "q 退出"}
 	default:
 		hints = []string{"1-5/tab 切面板", "? 快捷键", "q 退出"}
 	}

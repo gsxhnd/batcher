@@ -542,13 +542,17 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 			m.statusMsg = "任务列表中按 x 不会新建主任务"
 			return nil
 		}
+		if m.focus != panelRun {
+			// 进入任务列表只展示参数，不入队。入队要在任务面板里再按一次 x。
+			m.setFocus(panelRun)
+			m.statusMsg = "已进入任务列表。按 x 弹出确认后才会入队"
+			return nil
+		}
 		return m.tryStartRun()
 	case "enter":
-		if m.focus == panelRun && (m.queueViewActive() || m.outputFocus) {
-			return m.updateRunPanel(key)
-		}
+		// 进入任务列表只查看预览或操作已有任务，不入队。入队只走 x。
 		if m.focus == panelRun {
-			return m.tryStartRun()
+			return m.updateRunPanel(key)
 		}
 	}
 
@@ -711,7 +715,7 @@ func (m model) summaryText(cmds [][]string) string {
 		}
 		fmt.Fprintf(&b, "字幕（%d 条）：%s\n", len(m.subs), strings.Join(suffixes, " / "))
 	}
-	b.WriteString("按 x 入队执行；↑/↓ 切换文件查看对应命令。\n\n")
+	b.WriteString("尚未加入队列。在任务面板确认参数后按 x 入队；↑/↓ 切换文件查看对应命令。\n\n")
 	for i, c := range cmds {
 		fmt.Fprintf(&b, "[%d/%d] %s\n\n", i+1, len(cmds), command.FormatCommand(c))
 	}
@@ -1682,7 +1686,7 @@ func (m *model) handleDone(err error) tea.Cmd {
 	case err != nil:
 		m.statusMsg = "× 批处理已结束: " + err.Error()
 	default:
-		m.statusMsg = "✔ 批处理完成，可直接修改配置后按 x 入队新任务"
+		m.statusMsg = "✔ 批处理完成。按 x 进入任务列表，确认参数后再按 x 入队"
 	}
 	m.current = ""
 	m.runIdx = -1

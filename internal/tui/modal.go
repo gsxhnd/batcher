@@ -127,7 +127,7 @@ func helpText() string {
 	}
 
 	row("1-5 / tab", "切换面板（未启用的自动跳过）")
-	row("x", "把当前配置加入任务队列（校验出错跳到对应面板）")
+	row("x", "其他面板：进入任务列表（不入队）；任务列表：确认参数后入队")
 	row("?", "打开/关闭本帮助")
 	row("q", "退出；执行中=取消当前批处理")
 	row("ctrl+c", "强制退出并中止任务")
@@ -148,16 +148,17 @@ func helpText() string {
 	row("e / enter", "编辑选中的字幕")
 	row("t", "标记/取消默认字幕流（-disposition default）")
 	row("d", "删除字幕（弹窗确认）")
-	row("弹窗", "enter 下一项（末项保存）· ctrl+s 保存 · esc 取消")
+	row("弹窗", "灰色为默认值，留空即使用；enter 下一项（末项保存）· ctrl+s 保存 · esc 取消")
 	section("[4] 参数")
 	row("enter", "进入编辑 / 下一项；esc 完成")
 	row("↑/↓", "切换字段（编辑时=在字段间移动）")
+	row("默认值", "路径和后缀的灰色文字即默认值，留空即使用")
 	row("ctrl+s", "把高级参数另存为预设")
 	section("[5] 任务")
 	row("↑/↓", "在主任务与子任务之间移动")
-	row("enter", "主任务：折叠/展开子任务；子任务：折叠/展开次数；次数：进入这一次的输出")
+	row("enter", "队列中折叠/展开或进入输出；预览中不入队")
 	row("esc", "退出输出查看（q 不返回这一层）")
-	row("x", "在配置面板把当前配置加入队列；任务列表里不会新建主任务")
+	row("x", "未入队时弹出确认，确认后才入队；已在队列中不会新建")
 	row("f", "跳回正在执行的子任务（执行中）")
 	row("y", "复制当前子任务的命令（主任务行=整个任务全部命令）")
 	row("r", "重试当前失败的子任务；主任务行重试整个任务，可多次重试")
@@ -196,7 +197,11 @@ func (m model) modalView() string {
 	case modalHelp:
 		return drawBox(w, md.title+"（↑/↓ 滚动，esc 关闭）", true, true, md.vp.View(), -1)
 	case modalConfirm:
-		content = "  " + md.prompt
+		var b strings.Builder
+		for _, line := range strings.Split(md.prompt, "\n") {
+			b.WriteString("  " + line + "\n")
+		}
+		content = b.String()
 	default:
 		var b strings.Builder
 		for i := range md.fields {
@@ -227,6 +232,9 @@ func (m model) modalView() string {
 		}
 		if md.err != "" {
 			b.WriteString("  " + errorStyle.Render("× "+md.err) + "\n")
+		}
+		if md.kind == modalSub {
+			b.WriteString("  " + descStyle.Render("灰色为默认值，留空即使用；多语言文件可填 chi.ass") + "\n")
 		}
 		b.WriteString("  " + descStyle.Render("enter 下一项（末项保存）· ctrl+s 保存 · esc 取消") + "\n")
 		content = b.String()
@@ -384,12 +392,12 @@ func (m *model) syncManualAdvance(before, after string) {
 	}
 }
 
-// saveSubModal 校验并保存字幕弹窗：后缀必填，语言码需为 ISO 639-2 三字母小写码。
+// saveSubModal 校验并保存字幕弹窗：留空字段使用默认值，语言码需为 ISO 639-2 三字母小写码。
 func (m *model) saveSubModal() tea.Cmd {
 	md := m.modal
-	suffix := strings.TrimSpace(md.fields[0].Value())
-	lang := strings.TrimSpace(md.fields[1].Value())
-	title := strings.TrimSpace(md.fields[2].Value())
+	suffix := md.fields[0].resolved()
+	lang := md.fields[1].resolved()
+	title := md.fields[2].resolved()
 	if suffix == "" {
 		md.fields[0].err = "必填"
 		return focusField(md.fields, 0)

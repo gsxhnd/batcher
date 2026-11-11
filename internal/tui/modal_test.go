@@ -20,25 +20,42 @@ func TestModalEnterAdvancesAndCtrlSaves(t *testing.T) {
 	require.Equal(t, modalSub, m.modal.kind)
 	require.Equal(t, 0, m.modal.focus)
 
+	defaults := subtitleDefaults()
+	assert.Empty(t, m.modal.fields[0].input.Value(), "默认值只作灰色占位，不预填成正文")
+	assert.Equal(t, defaults.Suffix, m.modal.fields[0].input.Placeholder)
+	assert.Equal(t, defaults.Lang, m.modal.fields[1].input.Placeholder)
+	assert.Equal(t, defaults.Title, m.modal.fields[2].input.Placeholder)
+
 	// enter 推进：0 → 1 → 2 → 3(bool，末字段)
 	for i, want := range []int{1, 2, 3} {
 		press(&m, "enter")
 		assert.Equal(t, want, m.modal.focus, "第 %d 次 enter", i+1)
 	}
 
-	// 末字段（bool）enter 直接保存：空后缀校验失败，弹窗保持打开
+	// 非法语言码仍拒绝保存
+	m.modal.fields[1].input.SetValue("zh")
 	press(&m, "enter")
 	require.NotNil(t, m.modal)
-	assert.NotEmpty(t, m.modal.fields[0].err, "空后缀应有字段错误")
+	assert.NotEmpty(t, m.modal.fields[1].err)
+
+	// 留空则使用默认值，末字段 enter 直接保存
+	m.modal.fields[1].input.SetValue("")
+	m.modal.focus = len(m.modal.fields) - 1
+	press(&m, "enter")
+	require.Nil(t, m.modal, "留空应使用默认值并关闭弹窗")
+	require.Len(t, m.subs, 1)
+	assert.Equal(t, defaults, m.subs[0])
 
 	// 中途字段也可 ctrl+s：补全合法值后保存关闭
+	press(&m, "n")
+	require.NotNil(t, m.modal)
 	m.modal.fields[0].input.SetValue("chi.ass")
 	m.modal.fields[1].input.SetValue("chi")
-	m.modal.fields[2].input.SetValue("简体中文")
+	m.modal.fields[2].input.SetValue("繁体中文")
 	press(&m, "ctrl+s")
 	require.Nil(t, m.modal, "ctrl+s 保存成功后应关闭弹窗")
-	require.Len(t, m.subs, 1)
-	assert.Equal(t, command.SubtitleOption{Suffix: "chi.ass", Lang: "chi", Title: "简体中文"}, m.subs[0])
+	require.Len(t, m.subs, 2)
+	assert.Equal(t, command.SubtitleOption{Suffix: "chi.ass", Lang: "chi", Title: "繁体中文"}, m.subs[1])
 }
 
 // TestModalEnterSavesOnLastField 验证末字段（含 bool）enter 直接保存（不循环回开头）。

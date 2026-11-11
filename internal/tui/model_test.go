@@ -336,6 +336,39 @@ func TestSubModalDefaultTrack(t *testing.T) {
 	press(&m, "esc")
 }
 
+func TestFormDefaultsStayAsPlaceholder(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops = command.Selection{Convert: true}
+	m.rebuildFields()
+	d := command.DefaultOption()
+	checks := map[string]string{
+		"input_path":    d.InputPath,
+		"input_format":  d.InputFormat,
+		"output_path":   d.OutputPath,
+		"output_format": d.OutputFormat,
+	}
+	for key, want := range checks {
+		f, ok := findField(&m.fields, key)
+		require.True(t, ok, key)
+		assert.Empty(t, f.input.Value(), "%s 默认值不应写成白色正文", key)
+		assert.Equal(t, want, f.input.Placeholder, key)
+		assert.Equal(t, want, f.resolved(), key)
+	}
+	opt, err := m.buildOption()
+	require.NoError(t, err)
+	assert.Equal(t, d.InputPath, opt.InputPath)
+	assert.Equal(t, d.InputFormat, opt.InputFormat)
+	assert.Equal(t, d.OutputPath, opt.OutputPath)
+	assert.Equal(t, d.OutputFormat, opt.OutputFormat)
+
+	path, _ := findField(&m.fields, "input_path")
+	path.input.SetValue("/videos")
+	opt, err = m.buildOption()
+	require.NoError(t, err)
+	assert.Equal(t, "/videos", opt.InputPath, "用户输入应覆盖默认值")
+}
+
 func TestFormEditingSwallowsGlobalKeys(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -360,7 +393,12 @@ func TestFormEditingSwallowsGlobalKeys(t *testing.T) {
 func TestTryStartRunValidation(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	// 未勾选任何操作
+	// 第一次 x 只进入任务列表，不校验、不入队。
+	press(&m, "x")
+	assert.Equal(t, panelRun, m.focus)
+	assert.Empty(t, m.featErr)
+	assert.False(t, m.running)
+	// 在任务列表再按 x 才校验。
 	press(&m, "x")
 	assert.NotEmpty(t, m.featErr, "未勾选操作应提示")
 	assert.Equal(t, panelOps, m.focus)
@@ -370,6 +408,8 @@ func TestTryStartRunValidation(t *testing.T) {
 	m.ops = command.Selection{AddFonts: true}
 	m.rebuildFields()
 	press(&m, "x")
+	assert.Equal(t, panelRun, m.focus, "进入任务列表仍不入队")
+	press(&m, "x")
 	assert.Equal(t, panelForm, m.focus, "校验失败应跳到参数面板")
 	assert.NotEmpty(t, m.statusMsg)
 	assert.False(t, m.running)
@@ -377,6 +417,7 @@ func TestTryStartRunValidation(t *testing.T) {
 	// 勾选添加字幕但字幕列表为空
 	m.ops = command.Selection{AddSubtitle: true}
 	m.rebuildFields()
+	press(&m, "x")
 	press(&m, "x")
 	assert.Equal(t, panelSubs, m.focus, "字幕为空应跳到字幕面板")
 	assert.False(t, m.running)
@@ -398,6 +439,36 @@ func TestPlanMsgStaleDiscard(t *testing.T) {
 	m = next.(model)
 	assert.True(t, m.previewDone)
 	require.Len(t, m.files, 1)
+}
+
+func TestEnterTaskListDoesNotEnqueue(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.ops.Convert = true
+	m.rebuildFields()
+	testQueue(t, &m)
+	m.plan, m.previewDone = testPlan("a.mkv"), true
+
+	press(&m, "5")
+	assert.Equal(t, panelRun, m.focus)
+	assert.Nil(t, m.modal)
+	assert.Empty(t, m.queue.Snapshot(), "进入任务面板不入队")
+	assert.NotContains(t, m.filePane(8), "a.mkv", "未入队不显示文件")
+	assert.NotContains(t, m.runBody(), "a.mkv")
+
+	press(&m, "enter")
+	assert.Nil(t, m.modal, "任务列表里按回车不入队")
+	assert.Empty(t, m.queue.Snapshot())
+
+	m.focus = panelOps
+	press(&m, "x")
+	assert.Equal(t, panelRun, m.focus)
+	assert.Empty(t, m.queue.Snapshot(), "从其他面板按 x 只进入任务列表")
+	press(&m, "x")
+	require.NotNil(t, m.modal, "入队前应弹出确认")
+	assert.Empty(t, m.queue.Snapshot())
+	press(&m, "enter")
+	assert.Len(t, m.queue.Snapshot(), 1, "弹窗确认后才入队")
 }
 
 func TestFormEscDoesNotQuitAndFocusKept(t *testing.T) {

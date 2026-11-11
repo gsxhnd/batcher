@@ -159,13 +159,24 @@ func TestExecutionRequiresLatestPreview(t *testing.T) {
 	testQueue(t, &m)
 	m.plan, m.previewDone, m.planLoading = testPlan("a.mkv"), true, true
 	press(&m, "x")
+	assert.Equal(t, panelRun, m.focus, "预览未就绪时 x 只进入任务列表")
 	assert.Empty(t, m.queue.Snapshot(), "预览未就绪不能入队")
 	m.planLoading = false
 	next, _ := m.Update(planMsg{seq: m.planSeq, plan: testPlanOut(t, "a.mkv")})
 	m = next.(model)
+	assert.Empty(t, m.queue.Snapshot(), "计划生成后仍不自动入队")
+	assert.NotContains(t, m.filePane(8), "a.mkv", "未入队不显示文件")
+	assert.NotContains(t, m.runBody(), "a.mkv")
+	press(&m, "enter")
+	assert.Empty(t, m.queue.Snapshot(), "回车不入队")
 	press(&m, "x")
+	require.NotNil(t, m.modal, "入队前应弹出确认")
+	assert.Equal(t, modalConfirm, m.modal.kind)
+	assert.Contains(t, m.modal.prompt, "源视频路径：./")
+	assert.Empty(t, m.queue.Snapshot(), "确认前不入队")
+	press(&m, "enter")
 	batches := m.queue.Snapshot()
-	require.Len(t, batches, 1, "最新预览生成后 x 入队")
+	require.Len(t, batches, 1, "弹窗确认后才入队")
 	seq := m.planSeq
 	next, _ = m.Update(planMsg{seq: seq, plan: testPlanOut(t, "不应替换.mkv")})
 	m = next.(model)
@@ -810,7 +821,19 @@ func TestTaskPanelXDoesNotEnqueue(t *testing.T) {
 	m.focus = panelOps
 	m.roster = nil
 	press(&m, "x")
-	assert.Len(t, m.queue.Snapshot(), 1, "离开任务列表后 x 仍可入队")
+	assert.Equal(t, panelRun, m.focus)
+	assert.Nil(t, m.modal)
+	assert.Empty(t, m.queue.Snapshot(), "进入任务列表不入队")
+	assert.NotContains(t, m.filePane(8), "a.mkv")
+	press(&m, "x")
+	require.NotNil(t, m.modal, "入队前应弹出确认")
+	assert.Empty(t, m.queue.Snapshot())
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	assert.Empty(t, m.queue.Snapshot(), "取消确认不入队")
+	press(&m, "x")
+	press(&m, "enter")
+	assert.Len(t, m.queue.Snapshot(), 1, "弹窗确认后才入队")
 }
 
 func TestRunBodySplitsFixedAndOutput(t *testing.T) {

@@ -60,10 +60,11 @@ var presetFieldDefs = []fieldDef{
 
 // field 保存表单项的运行时状态。
 type field struct {
-	def     fieldDef
-	input   textinput.Model
-	err     string
-	checked bool // bool 字段（fieldBool）的勾选状态
+	def      fieldDef
+	input    textinput.Model
+	err      string
+	checked  bool   // bool 字段（fieldBool）的勾选状态
+	fallback string // 输入为空时采用的默认值，以灰色占位显示，不写成白色正文
 }
 
 // newField 构建一个可编辑的表单项，默认提示文字为字段标签。
@@ -94,17 +95,31 @@ func fieldInputStyles() textinput.Styles {
 // Checked 返回 bool 字段的勾选状态；非 bool 字段恒为 false。
 func (f *field) Checked() bool { return f.def.kind == fieldBool && f.checked }
 
-// applyDefaults 按配置默认值填充字段，并设置该字段的提示文字。
+// useDefault 把默认值设为灰色占位。输入框保持空白，留空提交时再采用该值。
+func (f *field) useDefault(v string) {
+	f.fallback = v
+	f.input.Placeholder = v
+}
+
+// resolved 返回用户输入；空白时回退到灰色占位里的默认值。
+func (f *field) resolved() string {
+	if v := f.Value(); v != "" {
+		return v
+	}
+	return f.fallback
+}
+
+// applyDefaults 把有默认值的参数显示为灰色占位，并设置其余字段的提示文字。
 func (f *field) applyDefaults(d *command.VideoBatchOption) {
 	switch f.def.key {
 	case "input_path":
-		f.input.SetValue(d.InputPath)
+		f.useDefault(d.InputPath)
 	case "input_format":
-		f.input.SetValue(d.InputFormat)
+		f.useDefault(d.InputFormat)
 	case "output_path":
-		f.input.SetValue(d.OutputPath)
+		f.useDefault(d.OutputPath)
 	case "output_format":
-		f.input.SetValue(d.OutputFormat)
+		f.useDefault(d.OutputFormat)
 	case "advance":
 		f.input.Placeholder = "例如: -c:v h265 -crf 20 -c:a copy（可留空，ctrl+s 可保存为常用参数）"
 	case "fonts_path":
@@ -112,15 +127,27 @@ func (f *field) applyDefaults(d *command.VideoBatchOption) {
 	}
 }
 
-// applySubDefaults 设置字幕编辑字段的提示文字。
+// subtitleDefaults 是新增字幕留空时写入的值。
+// 后缀和语言跟命令默认值一致；标题沿用界面里原来的灰色提示「简体中文」。
+func subtitleDefaults() command.SubtitleOption {
+	d := command.DefaultOption()
+	return command.SubtitleOption{
+		Suffix: d.InputSubSuffix,
+		Lang:   d.InputSubLang,
+		Title:  "简体中文",
+	}
+}
+
+// applySubDefaults 把字幕默认值显示为灰色占位，留空保存时采用这些值。
 func (f *field) applySubDefaults() {
+	d := subtitleDefaults()
 	switch f.def.key {
 	case "sub_suffix":
-		f.input.Placeholder = "ass / srt；多语言文件可填 chi.ass / eng.ass"
+		f.useDefault(d.Suffix)
 	case "sub_lang":
-		f.input.Placeholder = "chi / eng / jpn（ISO 639-2 三字母码）"
+		f.useDefault(d.Lang)
 	case "sub_title":
-		f.input.Placeholder = "简体中文"
+		f.useDefault(d.Title)
 	}
 }
 
@@ -160,7 +187,7 @@ func (m *model) buildOption() (*command.VideoBatchOption, error) {
 	for i := range m.fields {
 		f := &m.fields[i]
 		f.err = ""
-		setStringOption(&opt, f.def.key, f.Value())
+		setStringOption(&opt, f.def.key, f.resolved())
 	}
 
 	// 添加字体时必须提供目录，避免执行时才发现未配置。

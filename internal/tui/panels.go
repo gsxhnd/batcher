@@ -328,7 +328,7 @@ func focusField(fields []field, focus int) tea.Cmd {
 
 // ---------- 面板 [5] 任务 ----------
 
-// updateRunPanel 任务面板的按键：切换文件、滚动视口；非执行态回车也开始执行。
+// updateRunPanel 任务面板的按键：切换文件、滚动视口。回车只操作已有任务，不入队。
 func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
@@ -383,9 +383,6 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 			}
 			m.toggleRosterExpand()
 			return nil
-		}
-		if !m.running && !m.editing && m.modal == nil {
-			return m.tryStartRun()
 		}
 		return nil
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
@@ -596,7 +593,8 @@ func (m *model) copyShownCommand() tea.Cmd {
 	return tea.SetClipboard(strings.Join(commands, "\n"))
 }
 
-// tryStartRun 校验配置并把计划加入任务队列：失败时把焦点跳到出错的面板并给出提示。
+// tryStartRun 在任务列表里确认参数后入队。进入任务列表本身不会调用这里。
+// 失败时把焦点跳到出错的面板并给出提示。
 // 队列执行中（含暂停等待决策）不得重复入队：同一时间只接受一个批次。
 func (m *model) tryStartRun() tea.Cmd {
 	if m.running {
@@ -608,7 +606,7 @@ func (m *model) tryStartRun() tea.Cmd {
 		m.setFocus(panelOps)
 		return nil
 	}
-	_, err := m.buildOption()
+	opt, err := m.buildOption()
 	if err != nil {
 		m.statusMsg = "× 校验失败：" + err.Error()
 		m.setFocus(panelForm)
@@ -642,7 +640,45 @@ func (m *model) tryStartRun() tea.Cmd {
 		m.setFocus(panelRun)
 		return nil
 	}
-	return m.enqueue(plan)
+	m.openConfirmModal("确认入队", parameterSummary(m.ops, opt, len(plan.Jobs)), func(m *model) tea.Cmd {
+		return m.enqueue(plan)
+	})
+	return nil
+}
+
+// parameterSummary 列出即将入队的有效参数，供确认弹窗展示。
+func parameterSummary(sel command.Selection, opt *command.VideoBatchOption, jobs int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "确认将 %d 个任务加入队列？\n", jobs)
+	fmt.Fprintf(&b, "操作：%s\n", displaySel(sel))
+	fmt.Fprintf(&b, "源视频路径：%s\n", opt.InputPath)
+	fmt.Fprintf(&b, "源视频后缀：%s\n", opt.InputFormat)
+	fmt.Fprintf(&b, "输出目录：%s\n", opt.OutputPath)
+	fmt.Fprintf(&b, "输出后缀：%s\n", opt.OutputFormat)
+	if sel.Convert {
+		adv := opt.Advance
+		if adv == "" {
+			adv = "（未填写）"
+		}
+		fmt.Fprintf(&b, "高级参数：%s\n", adv)
+	}
+	if sel.AddFonts {
+		fmt.Fprintf(&b, "字体文件夹：%s\n", opt.FontsPath)
+	}
+	if sel.AddSubtitle {
+		for i, sub := range opt.Subtitles {
+			mark := "否"
+			if sub.Default {
+				mark = "是"
+			}
+			title := sub.Title
+			if title == "" {
+				title = "（无标题）"
+			}
+			fmt.Fprintf(&b, "字幕 %d：.%s  %s  %s  默认:%s\n", i+1, sub.Suffix, sub.Lang, title, mark)
+		}
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // enqueue 把计划交给任务队列，队列空闲时立即开始执行。
