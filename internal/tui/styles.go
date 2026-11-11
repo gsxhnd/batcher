@@ -78,6 +78,20 @@ var (
 			Foreground(lipgloss.Color(cErr)).
 			Bold(true)
 
+	// errorToastStyle 右上角错误卡片：和面板一样的圆角边框，底色跟顶栏齐，只把字和边框标红。
+	errorToastStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(cErr)).
+			Background(lipgloss.Color(cHeaderBg)).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(cErr)).
+			BorderBackground(lipgloss.Color(cHeaderBg)).
+			Padding(0, 1)
+
+	// dragSelectStyle 鼠标拖选时盖住被选中的格子。
+	dragSelectStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("231")).
+			Background(lipgloss.Color(cSelectBg))
+
 	successStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(cOk)).
 			Bold(true)

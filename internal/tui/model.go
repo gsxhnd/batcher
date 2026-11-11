@@ -121,7 +121,8 @@ type model struct {
 	presets       []presets.Preset
 	presetCursor  int
 	manualAdvance string
-	statusMsg     string // 界面上的临时提示（保存成功等）
+	statusMsg     string        // 界面上的临时提示；以 × 开头的错误显示在右上角
+	sel           textSelection // 鼠标拖选的范围，松手后写入剪贴板
 
 	// 字幕列表
 	subs      []command.SubtitleOption
@@ -528,6 +529,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.enqueue(msg.plan)
 
 	case tea.WindowSizeMsg:
+		m.clearSelection()
 		m.width, m.height = msg.Width, msg.Height
 		m.resizePanes()
 		m.resizeModal()
@@ -614,11 +616,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseClickMsg:
+		return m, m.handleMouseClick(msg)
+	case tea.MouseMotionMsg:
+		return m, m.handleMouseMotion(msg)
+	case tea.MouseReleaseMsg:
+		return m, m.handleMouseRelease(msg)
 	case tea.MouseWheelMsg:
+		m.clearSelection()
 		return m, m.handleMouse(msg)
+	case tea.PasteMsg:
+		m.clearSelection()
 	}
 
 	if key, ok := msg.(tea.KeyPressMsg); ok {
+		m.clearSelection()
 		if key.String() == "ctrl+c" {
 			m.quitCleanup()
 			return m, tea.Quit
@@ -953,7 +965,7 @@ func (m model) previewHeadH() int {
 	if m.runErr != nil {
 		h++
 	}
-	if m.statusMsg != "" {
+	if m.statusMsg != "" && !isErrorNotice(m.statusMsg) {
 		h += 2 // statusSuffix 追加在视口之后的提示块
 	}
 	return h

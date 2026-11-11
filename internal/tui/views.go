@@ -20,7 +20,7 @@ import (
 
 // View 实现 tea.Model，将整页内容放入备用屏幕缓冲（全屏模式）。
 // 弹窗打开时通过图层叠加覆盖在主界面上。
-// 开启鼠标滚轮事件，用于任务面板命令/日志的滚动查看。
+// 开启鼠标：滚轮滚动日志，按住左键拖选文字（松手复制到剪贴板）。
 func (m model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
@@ -54,19 +54,68 @@ func (m model) render() string {
 		content = m.wideLayout()
 	}
 	assembled := lipgloss.JoinVertical(lipgloss.Left, m.header(), content, m.footer())
-	if m.modal == nil {
-		return assembled
+	var screen string
+	if m.modal != nil {
+		// 弹窗打开时主界面只作底，压暗并且不再接收按键和滚轮。
+		assembled = m.dimScreen(assembled)
+		modalBox := m.modalView()
+		x := max((m.width-lipgloss.Width(modalBox))/2, 0)
+		y := max((m.height-lipgloss.Height(modalBox))/2, 0)
+		screen = lipgloss.NewCompositor(
+			lipgloss.NewLayer(assembled),
+			lipgloss.NewLayer(modalBox).X(x).Y(y),
+		).Render()
+	} else {
+		screen = m.overlayErrorToast(assembled)
 	}
-	// 弹窗打开时主界面只作底，压暗并且不再接收按键和滚轮。
-	assembled = m.dimScreen(assembled)
-	modalBox := m.modalView()
-	x := max((m.width-lipgloss.Width(modalBox))/2, 0)
-	y := max((m.height-lipgloss.Height(modalBox))/2, 0)
-	comp := lipgloss.NewCompositor(
-		lipgloss.NewLayer(assembled),
-		lipgloss.NewLayer(modalBox).X(x).Y(y),
-	)
-	return comp.Render()
+	return m.paintSelection(screen)
+}
+
+// overlayErrorToast 把错误浮层贴到顶栏下一行的最右侧，并保持每一行仍是终端宽度。
+func (m model) overlayErrorToast(screen string) string {
+	toast := m.errorToast()
+	if toast == "" {
+		return screen
+	}
+	lines := strings.Split(screen, "\n")
+	toastLines := strings.Split(strings.TrimSuffix(toast, "\n"), "\n")
+	tw := 0
+	for _, tl := range toastLines {
+		tw = max(tw, lipgloss.Width(tl))
+	}
+	if tw == 0 {
+		return screen
+	}
+	if tw > m.width {
+		tw = m.width
+	}
+	// 右边留一列，避免卡片贴死屏幕边缘。
+	x := max(m.width-tw-1, 0)
+	pad := lipgloss.NewStyle().Background(lipgloss.Color(cHeaderBg))
+	for i, tl := range toastLines {
+		row := 1 + i
+		if row >= len(lines) {
+			break
+		}
+		if gap := tw - lipgloss.Width(tl); gap > 0 {
+			tl += pad.Render(strings.Repeat(" ", gap))
+		} else if lipgloss.Width(tl) > tw {
+			tl = ansi.Truncate(tl, tw, "")
+		}
+		left := ansi.Truncate(lines[row], x, "")
+		if gap := x - lipgloss.Width(left); gap > 0 {
+			left += strings.Repeat(" ", gap)
+		}
+		merged := left + tl
+		switch gap := m.width - lipgloss.Width(merged); {
+		case gap > 0:
+			merged += strings.Repeat(" ", gap)
+		case gap < 0:
+			merged = ansi.Truncate(merged, m.width, "")
+		}
+		lines[row] = merged
+	}
+	return strings.Join(lines, "\n")
 }
 
 // wideLayout 左侧任务列表 + 右侧任务详情。
@@ -122,7 +171,7 @@ func (m model) taskDetail() string {
 	var b strings.Builder
 	b.WriteString(titleLine("还没有任务") + "\n")
 	b.WriteString(subtitleStyle.Render("按 a 创建任务，按 p 管理转码预设") + "\n")
-	if m.statusMsg != "" {
+	if m.statusMsg != "" && !isErrorNotice(m.statusMsg) {
 		b.WriteString("\n  " + statusStyle.Render(m.statusMsg) + "\n")
 	}
 	return b.String()
@@ -456,7 +505,7 @@ func (m model) opsBody() string {
 	if m.featErr != "" {
 		b.WriteString("  " + errorStyle.Render("× "+m.featErr) + "\n")
 	}
-	return statusSuffix(m.statusMsg) + b.String()
+	return m.statusBlock() + b.String()
 }
 
 // presetsBody 预设面板：选中项详情与提示。
@@ -481,7 +530,7 @@ func (m model) presetsBody() string {
 		b.WriteString(subtitleStyle.Render("手动输入：enter 后在面板 [4] 直接编辑高级参数") + "\n\n")
 		b.WriteString("  " + descStyle.Render("ctrl+s 可把已填参数另存为预设") + "\n")
 	}
-	return statusSuffix(m.statusMsg) + b.String()
+	return m.statusBlock() + b.String()
 }
 
 // subsBody 字幕面板：列表详情与匹配说明。
@@ -505,7 +554,7 @@ func (m model) subsBody() string {
 		}
 		b.WriteString("  " + descStyle.Render("按 t 切换默认字幕流；播放器会默认加载 default 轨道") + "\n")
 	}
-	return statusSuffix(m.statusMsg) + b.String()
+	return m.statusBlock() + b.String()
 }
 
 // formBody 参数面板的主体：只显示左侧选中的那一项。
@@ -515,7 +564,7 @@ func (m model) formBody() string {
 	if len(m.fields) == 0 {
 		b.WriteString(titleLine("参数") + "\n")
 		b.WriteString(subtitleStyle.Render("没有可编辑的参数") + "\n")
-		return statusSuffix(m.statusMsg) + b.String()
+		return m.statusBlock() + b.String()
 	}
 	f := &m.fields[clamp(m.focusNo, 0, len(m.fields)-1)]
 	b.WriteString(titleLine(f.def.label) + "\n")
@@ -540,7 +589,7 @@ func (m model) formBody() string {
 	if m.planErr != nil {
 		b.WriteString("  " + errorStyle.Render("× "+m.planErr.Error()) + "\n")
 	}
-	return statusSuffix(m.statusMsg) + b.String()
+	return m.statusBlock() + b.String()
 }
 
 // fieldNote 是当前参数在主体里的一行说明。
@@ -634,7 +683,7 @@ func (m model) runBody() string {
 		} else {
 			b.WriteString(m.itemBody())
 		}
-		return statusSuffix(m.statusMsg) + b.String()
+		return m.statusBlock() + b.String()
 	}
 	switch {
 	case m.planLoading:
@@ -654,7 +703,7 @@ func (m model) runBody() string {
 	default:
 		b.WriteString("  " + descStyle.Render("配置变化时自动生成命令预览") + "\n")
 	}
-	return statusSuffix(m.statusMsg) + b.String()
+	return m.statusBlock() + b.String()
 }
 
 // statusSuffix 以独立块返回临时提示文本（为空时返回空串）。
@@ -663,6 +712,43 @@ func statusSuffix(msg string) string {
 		return ""
 	}
 	return "\n  " + statusStyle.Render(msg) + "\n"
+}
+
+// isErrorNotice 判断临时提示是不是错误。界面上的失败文案都以 × 开头。
+func isErrorNotice(msg string) bool {
+	return strings.HasPrefix(strings.TrimSpace(msg), "×")
+}
+
+// statusBlock 把普通提示留在面板正文里。错误改到右上角浮层，避免撑开固定行高。
+func (m model) statusBlock() string {
+	if isErrorNotice(m.statusMsg) {
+		return ""
+	}
+	return statusSuffix(m.statusMsg)
+}
+
+// errorToast 渲染右上角错误卡片。没有错误时返回空串。
+func (m model) errorToast() string {
+	msg := strings.TrimSpace(m.statusMsg)
+	if !isErrorNotice(msg) || m.width < 16 {
+		return ""
+	}
+	// 边框 2 列、内边距 2 列，再给屏幕右缘留 1 列。
+	maxInner := min(m.width-6, 40)
+	if maxInner < 8 {
+		return ""
+	}
+	if lipgloss.Width(msg) > maxInner*2 {
+		msg = ansi.Truncate(msg, maxInner*2, "…")
+	}
+	body := wrapText(msg, maxInner)
+	lines := strings.Split(body, "\n")
+	if len(lines) > 2 {
+		lines = lines[:2]
+		lines[1] = ansi.Truncate(lines[1], maxInner, "…")
+		body = strings.Join(lines, "\n")
+	}
+	return errorToastStyle.Render(body)
 }
 
 // progressBlock 渲染进度条与说明，行数与 runBarH 一致。

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/stretchr/testify/assert"
@@ -218,6 +219,40 @@ func TestDrawBoxWidthsAligned(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestErrorToastTopRight 以 × 开头的提示浮在右上角，普通提示仍留在面板里。
+func TestErrorToastTopRight(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 30
+	m.resizePanes()
+	m.statusMsg = "× 入队失败: 目录不存在"
+	out := m.render()
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	require.NotEmpty(t, lines)
+	for i, ln := range lines {
+		assert.Equal(t, m.width, lipgloss.Width(ln), "第 %d 行宽度不一致", i+1)
+	}
+	found := -1
+	for i, ln := range lines {
+		if strings.Contains(ansi.Strip(ln), "入队失败") {
+			found = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, found, "错误提示应出现在画面上")
+	assert.LessOrEqual(t, found, 2, "错误应靠近顶栏")
+	assert.GreaterOrEqual(t, found, 1)
+	assert.Contains(t, ansi.Strip(lines[found-1]), "╭", "错误提示应是圆角卡片")
+	stripped := ansi.Strip(lines[found])
+	idx := strings.Index(stripped, "入队失败")
+	assert.Greater(t, idx, m.width/2, "错误文本应靠右，实际列 %d: %q", idx, stripped)
+
+	m.statusMsg = "已重新排队"
+	info := ansi.Strip(m.render())
+	assert.Contains(t, info, "已重新排队")
+	assert.NotContains(t, info, "入队失败")
 }
 
 // TestRenderRowsUniform 整页渲染的每一行显示宽度都应等于终端宽度。
