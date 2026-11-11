@@ -44,6 +44,11 @@ func (m model) dimScreen(s string) string {
 const narrowWidth = 90
 
 func (m model) render() string {
+	return m.paintSelection(m.compose())
+}
+
+// compose 画出主界面、弹窗和错误卡片，不含鼠标选区高亮。
+func (m model) compose() string {
 	if m.width == 0 {
 		return "加载中..."
 	}
@@ -54,68 +59,73 @@ func (m model) render() string {
 		content = m.wideLayout()
 	}
 	assembled := lipgloss.JoinVertical(lipgloss.Left, m.header(), content, m.footer())
-	var screen string
 	if m.modal != nil {
 		// 弹窗打开时主界面只作底，压暗并且不再接收按键和滚轮。
 		assembled = m.dimScreen(assembled)
 		modalBox := m.modalView()
 		x := max((m.width-lipgloss.Width(modalBox))/2, 0)
 		y := max((m.height-lipgloss.Height(modalBox))/2, 0)
-		screen = lipgloss.NewCompositor(
+		return lipgloss.NewCompositor(
 			lipgloss.NewLayer(assembled),
 			lipgloss.NewLayer(modalBox).X(x).Y(y),
 		).Render()
-	} else {
-		screen = m.overlayErrorToast(assembled)
 	}
-	return m.paintSelection(screen)
-}
-
-// overlayErrorToast 把错误浮层贴到顶栏下一行的最右侧，并保持每一行仍是终端宽度。
-func (m model) overlayErrorToast(screen string) string {
 	toast := m.errorToast()
 	if toast == "" {
+		return assembled
+	}
+	// 右边留一列，避免卡片贴死屏幕边缘。
+	x := max(m.width-lipgloss.Width(toast)-1, 0)
+	return placeBlock(assembled, toast, x, 1, m.width)
+}
+
+// placeBlock 把一块内容贴到画面的 (x, y)，并保持每一行仍是 width 列。
+func placeBlock(screen, block string, x, y, width int) string {
+	if block == "" || width <= 0 || x >= width {
 		return screen
 	}
+	if x < 0 {
+		x = 0
+	}
 	lines := strings.Split(screen, "\n")
-	toastLines := strings.Split(strings.TrimSuffix(toast, "\n"), "\n")
+	blockLines := strings.Split(strings.TrimSuffix(block, "\n"), "\n")
 	tw := 0
-	for _, tl := range toastLines {
-		tw = max(tw, lipgloss.Width(tl))
+	for _, ln := range blockLines {
+		tw = max(tw, lipgloss.Width(ln))
 	}
 	if tw == 0 {
 		return screen
 	}
-	if tw > m.width {
-		tw = m.width
+	if room := width - x; tw > room {
+		tw = room
 	}
-	// 右边留一列，避免卡片贴死屏幕边缘。
-	x := max(m.width-tw-1, 0)
-	pad := lipgloss.NewStyle().Background(lipgloss.Color(cHeaderBg))
-	for i, tl := range toastLines {
-		row := 1 + i
-		if row >= len(lines) {
+	for i, tl := range blockLines {
+		row := y + i
+		if row < 0 || row >= len(lines) {
 			break
-		}
-		if gap := tw - lipgloss.Width(tl); gap > 0 {
-			tl += pad.Render(strings.Repeat(" ", gap))
-		} else if lipgloss.Width(tl) > tw {
-			tl = ansi.Truncate(tl, tw, "")
 		}
 		left := ansi.Truncate(lines[row], x, "")
 		if gap := x - lipgloss.Width(left); gap > 0 {
 			left += strings.Repeat(" ", gap)
 		}
-		merged := left + tl
-		switch gap := m.width - lipgloss.Width(merged); {
-		case gap > 0:
-			merged += strings.Repeat(" ", gap)
-		case gap < 0:
-			merged = ansi.Truncate(merged, m.width, "")
-		}
-		lines[row] = merged
+		lines[row] = fitCells(left+fitCells(tl, tw), width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// fitCells 把一行补齐或截断到 width 列。截断不加省略号，避免贴层时把旁边的格子挤掉。
+func fitCells(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	switch gap := width - lipgloss.Width(line); {
+	case gap == 0:
+		return line
+	case gap > 0:
+		return line + strings.Repeat(" ", gap)
+	default:
+		return ansi.Truncate(line, width, "")
+	}
 }
 
 // wideLayout 左侧任务列表 + 右侧任务详情。
@@ -727,28 +737,23 @@ func (m model) statusBlock() string {
 	return statusSuffix(m.statusMsg)
 }
 
-// errorToast 渲染右上角错误卡片。没有错误时返回空串。
+// errorToast 渲染右上角错误卡片，最多两行正文。没有错误时返回空串。
 func (m model) errorToast() string {
 	msg := strings.TrimSpace(m.statusMsg)
-	if !isErrorNotice(msg) || m.width < 16 {
-		return ""
-	}
 	// 边框 2 列、内边距 2 列，再给屏幕右缘留 1 列。
 	maxInner := min(m.width-6, 40)
-	if maxInner < 8 {
+	if !isErrorNotice(msg) || maxInner < 8 {
 		return ""
 	}
 	if lipgloss.Width(msg) > maxInner*2 {
 		msg = ansi.Truncate(msg, maxInner*2, "…")
 	}
-	body := wrapText(msg, maxInner)
-	lines := strings.Split(body, "\n")
+	lines := strings.Split(wrapText(msg, maxInner), "\n")
 	if len(lines) > 2 {
 		lines = lines[:2]
 		lines[1] = ansi.Truncate(lines[1], maxInner, "…")
-		body = strings.Join(lines, "\n")
 	}
-	return errorToastStyle.Render(body)
+	return errorToastStyle.Render(strings.Join(lines, "\n"))
 }
 
 // progressBlock 渲染进度条与说明，行数与 runBarH 一致。
