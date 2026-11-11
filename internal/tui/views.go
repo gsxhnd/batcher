@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -55,15 +56,11 @@ func (m model) render() string {
 	return comp.Render()
 }
 
-// wideLayout 左侧五个小面板 + 右侧内容区。
+// wideLayout 左侧任务列表 + 右侧任务详情。
 func (m model) wideLayout() string {
-	hs := m.panelHeights()
-	boxes := make([]string, 0, panelCount)
-	for p := panel(0); p < panelCount; p++ {
-		boxes = append(boxes, m.sidebarBox(p, hs[p]))
-	}
-	left := lipgloss.JoinVertical(lipgloss.Left, boxes...)
-	right := drawBox(m.rightW, m.panelTitle(m.focus), true, true, m.focusedBody(), m.bodyH()-2)
+	bodyH := m.bodyH() - 2
+	left := drawBox(m.leftW, m.taskListTitle(), true, true, m.filePane(bodyH), bodyH)
+	right := drawBox(m.rightW, "任务详情", true, true, m.taskDetail(), bodyH)
 	gutter := gutterColumn(max(lipgloss.Height(left), lipgloss.Height(right)))
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, gutter, right)
 }
@@ -81,13 +78,41 @@ func gutterColumn(h int) string {
 	return strings.Join(lines, "\n")
 }
 
-// narrowLayout 窄终端：只渲染当前面板，任务面板附带文件列表。
+// narrowLayout 窄终端：任务列表在上，详情在下，合成一列。
 func (m model) narrowLayout() string {
-	body := m.focusedBody()
+	body := m.taskDetail()
 	if h := m.narrowFilePaneH(); h > 0 {
-		body = m.filePane(h) + "\n\n" + body
+		body = m.filePane(h) + "\n" + body
 	}
-	return drawBox(m.width, m.panelTitle(m.focus), true, true, body, m.bodyH()-2)
+	return drawBox(m.width, m.taskListTitle(), true, true, body, m.bodyH()-2)
+}
+
+// taskListTitle 左侧列表标题，带上主任务数量。
+func (m model) taskListTitle() string {
+	n := 0
+	for _, row := range m.roster {
+		if row.itemID == "" && row.attempt == 0 {
+			n++
+		}
+	}
+	if n == 0 {
+		return "任务"
+	}
+	return fmt.Sprintf("任务（%d）", n)
+}
+
+// taskDetail 右侧主体：有任务时显示光标所在任务，否则提示如何创建。
+func (m model) taskDetail() string {
+	if len(m.roster) > 0 || m.running {
+		return m.runBody()
+	}
+	var b strings.Builder
+	b.WriteString(titleLine("还没有任务") + "\n")
+	b.WriteString(subtitleStyle.Render("按 a 创建任务，按 p 管理转码预设") + "\n")
+	if m.statusMsg != "" {
+		b.WriteString("\n  " + statusStyle.Render(m.statusMsg) + "\n")
+	}
+	return b.String()
 }
 
 // ---------- 顶栏与底栏 ----------
@@ -121,7 +146,18 @@ func (m model) headerStatus() string {
 		text = fmt.Sprintf("上次执行 %d/%d 成功，可修改后重跑", m.done, m.total)
 		style = stepOkStyle
 	default:
-		text = displaySel(m.ops)
+		n := 0
+		for _, row := range m.roster {
+			if row.itemID == "" && row.attempt == 0 {
+				n++
+			}
+		}
+		if n == 0 {
+			text = "按 a 创建任务"
+		} else {
+			text = fmt.Sprintf("%d 个任务", n)
+			style = stepOkStyle
+		}
 	}
 	return style.Padding(0, 1).Render(text)
 }
@@ -459,40 +495,116 @@ func (m model) subsBody() string {
 	return statusSuffix(m.statusMsg) + b.String()
 }
 
-// formBody 参数面板：表单字段（浏览态显示值，编辑态显示输入框）。
+// formBody 参数面板的主体：只显示左侧选中的那一项。
+// 源视频路径和字体文件夹下面再列出将要处理的文件。
 func (m model) formBody() string {
 	var b strings.Builder
-	b.WriteString(titleLine(displaySel(m.ops)+" · 参数") + "\n")
+	if len(m.fields) == 0 {
+		b.WriteString(titleLine("参数") + "\n")
+		b.WriteString(subtitleStyle.Render("没有可编辑的参数") + "\n")
+		return statusSuffix(m.statusMsg) + b.String()
+	}
+	f := &m.fields[clamp(m.focusNo, 0, len(m.fields)-1)]
+	b.WriteString(titleLine(f.def.label) + "\n")
 	if m.editing {
-		b.WriteString(subtitleStyle.Render("↑/↓/Tab 切换字段，enter 下一项，esc 完成") + "\n")
+		b.WriteString(subtitleStyle.Render("↑/↓/Tab 切换参数，enter 下一项，esc 完成") + "\n")
 	} else {
 		b.WriteString(subtitleStyle.Render("灰色为默认值，留空即使用；enter 进入编辑") + "\n")
 	}
-	b.WriteString("\n")
-
-	for i := range m.fields {
-		f := &m.fields[i]
-		f.input.SetWidth(inputWidth(m.rightW))
-		lbl := labelStyle.Render(f.def.label)
-		if i == m.focusNo {
-			lbl = labelFocusedStyle.Render(f.def.label)
-		}
-		b.WriteString("  " + lbl + " " + f.input.View() + "\n")
-		if f.err != "" {
-			b.WriteString("  " + strings.Repeat(" ", 18) + errorStyle.Render("× "+f.err) + "\n")
-		}
+	if note := fieldNote(f.def.key); note != "" {
+		b.WriteString(subtitleStyle.Render(note) + "\n")
 	}
-	if m.ops.AddSubtitle {
-		parts := make([]string, 0, len(m.subs))
-		for i, sub := range m.subs {
-			parts = append(parts, fmt.Sprintf("%d.%s(%s)", i+1, sub.Suffix, sub.Lang))
-		}
-		b.WriteString("\n  " + labelStyle.Render("字幕列表") + " " + descStyle.Render(strings.Join(parts, "  ")) + "\n")
+	b.WriteString("\n")
+	f.input.SetWidth(max(m.rightW-7, 8))
+	b.WriteString("  " + f.input.View() + "\n")
+	if f.err != "" {
+		b.WriteString("  " + errorStyle.Render("× "+f.err) + "\n")
+	}
+	if f.def.key == "input_path" || f.def.key == "fonts_path" {
+		b.WriteString("\n")
+		b.WriteString(m.dirFileBlock(f.def.key))
 	}
 	if m.planErr != nil {
 		b.WriteString("  " + errorStyle.Render("× "+m.planErr.Error()) + "\n")
 	}
 	return statusSuffix(m.statusMsg) + b.String()
+}
+
+// fieldNote 是当前参数在主体里的一行说明。
+func fieldNote(key string) string {
+	switch key {
+	case "input_path":
+		return "下面列出该文件夹里、后缀匹配的视频"
+	case "input_format":
+		return "不带点，例如 mp4"
+	case "output_path":
+		return "成品写入这个目录"
+	case "output_format":
+		return "不带点，例如 mkv"
+	case "advance":
+		return "放在全部输入之后、输出文件之前"
+	case "fonts_path":
+		return "下面列出该文件夹里的 ttf、otf、ttc"
+	default:
+		return ""
+	}
+}
+
+// dirFileBlock 渲染当前文件夹参数下的文件列表。
+func (m model) dirFileBlock(key string) string {
+	q, ok := m.dirQuery()
+	if !ok {
+		return "  " + descStyle.Render("先填写文件夹，下面会列出其中的文件") + "\n"
+	}
+	if m.dirLoading && m.dirKey != q.key {
+		return "  " + subtitleStyle.Render("正在读取文件…") + "\n"
+	}
+	if m.dirKey != q.key {
+		return "  " + descStyle.Render("正在准备文件列表…") + "\n"
+	}
+	if m.dirErr != nil {
+		return "  " + errorStyle.Render("× "+m.dirErr.Error()) + "\n"
+	}
+	title := "文件"
+	switch key {
+	case "input_path":
+		title = "视频"
+		if q.format != "" {
+			title = q.format
+		}
+	case "fonts_path":
+		title = "字体"
+	}
+	var b strings.Builder
+	b.WriteString("  " + sectionTitleStyle.Render(fmt.Sprintf("%s · %d", title, len(m.dirFiles))) + "\n")
+	if len(m.dirFiles) == 0 {
+		b.WriteString("  " + descStyle.Render("没有匹配的文件") + "\n")
+		return b.String()
+	}
+	const limit = 80
+	shown := m.dirFiles
+	rest := 0
+	if len(shown) > limit {
+		rest = len(shown) - limit
+		shown = shown[:limit]
+	}
+	width := max(m.rightW-4, 8)
+	for _, path := range shown {
+		b.WriteString("  " + truncateText(relativeTo(q.path, path), width) + "\n")
+	}
+	if rest > 0 {
+		b.WriteString("  " + descStyle.Render(fmt.Sprintf("还有 %d 个", rest)) + "\n")
+	}
+	return b.String()
+}
+
+// relativeTo 把扫描到的路径显示成相对文件夹的名字。
+func relativeTo(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return path
+	}
+	return rel
 }
 
 // runBody 任务面板：命令预览，或队列里的主任务 / 子任务主体。
@@ -548,7 +660,7 @@ func (m model) progressBlock() string {
 		return "  " + subtitleStyle.Render("正在启动...") + "\n"
 	}
 	if !m.running && !paused {
-		head := fmt.Sprintf("进度: %d/%d 完成，耗时 %s", settled, total, m.elapsedNow().Round(time.Second).String())
+		head := fmt.Sprintf("进度: %d/%d 完成，耗时 %s", settled, total, m.elapsed.Round(time.Second).String())
 		if failed > 0 {
 			head += fmt.Sprintf("，失败 %d", failed)
 		}
@@ -695,7 +807,7 @@ func (m model) batchOverviewBlock(row rosterRow) string {
 	if m.queue == nil {
 		return line("主任务") + line("") + line("") + line("")
 	}
-	snap, ok := m.queue.BatchCopy(row.batchID)
+	snap, ok := m.batchByID(row.batchID)
 	if !ok || snap == nil {
 		return line("主任务已不在队列中") + line("") + line("") + line("")
 	}
@@ -826,7 +938,7 @@ func truncateText(s string, w int) string {
 // filePane 渲染左侧列表。只有真正入队后才显示批次与子任务；未入队时不列出文件。
 func (m model) filePane(h int) string {
 	if len(m.roster) == 0 {
-		return descStyle.Render("队列为空")
+		return descStyle.Render("暂无任务，按 a 创建")
 	}
 	rows := make([]string, 0, len(m.roster))
 	for i, row := range m.roster {
@@ -1022,33 +1134,26 @@ func (m model) footer() string {
 			hints = []string{"enter 确认", "esc 取消", "? 快捷键"}
 		default:
 			hints = []string{"↑/↓/Tab 切换", "enter 下一项/保存", "esc 取消", "? 快捷键"}
-			if m.modal.kind == modalSub {
+			switch m.modal.kind {
+			case modalSub:
 				hints = []string{"↑/↓/Tab 切换", "enter 下一项/保存", "space 切换默认轨道", "esc 取消"}
+			case modalTask:
+				hints = []string{"↑/↓ 切换", "space 勾选", "ctrl+n 加字幕", "ctrl+s 创建", "esc 取消"}
+			case modalPresetList:
+				hints = []string{"↑/↓ 选择", "a 新增", "e 编辑", "d 删除", "J/K 排序", "esc 关闭"}
 			}
 		}
 	case m.outputFocus:
 		hints = []string{"↑/↓ 滚动输出", "esc 返回", "y 复制"}
-	case m.editing:
-		hints = []string{"↑/↓/Tab 切换", "enter 下一项", "esc 完成", "ctrl+s 另存预设"}
-	case m.running || (m.focus == panelRun && m.queueViewActive()):
-		hints = []string{"↑/↓ 切换", "r 重试任务", "d 删除子任务/主任务", "c 取消任务", "s 跳过", "a 中止", "y 复制", "f 跟随"}
-		if m.running {
+	case m.running || m.queueViewActive():
+		hints = []string{"↑/↓ 切换", "r 重试", "d 删除", "c 取消", "s 跳过", "x 中止", "y 复制", "f 跟随"}
+		if m.running || m.pausedBatch != "" {
 			hints = append(hints, "q 取消执行")
 		} else {
-			hints = append(hints, "? 帮助", "q 退出")
+			hints = append(hints, "a 新建", "p 预设", "? 帮助")
 		}
-	case m.focus == panelOps:
-		hints = []string{"space 勾选", "2-4 配置面板", "? 快捷键", "x 进入任务", "q 退出"}
-	case m.focus == panelPresets:
-		hints = []string{"↑/↓ 选择", "enter 使用", "n 新增", "e 编辑", "d 删除", "? 快捷键"}
-	case m.focus == panelSubs:
-		hints = []string{"↑/↓ 选择", "n 新增", "e 编辑", "t 切换默认轨道", "d 删除", "? 快捷键"}
-	case m.focus == panelForm:
-		hints = []string{"↑/↓ 选择字段", "enter 编辑", "ctrl+s 另存预设", "? 快捷键"}
-	case m.focus == panelRun:
-		hints = []string{"↑/↓ 切换文件", "x 确认入队", "y 复制命令", "pgup/pgdn 滚动", "? 快捷键", "q 退出"}
 	default:
-		hints = []string{"1-5/tab 切面板", "? 快捷键", "q 退出"}
+		hints = []string{"a 新建任务", "p 转码预设", "↑/↓ 选择任务", "? 帮助", "q 退出"}
 	}
 	divider := dividerStyle.Render(strings.Repeat("─", max(m.width, 1)))
 	desc := helpDescStyle.Background(lipgloss.Color(cHeaderBg))

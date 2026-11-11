@@ -2,7 +2,6 @@ package task
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -138,7 +137,9 @@ func TestQueueRunsRealMediaToCompletion(t *testing.T) {
 	assert.False(t, done.Items[0].PartialOutput)
 	assert.Greater(t, done.Items[0].DurationMs, int64(0))
 	assert.FileExists(t, done.Items[0].Output)
-	assert.FileExists(t, done.RecordPath())
+	onDisk, err := LoadTask(done.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusDone, onDisk.Status)
 	assert.True(t, col.has(QueueBatchStarted))
 	assert.True(t, col.has(QueueItemStarted))
 	assert.True(t, col.has(QueueItemDone))
@@ -461,7 +462,6 @@ func TestDiscardPausesBatchMarksCanceledAndRemoves(t *testing.T) {
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
 	batchID := b.ID
-	recordPath := b.RecordPath()
 	waitPaused(t, col)
 
 	require.NoError(t, q.Discard(batchID))
@@ -475,7 +475,7 @@ func TestDiscardPausesBatchMarksCanceledAndRemoves(t *testing.T) {
 	for _, s := range snapshot {
 		assert.NotEqual(t, batchID, s.ID)
 	}
-	onDisk, err := Load(recordPath)
+	onDisk, err := LoadTask(batchID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCanceled, onDisk.Status)
 	for _, it := range onDisk.Items {
@@ -653,7 +653,7 @@ func TestQueueRecordSavedAfterEachItem(t *testing.T) {
 	require.Equal(t, StatusDone, done.Status)
 	q.Stop() // 等消费者完成最后一次落盘
 
-	onDisk, err := Load(done.RecordPath())
+	onDisk, err := LoadTask(done.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusDone, onDisk.Status)
 	assert.Equal(t, StatusDone, onDisk.Items[0].Status)
@@ -785,8 +785,5 @@ func TestQueueCanceledBeforeStart(t *testing.T) {
 	if ok {
 		assert.NotEqual(t, StatusRunning, s)
 	}
-	snap, _ := q.BatchCopy(batchID)
-	if snap != nil {
-		_ = os.Remove(snap.RecordPath())
-	}
+	_, _ = q.BatchCopy(batchID)
 }

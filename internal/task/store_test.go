@@ -2,8 +2,9 @@ package task
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,69 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// memStore 是测试用的内存任务存储，避免 task 测试再去打开 bbolt（会和 store 包形成导入环）。
+type memStore struct {
+	mu    sync.Mutex
+	tasks map[string]*Batch
+}
+
+func (s *memStore) SaveTask(b *Batch) error {
+	if b == nil || b.ID == "" {
+		return fmt.Errorf("任务 ID 不能为空")
+	}
+	cp, err := CloneBatch(b)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tasks == nil {
+		s.tasks = map[string]*Batch{}
+	}
+	s.tasks[b.ID] = cp
+	return nil
+}
+
+func (s *memStore) LoadTask(id string) (*Batch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.tasks[id]
+	if !ok {
+		return nil, errNotFound(id)
+	}
+	return CloneBatch(b)
+}
+
+func (s *memStore) ListTasks() ([]*Batch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Batch, 0, len(s.tasks))
+	for _, b := range s.tasks {
+		cp, err := CloneBatch(b)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cp)
+	}
+	return out, nil
+}
+
+func (s *memStore) DeleteTask(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tasks, id)
+	return nil
+}
+
+type errNotFound string
+
+func (e errNotFound) Error() string { return "未找到任务 " + string(e) }
+
+func TestMain(m *testing.M) {
+	BindStore(&memStore{})
+	os.Exit(m.Run())
+}
 
 func sampleBatch(t *testing.T) *Batch {
 	t.Helper()
@@ -27,23 +91,23 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	b.Items[0].Error = "退出码 1"
 	b.Items[0].DurationMs = 1500
 	b.Items[0].AddStderr("Invalid data found")
-	assert.NoDirExists(t, b.OutputDir, "保存前输出目录尚未创建")
+	assert.NoDirExists(t, b.OutputDir, "保存任务不应创建输出目录")
 
 	require.NoError(t, b.Save())
-	assert.Equal(t, filepath.Join(b.OutputDir, ".batcher-"+b.ID+".json"), b.RecordPath())
-	assert.FileExists(t, b.RecordPath())
-
-	got, err := Load(b.RecordPath())
+	got, err := LoadTask(b.ID)
 	require.NoError(t, err)
 	assert.Equal(t, b, got)
 }
 
 func TestRecordJSONShape(t *testing.T) {
 	b := sampleBatch(t)
+	b.ID = "20261110-080001-shape"
 	require.NoError(t, b.Save())
-	data, err := os.ReadFile(b.RecordPath())
+	got, err := LoadTask(b.ID)
 	require.NoError(t, err)
 
+	data, err := json.Marshal(got)
+	require.NoError(t, err)
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(data, &raw))
 	assert.EqualValues(t, recordVersion, raw["version"])
@@ -64,48 +128,46 @@ func TestRecordJSONShape(t *testing.T) {
 	assert.NotContains(t, option, "OnEvent")
 }
 
-func TestSaveLeavesOnlyTheRecord(t *testing.T) {
+func TestSaveOverwritesSameTask(t *testing.T) {
 	b := sampleBatch(t)
+	b.ID = "20261110-080002-overwrite"
 	for i := range 3 {
 		b.Items[0].Attempts = i
 		require.NoError(t, b.Save())
 	}
-	entries, err := os.ReadDir(b.OutputDir)
-	require.NoError(t, err)
-	require.Len(t, entries, 1, "原子替换后不能遗留临时文件")
-	assert.Equal(t, filepath.Base(b.RecordPath()), entries[0].Name())
-
-	got, err := Load(b.RecordPath())
+	got, err := LoadTask(b.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 2, got.Items[0].Attempts)
+	assert.NoDirExists(t, b.OutputDir)
 }
 
-func TestSaveRejectsInvalidOutputDir(t *testing.T) {
+func TestSaveRequiresStore(t *testing.T) {
+	prev := currentStore()
+	BindStore(nil)
+	t.Cleanup(func() { BindStore(prev) })
 	b := sampleBatch(t)
-	b.OutputDir = ""
 	assert.Error(t, b.Save())
-
-	file := filepath.Join(t.TempDir(), "占用")
-	require.NoError(t, os.WriteFile(file, nil, 0o644))
-	b.OutputDir = file
-	assert.Error(t, b.Save())
+	_, err := LoadTask(b.ID)
+	assert.Error(t, err)
 }
 
 func TestLoadRejectsBadRecords(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, content string) string {
-		path := filepath.Join(dir, name)
-		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
-		return path
-	}
-	_, err := Load(filepath.Join(dir, "不存在.json"))
-	assert.ErrorIs(t, err, os.ErrNotExist)
-	_, err = Load(write("坏.json", "{不是 json"))
-	assert.ErrorContains(t, err, "解析任务记录")
-	_, err = Load(write("无版本.json", `{"id":"x"}`))
-	assert.ErrorContains(t, err, "版本")
-	_, err = Load(write("未来.json", `{"version":99}`))
-	assert.ErrorContains(t, err, "版本")
+	_, err := LoadTask("不存在的任务")
+	assert.ErrorContains(t, err, "未找到任务")
+}
+
+func TestRecoverPersistsInterruptedStatus(t *testing.T) {
+	b := sampleBatch(t)
+	b.ID = "20261110-080003-recover"
+	b.Status = StatusRunning
+	b.Items[0].Status = StatusRunning
+	require.NoError(t, b.Save())
+
+	require.NoError(t, RecoverStored())
+	got, err := LoadTask(b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusInterrupted, got.Status)
+	assert.Equal(t, StatusInterrupted, got.Items[0].Status)
 }
 
 func TestMarkInterrupted(t *testing.T) {
@@ -132,21 +194,4 @@ func TestMarkInterrupted(t *testing.T) {
 	paused.Status = StatusPaused
 	assert.True(t, paused.MarkInterrupted())
 	assert.Equal(t, StatusInterrupted, paused.Status)
-}
-
-func TestRecoverPersistsInterruptedStatus(t *testing.T) {
-	b := sampleBatch(t)
-	b.Status = StatusRunning
-	b.Items[0].Status = StatusRunning
-	require.NoError(t, b.Save())
-
-	got, err := Recover(b.RecordPath())
-	require.NoError(t, err)
-	assert.Equal(t, StatusInterrupted, got.Status)
-	assert.Equal(t, StatusInterrupted, got.Items[0].Status)
-
-	onDisk, err := Load(b.RecordPath())
-	require.NoError(t, err)
-	assert.Equal(t, StatusInterrupted, onDisk.Status)
-	assert.Equal(t, StatusInterrupted, onDisk.Items[0].Status)
 }

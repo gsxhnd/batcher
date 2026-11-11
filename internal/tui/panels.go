@@ -128,7 +128,11 @@ func (m *model) deletePreset(idx int) tea.Cmd {
 		m.manualAdvance = ""
 		m.applyAdvanceToForm()
 	}
-	m.presetCursor = min(m.presetCursor, m.presetCount()-1)
+	m.presetCursor = min(m.presetCursor, max(m.presetManageCount()-1, 0))
+	if m.managePresets {
+		m.openPresetList()
+		return nil
+	}
 	return m.schedulePlan(planDebounceDelay)
 }
 
@@ -233,8 +237,10 @@ func (m *model) updateFormPanel(msg tea.Msg) tea.Cmd {
 	switch key.String() {
 	case "up", "k":
 		m.focusNo = clamp(m.focusNo-1, 0, len(m.fields)-1)
+		return m.scheduleDirList(0)
 	case "down", "j":
 		m.focusNo = clamp(m.focusNo+1, 0, len(m.fields)-1)
+		return m.scheduleDirList(0)
 	case "enter":
 		return m.beginFormEdit()
 	case "ctrl+s":
@@ -258,17 +264,17 @@ func (m *model) updateFormEdit(msg tea.Msg) tea.Cmd {
 		return m.schedulePlan(0)
 	case "tab", "down":
 		m.focusNo = (m.focusNo + 1) % len(m.fields)
-		return focusField(m.fields, m.focusNo)
+		return tea.Batch(focusField(m.fields, m.focusNo), m.scheduleDirList(0))
 	case "shift+tab", "up":
 		m.focusNo = (m.focusNo - 1 + len(m.fields)) % len(m.fields)
-		return focusField(m.fields, m.focusNo)
+		return tea.Batch(focusField(m.fields, m.focusNo), m.scheduleDirList(0))
 	case "enter":
 		if m.focusNo == len(m.fields)-1 {
 			m.blurForm()
 			return m.schedulePlan(0)
 		}
 		m.focusNo++
-		return focusField(m.fields, m.focusNo)
+		return tea.Batch(focusField(m.fields, m.focusNo), m.scheduleDirList(0))
 	default:
 		return m.updateFormInput(msg)
 	}
@@ -286,7 +292,11 @@ func (m *model) updateFormInput(msg tea.Msg) tea.Cmd {
 	if f.def.key == "advance" {
 		m.manualAdvance = f.input.Value()
 	}
-	return tea.Batch(cmd, m.schedulePlan(planDebounceDelay))
+	cmds := []tea.Cmd{cmd, m.schedulePlan(planDebounceDelay)}
+	if f.def.key == "input_path" || f.def.key == "fonts_path" {
+		cmds = append(cmds, m.scheduleDirList(planDebounceDelay))
+	}
+	return tea.Batch(cmds...)
 }
 
 // saveAdvancePreset 把当前“高级自定义参数”保存为常用预设（自定义预设文件）。
@@ -421,7 +431,7 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 
 // runTaskKeys 处理队列视图下的任务操作。按光标所在行分发：
 // r 重试（暂停中的失败子任务，或已结束主任务里失败/取消的子任务）；
-// d 删除子任务或整个主任务；c 取消主任务；暂停时 s 跳过、a 中止。
+// d 删除子任务或整个主任务；c 取消主任务；暂停时 s 跳过、x 中止。
 // 返回是否消费了该按键。
 func (m *model) runTaskKeys(key string) bool {
 	if m.queue == nil {
@@ -451,7 +461,7 @@ func (m *model) runTaskKeys(key string) bool {
 		return m.retryFocused(row)
 	case "s":
 		return m.pauseDecision(row, task.DecisionSkip, "已发送跳过指令")
-	case "a":
+	case "x":
 		return m.pauseDecision(row, task.DecisionAbort, "已发送中止指令")
 	default:
 		return false
@@ -469,6 +479,14 @@ func (m *model) retryFocused(row rosterRow) bool {
 		return true
 	}
 	if err := m.queue.RetryBatch(row.batchID); err != nil {
+		if saved, ok := m.batchByID(row.batchID); ok {
+			if err2 := m.queue.Requeue(saved); err2 != nil {
+				m.statusMsg = "× 重试失败: " + err2.Error()
+				return true
+			}
+			m.statusMsg = "已重新排队"
+			return true
+		}
 		m.statusMsg = "× 重试失败: " + err.Error()
 		return true
 	}
@@ -493,19 +511,35 @@ func (m *model) pauseDecision(row rosterRow, d task.PauseDecision, msg string) b
 // deleteFocused 删除光标所在的子任务，或把整个主任务移出队列。
 func (m *model) deleteFocused(row rosterRow) bool {
 	if row.itemID == "" {
+		if _, inQueue := m.queue.BatchCopy(row.batchID); !inQueue {
+			if m.db != nil {
+				if err := m.db.DeleteTask(row.batchID); err != nil {
+					m.statusMsg = "× 删除失败: " + err.Error()
+					return true
+				}
+			}
+			m.statusMsg = "已删除任务"
+			m.syncRoster()
+			return true
+		}
+		if m.forget == nil {
+			m.forget = map[string]struct{}{}
+		}
+		m.forget[row.batchID] = struct{}{}
 		if err := m.queue.Discard(row.batchID); err != nil {
+			delete(m.forget, row.batchID)
 			m.statusMsg = "× 删除失败: " + err.Error()
 			return true
 		}
 		if m.pausedBatch == row.batchID {
-			m.clearPause("已删除任务（记录文件保留在输出目录）")
+			m.clearPause("已删除任务")
 			return true
 		}
-		m.statusMsg = "已删除任务（记录文件保留在输出目录）"
+		m.statusMsg = "已删除任务"
 		return true
 	}
 	pausedItem := false
-	if snap, ok := m.queue.BatchCopy(row.batchID); ok && snap.Status == task.StatusPaused {
+	if snap, ok := m.batchByID(row.batchID); ok && snap.Status == task.StatusPaused {
 		for _, it := range snap.Items {
 			if it.ID == row.itemID && it.Status == task.StatusFailed {
 				pausedItem = true
@@ -540,7 +574,7 @@ func (m *model) cancelFocused(row rosterRow) bool {
 
 // batchCommands 返回指定批次全部子任务的完整命令行。
 func (m *model) batchCommands(batchID string) []string {
-	snap, ok := m.queue.BatchCopy(batchID)
+	snap, ok := m.batchByID(batchID)
 	if !ok {
 		return nil
 	}
@@ -610,7 +644,7 @@ func (m *model) tryStartRun() tea.Cmd {
 	if err != nil {
 		m.statusMsg = "× 校验失败：" + err.Error()
 		m.setFocus(panelForm)
-		return nil
+		return m.scheduleDirList(0)
 	}
 	if m.ops.AddSubtitle && len(m.subs) == 0 {
 		m.statusMsg = "× 已勾选添加字幕，请至少添加一条（面板 3 按 n）"
@@ -685,6 +719,10 @@ func parameterSummary(sel command.Selection, opt *command.VideoBatchOption, jobs
 func (m *model) enqueue(plan *command.BatchPlan) tea.Cmd {
 	if m.queue == nil {
 		m.statusMsg = "× 队列未就绪，请重启程序"
+		return nil
+	}
+	if m.running {
+		m.statusMsg = "队列正在执行，当前任务结束后再创建"
 		return nil
 	}
 	b, err := m.queue.Enqueue(plan, m.ops)

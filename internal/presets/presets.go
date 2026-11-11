@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gsxhnd/batcher/internal/commandline"
 )
@@ -77,22 +78,53 @@ func FilePath() (string, error) {
 	return filepath.Join(dir, PresetFile), nil
 }
 
-// Load 读取用户预设列表；文件不存在时返回空列表（非错误）。
+// Store 持久化自定义预设。由 bbolt 实现，界面启动时 Bind。
+type Store interface {
+	LoadPresets() ([]Preset, error)
+	SavePresets([]Preset) error
+}
+
+var (
+	storeMu sync.RWMutex
+	active  Store
+)
+
+// Bind 设置预设存储。传 nil 时 Load 返回空列表，Save 返回错误。
+func Bind(s Store) {
+	storeMu.Lock()
+	active = s
+	storeMu.Unlock()
+}
+
+func currentStore() Store {
+	storeMu.RLock()
+	defer storeMu.RUnlock()
+	return active
+}
+
+// Load 读取自定义预设。存储未接上时返回空列表。
 func Load() ([]Preset, error) {
-	dir, err := Dir()
+	s := currentStore()
+	if s == nil {
+		return nil, nil
+	}
+	list, err := s.LoadPresets()
 	if err != nil {
 		return nil, err
 	}
-	return LoadFrom(dir)
+	return normalizePresets(list), nil
 }
 
-// Save 覆写保存用户预设列表（自动创建预设文件夹、去重、保序）。
-func Save(presets []Preset) error {
-	dir, err := Dir()
-	if err != nil {
-		return err
+// Save 去重后写入当前预设存储，保序。
+func Save(list []Preset) error {
+	s := currentStore()
+	if s == nil {
+		return fmt.Errorf("预设存储未初始化")
 	}
-	return SaveTo(dir, presets)
+	if err := s.SavePresets(normalizePresets(list)); err != nil {
+		return fmt.Errorf("保存预设: %w", err)
+	}
+	return nil
 }
 
 // LoadFrom 从指定目录读取用户预设列表；文件不存在时返回空列表（非错误）。

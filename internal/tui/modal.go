@@ -17,10 +17,12 @@ import (
 type modalKind int
 
 const (
-	modalPreset  modalKind = iota // 转码参数预设的新增/编辑（名称 + 参数）
-	modalSub                      // 单条字幕的新增/编辑（后缀/语言/标题）
-	modalConfirm                  // 通用确认（删除等），enter 确认 esc 取消
-	modalHelp                     // 快捷键帮助（? 键开关）
+	modalPreset     modalKind = iota // 转码参数预设的新增/编辑（名称 + 参数）
+	modalSub                         // 单条字幕的新增/编辑（后缀/语言/标题）
+	modalConfirm                     // 通用确认（删除等），enter 确认 esc 取消
+	modalHelp                        // 快捷键帮助（? 键开关）
+	modalTask                        // 新建任务：全部字段在同一个弹窗里
+	modalPresetList                  // 转码预设管理列表
 )
 
 // modal 是覆盖在主界面上的浮层。非空时全部按键由弹窗处理，
@@ -126,50 +128,38 @@ func helpText() string {
 			helpDescStyle.Render(v) + "\n")
 	}
 
-	row("1-5 / tab", "切换面板（未启用的自动跳过）")
-	row("x", "其他面板：进入任务列表（不入队）；任务列表：确认参数后入队")
+	row("a", "新建任务")
+	row("p", "转码预设管理")
 	row("?", "打开/关闭本帮助")
-	row("q", "退出；执行中=取消当前批处理")
+	row("q", "退出；执行中或暂停中=取消/中止当前任务")
 	row("ctrl+c", "强制退出并中止任务")
 
-	section("[1] 操作")
-	row("space / enter", "勾选 / 取消勾选当前操作")
-	row("↑/↓", "在操作之间移动")
-	section("[2] 转码预设")
-	row("↑/↓", "选择预设（内置 → 自定义 → 手动输入）")
-	row("enter", "使用所选参数（同步到面板 4）")
+	section("任务列表")
+	row("↑/↓", "在主任务、子任务和每一次之间移动")
+	row("enter", "折叠/展开主任务或某一次；进入输出后 esc 返回")
+	row("y", "复制当前子任务的命令（主任务行=整个任务全部命令）")
+	row("r", "重试失败的子任务；已结束或历史任务重新排队")
+	row("d", "删除子任务，或把主任务从列表和数据库移除")
+	row("c", "取消主任务：执行中的停止，等待中的不再开始")
+	row("s / x", "暂停时：跳过当前子任务 / 中止当前主任务")
+	row("f", "跳回正在执行的子任务")
+	row("pgup/pgdn/滚轮", "滚动命令和日志")
+
+	section("新建任务")
+	row("a", "打开创建弹窗，所有参数在同一个弹窗里填写")
+	row("space", "勾选转码、字幕、字体")
+	row("←/→", "切换转码预设，并填入高级参数")
+	row("ctrl+n / ctrl+d", "增加或删除一条字幕")
+	row("enter", "下一项；最后一项直接创建")
+	row("ctrl+s", "任意位置创建任务")
+	row("esc", "取消")
+
+	section("转码预设")
+	row("p", "打开预设管理")
 	row("a", "新增；选中内置预设时复制为自定义")
 	row("e", "编辑自定义预设（内置只读）")
 	row("d", "删除自定义预设（弹窗确认）")
 	row("J / K", "下移 / 上移自定义预设")
-	row("弹窗", "enter 下一项（末项保存）· ctrl+s 保存 · esc 取消")
-	section("[3] 字幕轨道")
-	row("n", "新增字幕（弹窗）")
-	row("e / enter", "编辑选中的字幕")
-	row("t", "标记/取消默认字幕流（-disposition default）")
-	row("d", "删除字幕（弹窗确认）")
-	row("弹窗", "灰色为默认值，留空即使用；enter 下一项（末项保存）· ctrl+s 保存 · esc 取消")
-	section("[4] 参数")
-	row("enter", "进入编辑 / 下一项；esc 完成")
-	row("↑/↓", "切换字段（编辑时=在字段间移动）")
-	row("默认值", "路径和后缀的灰色文字即默认值，留空即使用")
-	row("ctrl+s", "把高级参数另存为预设")
-	section("[5] 任务")
-	row("↑/↓", "在主任务与子任务之间移动")
-	row("enter", "队列中折叠/展开或进入输出；预览中不入队")
-	row("esc", "退出输出查看（q 不返回这一层）")
-	row("x", "未入队时弹出确认，确认后才入队；已在队列中不会新建")
-	row("f", "跳回正在执行的子任务（执行中）")
-	row("y", "复制当前子任务的命令（主任务行=整个任务全部命令）")
-	row("r", "重试当前失败的子任务；主任务行重试整个任务，可多次重试")
-	row("d", "删除子任务，或把主任务移出队列（记录文件保留）")
-	row("c", "取消主任务：执行中的停止，等待中的不再开始")
-	row("s / a", "暂停时：跳过当前子任务 / 中止当前主任务")
-	row("pgup/pgdn/滚轮", "滚动命令/日志（向上滚动暂停跟随新输出）")
-	section("执行中")
-	row("完整命令", "固定显示在主体内容最上方，长命令自动折行")
-	row("↑/↓", "切换查看文件")
-	row("q", "取消当前批处理（界面保留）")
 	if version != "" || buildDate != "" || gitCommit != "" {
 		section("构建信息")
 		if version != "" {
@@ -192,10 +182,15 @@ func (m model) modalView() string {
 	if md.kind != modalHelp {
 		w = min(64, max(m.width-4, 12))
 	}
+	if md.kind == modalTask {
+		w = min(84, max(m.width-4, 24))
+	}
 	var content string
 	switch md.kind {
 	case modalHelp:
 		return drawBox(w, md.title+"（↑/↓ 滚动，esc 关闭）", true, true, md.vp.View(), -1)
+	case modalPresetList:
+		return drawBox(w, md.title, true, true, m.presetListContent(), -1)
 	case modalConfirm:
 		var b strings.Builder
 		for _, line := range strings.Split(md.prompt, "\n") {
@@ -211,7 +206,6 @@ func (m model) modalView() string {
 				lbl = labelFocusedStyle.Render(f.def.label)
 			}
 			if f.def.kind == fieldBool {
-				// 勾选型字段渲染为复选框，space 切换，不吃文本输入。
 				mark := uncheckedStyle.Render("[ ]")
 				if f.checked {
 					mark = checkedStyle.Render("[✔]")
@@ -222,6 +216,14 @@ func (m model) modalView() string {
 				}
 				b.WriteString("  " + lbl + " " + mark + " " + light.Render(boolHint()))
 				b.WriteString("\n")
+				continue
+			}
+			if f.def.kind == fieldChoice {
+				label := "（无）"
+				if f.choice >= 0 && f.choice < len(f.options) {
+					label = f.options[f.choice]
+				}
+				b.WriteString("  " + lbl + " " + codeStyle.Render(label) + " " + descStyle.Render("←/→ 切换") + "\n")
 				continue
 			}
 			f.input.SetWidth(inputWidth(w))
@@ -236,7 +238,11 @@ func (m model) modalView() string {
 		if md.kind == modalSub {
 			b.WriteString("  " + descStyle.Render("灰色为默认值，留空即使用；多语言文件可填 chi.ass") + "\n")
 		}
-		b.WriteString("  " + descStyle.Render("enter 下一项（末项保存）· ctrl+s 保存 · esc 取消") + "\n")
+		if md.kind == modalTask {
+			b.WriteString("  " + descStyle.Render("ctrl+n 增加字幕 · ctrl+d 删除当前字幕 · ctrl+s 创建") + "\n")
+		} else {
+			b.WriteString("  " + descStyle.Render("enter 下一项（末项保存）· ctrl+s 保存 · esc 取消") + "\n")
+		}
 		content = b.String()
 	}
 	return drawBox(w, md.title, true, true, content, -1)
@@ -247,9 +253,12 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		md := m.modal
-		if md.kind == modalPreset || md.kind == modalSub {
+		if md.kind == modalPreset || md.kind == modalSub || md.kind == modalTask {
+			if len(md.fields) == 0 {
+				return nil
+			}
 			f := &md.fields[md.focus]
-			if f.def.kind != fieldBool {
+			if f.def.kind != fieldBool && f.def.kind != fieldChoice {
 				var cmd tea.Cmd
 				f.input, cmd = f.input.Update(msg)
 				return cmd
@@ -280,14 +289,29 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 			return nil
 		case "esc", "n", "q":
 			m.modal = nil
+			if m.managePresets {
+				m.openPresetList()
+			}
 			return nil
 		}
 		return nil
 	}
+	if md.kind == modalPresetList {
+		return m.updatePresetList(key.String())
+	}
 
 	switch key.String() {
 	case "esc":
+		if md.kind == modalPreset && m.managePresets {
+			m.openPresetList()
+			return nil
+		}
+		if md.kind == modalTask {
+			m.createSeq++
+			m.creating = false
+		}
 		m.modal = nil
+		m.managePresets = false
 		return nil
 	case "tab", "down":
 		md.focus = (md.focus + 1) % len(md.fields)
@@ -305,8 +329,44 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		return focusField(md.fields, md.focus)
 	case "ctrl+s":
 		return m.saveModal()
-	default:
+	case "ctrl+n":
+		if md.kind == modalTask {
+			m.appendSubtitleFields(subtitleDefaults())
+			md.focus = len(md.fields) - 4
+			return focusField(md.fields, md.focus)
+		}
+		return nil
+	case "ctrl+d":
+		if md.kind == modalTask {
+			m.removeSubtitleFields()
+			return focusField(md.fields, md.focus)
+		}
+		return nil
+	case "left", "right", "h", "l":
 		f := &md.fields[md.focus]
+		if f.def.kind == fieldChoice && len(f.options) > 0 {
+			delta := 1
+			if key.String() == "left" || key.String() == "h" {
+				delta = -1
+			}
+			f.choice = (f.choice + delta + len(f.options)) % len(f.options)
+			m.applyPresetChoice(f)
+			return nil
+		}
+		if f.def.kind == fieldBool || f.def.kind == fieldChoice {
+			return nil
+		}
+		var cmd tea.Cmd
+		f.input, cmd = f.input.Update(msg)
+		return cmd
+	default:
+		if len(md.fields) == 0 {
+			return nil
+		}
+		f := &md.fields[md.focus]
+		if f.def.kind == fieldChoice {
+			return nil
+		}
 		if f.def.kind == fieldBool {
 			// 勾选型字段：space 切换状态，其余按键吞掉不进入文本输入。
 			if key.String() == " " || key.String() == "space" {
@@ -328,6 +388,8 @@ func (m *model) saveModal() tea.Cmd {
 		return m.savePresetModal()
 	case modalSub:
 		return m.saveSubModal()
+	case modalTask:
+		return m.saveTaskModal()
 	}
 	return nil
 }
@@ -374,6 +436,10 @@ func (m *model) savePresetModal() tea.Cmd {
 		m.presetCursor = m.presetCount() - 2 // 手动输入项之前
 	}
 	m.modal = nil
+	if m.managePresets {
+		m.openPresetList()
+		return nil
+	}
 	return m.schedulePlan(planDebounceDelay)
 }
 

@@ -6,15 +6,24 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/store"
 	"github.com/gsxhnd/batcher/internal/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// isolatePresets 把自定义预设目录指向临时文件夹，避免测试读写真实预设文件。
+// isolatePresets 把任务和预设指到临时数据库，避免测试读写可执行文件旁边的 batcher.db。
 func isolatePresets(t *testing.T) {
 	t.Helper()
-	t.Setenv("BATCHER_PRESETS_DIR", t.TempDir())
+	db, err := store.OpenDir(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+	task.BindStore(db)
+	presets.Bind(db)
 }
 
 func press(m *model, s string) {
@@ -45,81 +54,56 @@ func press(m *model, s string) {
 	*m = next.(model)
 }
 
-func TestPanelSwitchSkipsDisabledPanels(t *testing.T) {
+func TestMainScreenOpensTaskAndPresetModals(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{} // 未勾选任何操作：预设/字幕面板不可用
+	press(&m, "a")
+	require.NotNil(t, m.modal)
+	require.Equal(t, modalTask, m.modal.kind)
+	keys := map[string]bool{}
+	for _, f := range m.modal.fields {
+		keys[f.def.key] = true
+	}
+	for _, key := range []string{"op_convert", "op_subtitle", "op_fonts", "input_path", "output_path", "preset", "advance", "fonts_path", "sub_suffix"} {
+		assert.True(t, keys[key], "创建弹窗应直接包含 %s", key)
+	}
+	start := m.modal.kind
+	press(&m, "enter")
+	require.NotNil(t, m.modal)
+	assert.Equal(t, start, m.modal.kind, "enter 只在同一个弹窗里移动，不跳到下一步")
+	assert.Equal(t, 1, m.modal.focus)
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
 
-	press(&m, "2")
-	assert.Equal(t, panelOps, m.focus, "未勾选转码时不能进入预设面板")
-	assert.NotEmpty(t, m.statusMsg, "应提示面板不可用的原因")
-
-	press(&m, "3")
-	assert.Equal(t, panelOps, m.focus, "未勾选字幕时不能进入字幕面板")
-
-	press(&m, "4")
-	assert.Equal(t, panelForm, m.focus, "参数面板始终可用")
-
-	press(&m, "5")
-	assert.Equal(t, panelRun, m.focus, "任务面板始终可用")
+	press(&m, "p")
+	require.NotNil(t, m.modal)
+	assert.Equal(t, modalPresetList, m.modal.kind)
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
 }
 
-func TestTabCyclesToNextEnabledPanel(t *testing.T) {
+func TestCreateTaskRejectsEmptySelection(t *testing.T) {
 	isolatePresets(t)
-	m := newModel() // 默认聚焦 [1] 操作
-
-	press(&m, "tab")
-	assert.Equal(t, panelForm, m.focus, "预设/字幕不可用时应跳到参数面板")
-
-	press(&m, "tab")
-	assert.Equal(t, panelRun, m.focus)
-
-	press(&m, "tab")
-	assert.Equal(t, panelOps, m.focus, "循环回到第一个面板")
-}
-
-func TestToggleConvertEnablesAndRebuildsForm(t *testing.T) {
-	isolatePresets(t)
-	require.NoError(t, presets.Save([]presets.Preset{{Name: "画质", Args: "-c:v h265"}}))
 	m := newModel()
-	m.ops = command.Selection{AddSubtitle: true}
-	m.rebuildFields()
-	require.False(t, slicesAny(m.fields, "advance"), "未勾选转码时不应有高级参数字段")
-
-	press(&m, "2") // 未勾选转码，不可进入
-	assert.Equal(t, panelOps, m.focus)
-
-	press(&m, "space") // 第一个操作为视频转码
-	require.True(t, m.ops.Convert)
-	require.True(t, slicesAny(m.fields, "advance"), "勾选转码后应出现高级参数字段")
-
-	press(&m, "2")
-	assert.Equal(t, panelPresets, m.focus, "勾选转码后预设面板可用")
-
-	press(&m, "enter") // 选择第一个内置预设
-	advance, ok := findField(&m.fields, "advance")
-	require.True(t, ok)
-	assert.Equal(t, m.builtins[0].Args, m.manualAdvance)
-	assert.Equal(t, m.builtins[0].Args, advance.input.Value(), "选中的预设参数应同步到主表单")
-
-	press(&m, "1")     // 回到操作面板
-	press(&m, "space") // 再按一次取消转码
-	assert.False(t, m.ops.Convert)
-	assert.False(t, slicesAny(m.fields, "advance"), "取消转码后应移除高级参数字段")
-
-	press(&m, "2")
-	assert.Equal(t, panelOps, m.focus, "取消转码后预设面板不可用，不能进入")
+	testQueue(t, &m)
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	press(&m, "ctrl+s")
+	require.NotNil(t, m.modal, "没勾选操作时弹窗保持打开")
+	assert.NotEmpty(t, m.modal.err)
+	assert.Empty(t, m.queue.Snapshot())
 }
 
 // TestPresetModalAddEditDuplicate 验证预设的新增/编辑全部在弹窗内完成。
 func TestPresetModalAddEditDuplicate(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.focus = panelPresets
+	press(&m, "p")
+	require.Equal(t, modalPresetList, m.modal.kind)
 
 	press(&m, "a")
 	require.NotNil(t, m.modal, "按 a 应打开新增弹窗")
+	require.Equal(t, modalPreset, m.modal.kind)
 	require.Equal(t, 2, len(m.modal.fields), "弹窗应包含名称与参数两个字段")
 	fill := func(name, args string) {
 		m.modal.fields[0].input.SetValue(name)
@@ -129,7 +113,8 @@ func TestPresetModalAddEditDuplicate(t *testing.T) {
 
 	fill("  H.265 画质  ", "  -c:v   h265 -crf 20 ")
 	press(&m, "ctrl+s")
-	require.Nil(t, m.modal, "保存成功后应关闭弹窗")
+	require.NotNil(t, m.modal)
+	require.Equal(t, modalPresetList, m.modal.kind, "保存成功后回到预设列表")
 	assert.Equal(t, []presets.Preset{{Name: "H.265 画质", Args: "-c:v h265 -crf 20"}}, m.presets,
 		"名称去首尾空白，参数规范化空白")
 
@@ -147,10 +132,11 @@ func TestPresetModalAddEditDuplicate(t *testing.T) {
 	require.NotNil(t, m.modal, "参数重复应留在弹窗内修改")
 	assert.NotEmpty(t, m.modal.err)
 	press(&m, "esc")
-	assert.Nil(t, m.modal, "esc 应取消弹窗")
+	require.Equal(t, modalPresetList, m.modal.kind, "esc 取消编辑并回到列表")
 
 	// 编辑第二条自定义预设
 	m.presetCursor = m.presetUserOffset() + 1
+	m.modal.focus = m.presetCursor
 	press(&m, "e")
 	require.NotNil(t, m.modal)
 	m.modal.fields[0].input.SetValue("H.264")
@@ -173,33 +159,41 @@ func TestPresetDeleteUsesConfirmModal(t *testing.T) {
 	m.presetCursor = m.presetUserOffset()
 	m.manualAdvance = "a" // 删除当前选中预设时应同步清空主表单
 
+	press(&m, "p")
+	m.presetCursor = m.presetUserOffset()
+	m.modal.focus = m.presetCursor
+
 	press(&m, "d")
 	require.NotNil(t, m.modal, "第一次按 d 应弹确认窗")
 	assert.Equal(t, modalConfirm, m.modal.kind)
 
 	press(&m, "esc")
-	assert.Nil(t, m.modal)
+	require.Equal(t, modalPresetList, m.modal.kind, "取消删除后回到预设列表")
 	assert.Len(t, m.presets, 2, "esc 取消删除")
 
+	m.presetCursor = m.presetUserOffset()
+	m.modal.focus = m.presetCursor
 	press(&m, "d")
 	press(&m, "enter")
 	assert.Equal(t, []presets.Preset{{Args: "b"}}, m.presets, "enter 确认后删除")
 	assert.Equal(t, "", m.manualAdvance, "删除当前选中预设后应清空已选参数")
+	require.Equal(t, modalPresetList, m.modal.kind)
 
-	// 其他按键不应误触发弹窗内的确认
-	m.modal = nil
+	m.presetCursor = m.presetUserOffset()
+	m.modal.focus = m.presetCursor
 	press(&m, "d")
 	press(&m, "j")
-	assert.NotNil(t, m.modal, "确认弹窗内按无关键应保持打开")
+	require.NotNil(t, m.modal, "确认弹窗内按无关键应保持打开")
+	assert.Equal(t, modalConfirm, m.modal.kind)
 }
 
 func TestPresetReorderPersists(t *testing.T) {
 	isolatePresets(t)
 	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.focus = panelPresets
+	press(&m, "p")
 	m.presetCursor = m.presetUserOffset()
+	m.modal.focus = m.presetCursor
 
 	press(&m, "J")
 	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, m.presets)
@@ -213,34 +207,37 @@ func TestPresetReorderPersists(t *testing.T) {
 func TestPresetGuardsBuiltins(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.focus = panelPresets
-	m.presetCursor = 0 // 内置条目
+	press(&m, "p")
+	require.Equal(t, modalPresetList, m.modal.kind)
+	m.presetCursor = 0
+	m.modal.focus = 0
 
 	press(&m, "d")
 	assert.Empty(t, m.presets, "内置预设不可删除")
+	assert.Equal(t, modalPresetList, m.modal.kind)
 	assert.NotEmpty(t, m.statusMsg)
 
 	press(&m, "e")
-	assert.Nil(t, m.modal, "内置条目不进入编辑弹窗")
+	assert.Equal(t, modalPresetList, m.modal.kind, "内置条目不进入编辑弹窗")
 	assert.NotEmpty(t, m.statusMsg, "内置条目按 e 应提示只读")
 }
 
 func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.focus = panelPresets
+	press(&m, "p")
 	require.NotEmpty(t, m.builtins)
+	require.Equal(t, 0, m.modal.focus)
 
 	press(&m, "a")
 	require.NotNil(t, m.modal, "选中内置预设按 a 应打开复制弹窗")
+	require.Equal(t, modalPreset, m.modal.kind)
 	assert.Equal(t, m.builtins[0].Name, m.modal.fields[0].input.Value(), "名称预填内置预设名")
 	assert.Equal(t, m.builtins[0].Args, m.modal.fields[1].input.Value(), "参数预填内置预设参数")
 
 	m.modal.focus = 1
 	press(&m, "ctrl+s")
-	require.Nil(t, m.modal)
+	require.Equal(t, modalPresetList, m.modal.kind, "保存后回到预设列表")
 	assert.Equal(t, []presets.Preset{{Name: m.builtins[0].Name, Args: m.builtins[0].Args}}, m.presets,
 		"复制后成为自定义预设")
 }
@@ -249,27 +246,20 @@ func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
 func TestModalSwallowsGlobalKeys(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.focus = panelPresets
-
 	press(&m, "a")
-	require.NotNil(t, m.modal)
+	require.Equal(t, modalTask, m.modal.kind)
 	press(&m, "1")
-	require.NotNil(t, m.modal, "数字键不应触发面板切换")
+	require.Equal(t, modalTask, m.modal.kind, "数字键不应离开创建弹窗")
 	press(&m, "x")
-	require.NotNil(t, m.modal, "x 不应触发执行")
+	require.Equal(t, modalTask, m.modal.kind, "x 不应触发执行")
 	assert.False(t, m.running)
-	assert.Equal(t, panelPresets, m.focus, "弹窗期间焦点不变")
 }
 
 // TestSublistModalCRUD 验证字幕面板的增删改在弹窗内完成。
 func TestSublistModalCRUD(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{AddSubtitle: true}
-	m.focus = panelSubs
-
-	press(&m, "n")
+	m.openSubModal(-1)
 	require.NotNil(t, m.modal)
 	m.modal.fields[0].input.SetValue("ass")
 	m.modal.fields[1].input.SetValue("zh") // 非法语言码
@@ -285,12 +275,12 @@ func TestSublistModalCRUD(t *testing.T) {
 	require.Len(t, m.subs, 1)
 	assert.Equal(t, command.SubtitleOption{Suffix: "ass", Lang: "chi", Title: "中文"}, m.subs[0])
 
-	press(&m, "e")
-	require.NotNil(t, m.modal, "e 应打开编辑弹窗并回填")
+	m.openSubModal(0)
+	require.NotNil(t, m.modal, "编辑弹窗应回填")
 	assert.Equal(t, "ass", m.modal.fields[0].input.Value())
 	press(&m, "esc")
 
-	press(&m, "d")
+	m.updateSubsPanel(tea.KeyPressMsg{Text: "d", Code: 'd'})
 	require.NotNil(t, m.modal, "删除应弹确认窗")
 	press(&m, "enter")
 	assert.Empty(t, m.subs, "确认后删除")
@@ -300,10 +290,7 @@ func TestSublistModalCRUD(t *testing.T) {
 func TestSubModalDefaultTrack(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{AddSubtitle: true}
-	m.focus = panelSubs
-
-	press(&m, "n")
+	m.openSubModal(-1)
 	require.NotNil(t, m.modal)
 	require.Len(t, m.modal.fields, 4, "弹窗应包含后缀/语言/标题/默认轨道四个字段")
 	m.modal.fields[0].input.SetValue("chi.ass")
@@ -323,14 +310,12 @@ func TestSubModalDefaultTrack(t *testing.T) {
 	require.Len(t, m.subs, 1)
 	assert.True(t, m.subs[0].Default, "保存后应写入默认轨道标记")
 
-	// 面板 3 按 t 切换默认标记
-	press(&m, "t")
-	assert.False(t, m.subs[0].Default, "t 应取消默认标记")
-	press(&m, "t")
-	assert.True(t, m.subs[0].Default, "t 应重新标记默认")
+	m.updateSubsPanel(tea.KeyPressMsg{Text: "t", Code: 't'})
+	assert.False(t, m.subs[0].Default, "切换应取消默认标记")
+	m.updateSubsPanel(tea.KeyPressMsg{Text: "t", Code: 't'})
+	assert.True(t, m.subs[0].Default, "再切换应重新标记默认")
 
-	// 再编辑一条时勾选状态应回填
-	press(&m, "e")
+	m.openSubModal(0)
 	require.NotNil(t, m.modal)
 	assert.True(t, m.modal.fields[3].Checked(), "编辑弹窗应回填默认标记")
 	press(&m, "esc")
@@ -374,52 +359,44 @@ func TestFormEditingSwallowsGlobalKeys(t *testing.T) {
 	m := newModel()
 	m.ops = command.Selection{Convert: true}
 	m.rebuildFields()
-	m.focus = panelForm
+	m.beginFormEdit()
+	require.True(t, m.editing)
 
-	press(&m, "enter")
-	require.True(t, m.editing, "enter 应进入编辑态")
-
-	m.fields[0].input.SetValue("") // 清掉默认值，便于断言输入
+	m.fields[0].input.SetValue("")
 	press(&m, "1")
-	assert.Equal(t, panelForm, m.focus, "编辑态下数字键应输入而不切换面板")
+	assert.True(t, m.editing, "编辑态下数字键应输入")
 	assert.Equal(t, "1", m.fields[0].input.Value(), "字符应输入到字段里")
 
 	press(&m, "esc")
 	assert.False(t, m.editing, "esc 应退出编辑态")
-	press(&m, "1")
-	assert.Equal(t, panelOps, m.focus, "退出编辑态后全局快捷键恢复生效")
 }
 
 func TestTryStartRunValidation(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	// 第一次 x 只进入任务列表，不校验、不入队。
-	press(&m, "x")
-	assert.Equal(t, panelRun, m.focus)
-	assert.Empty(t, m.featErr)
-	assert.False(t, m.running)
-	// 在任务列表再按 x 才校验。
-	press(&m, "x")
-	assert.NotEmpty(t, m.featErr, "未勾选操作应提示")
-	assert.Equal(t, panelOps, m.focus)
+	testQueue(t, &m)
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	press(&m, "ctrl+s")
+	assert.Contains(t, m.modal.err, "至少勾选")
+	assert.Empty(t, m.queue.Snapshot())
 	assert.False(t, m.running)
 
-	// 勾选添加字体但未填字体目录
-	m.ops = command.Selection{AddFonts: true}
-	m.rebuildFields()
-	press(&m, "x")
-	assert.Equal(t, panelRun, m.focus, "进入任务列表仍不入队")
-	press(&m, "x")
-	assert.Equal(t, panelForm, m.focus, "校验失败应跳到参数面板")
-	assert.NotEmpty(t, m.statusMsg)
-	assert.False(t, m.running)
+	m.modal.focus = 2 // 添加字体
+	press(&m, "space")
+	press(&m, "ctrl+s")
+	assert.Contains(t, m.modal.err, "字体")
+	assert.Empty(t, m.queue.Snapshot())
 
-	// 勾选添加字幕但字幕列表为空
-	m.ops = command.Selection{AddSubtitle: true}
-	m.rebuildFields()
-	press(&m, "x")
-	press(&m, "x")
-	assert.Equal(t, panelSubs, m.focus, "字幕为空应跳到字幕面板")
+	m.modal.focus = 2
+	press(&m, "space") // 取消字体
+	m.modal.focus = 1  // 添加字幕
+	press(&m, "space")
+	m.modal.focus = len(m.modal.fields) - 1
+	m.removeSubtitleFields()
+	press(&m, "ctrl+s")
+	assert.Contains(t, m.modal.err, "字幕")
+	assert.Empty(t, m.queue.Snapshot())
 	assert.False(t, m.running)
 }
 
@@ -449,26 +426,14 @@ func TestEnterTaskListDoesNotEnqueue(t *testing.T) {
 	testQueue(t, &m)
 	m.plan, m.previewDone = testPlan("a.mkv"), true
 
-	press(&m, "5")
-	assert.Equal(t, panelRun, m.focus)
-	assert.Nil(t, m.modal)
-	assert.Empty(t, m.queue.Snapshot(), "进入任务面板不入队")
-	assert.NotContains(t, m.filePane(8), "a.mkv", "未入队不显示文件")
-	assert.NotContains(t, m.runBody(), "a.mkv")
-
 	press(&m, "enter")
 	assert.Nil(t, m.modal, "任务列表里按回车不入队")
 	assert.Empty(t, m.queue.Snapshot())
-
-	m.focus = panelOps
 	press(&m, "x")
-	assert.Equal(t, panelRun, m.focus)
-	assert.Empty(t, m.queue.Snapshot(), "从其他面板按 x 只进入任务列表")
-	press(&m, "x")
-	require.NotNil(t, m.modal, "入队前应弹出确认")
-	assert.Empty(t, m.queue.Snapshot())
-	press(&m, "enter")
-	assert.Len(t, m.queue.Snapshot(), 1, "弹窗确认后才入队")
+	assert.Empty(t, m.queue.Snapshot(), "按 x 不入队")
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind, "按 a 打开创建弹窗")
+	assert.Empty(t, m.queue.Snapshot(), "打开弹窗还不入队")
 }
 
 func TestFormEscDoesNotQuitAndFocusKept(t *testing.T) {
@@ -477,9 +442,9 @@ func TestFormEscDoesNotQuitAndFocusKept(t *testing.T) {
 	m.focus = panelForm
 
 	press(&m, "up")
-	assert.Equal(t, panelForm, m.focus, "方向键只移动字段焦点的显示")
-	press(&m, "5")
-	assert.Equal(t, panelRun, m.focus)
+	assert.Equal(t, panelForm, m.focus, "方向键不离开当前焦点")
+	press(&m, "esc")
+	assert.Nil(t, m.modal, "没有弹窗时 esc 不退出程序")
 }
 
 func TestSetFocusLeavesRunStopsFollow(t *testing.T) {
@@ -503,31 +468,30 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	plan := testPlanOut(t, "a.mkv")
 	batch, err := m.queue.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
-	// 执行中允许切换面板（新语义：不锁定配置与面板）。
 	m.running = true
 	m.focus = panelRun
-	press(&m, "1")
-	assert.Equal(t, panelOps, m.focus, "执行中允许切换面板编辑配置")
-	m.focus = panelRun
-
-	// 执行中按 x / enter 不得重复入队（需求：同一时间只接受一个批次）。
 	before := len(m.queue.Snapshot())
-	press(&m, "x")
-	assert.Contains(t, m.statusMsg, "再按 x 入队")
+	press(&m, "a")
+	assert.Contains(t, m.statusMsg, "还未结束")
+	assert.Equal(t, before, len(m.queue.Snapshot()), "执行中不能再创建任务")
 	press(&m, "enter")
 	assert.Equal(t, before, len(m.queue.Snapshot()), "执行中回车不得再入队")
 
-	// 等真实暂停后再测 r/s/a（光标在该批次行上），避免竞态。
+	// 等真实暂停后再测 r/s/x（光标在该批次行上），避免竞态。
 	m.roster = []rosterRow{{batchID: batch.ID, state: fileRunning, cmd: ""}}
 	m.pausedBatch = batch.ID
 	waitBatchEvent(t, &m, task.QueueBatchPaused)
 	press(&m, "r")
 	assert.Contains(t, m.statusMsg, "重试")
 	m.pausedBatch = batch.ID
+	m.roster = []rosterRow{{batchID: batch.ID, state: filePaused, cmd: ""}}
+	m.fileCursor = 0
 	press(&m, "s")
 	assert.Contains(t, m.statusMsg, "跳过")
 	m.pausedBatch = batch.ID
-	press(&m, "a")
+	m.roster = []rosterRow{{batchID: batch.ID, state: filePaused, cmd: ""}}
+	m.fileCursor = 0
+	press(&m, "x")
 	assert.Contains(t, m.statusMsg, "中止")
 
 	// q/esc 取消当前批次：非暂停时走 CancelCurrent，界面保持执行态直到结束。

@@ -15,6 +15,11 @@ import (
 // recordVersion 是任务记录 JSON 的 schema 版本，字段有不兼容变化时递增。
 const recordVersion = 1
 
+// SupportedRecord 报告记录版本是否为本程序能读取的范围。
+func SupportedRecord(version int) bool {
+	return version >= 1 && version <= recordVersion
+}
+
 // maxStderrTail 限制每个子任务落盘的日志行数：只保留末尾若干行，避免记录文件膨胀。
 const maxStderrTail = 50
 

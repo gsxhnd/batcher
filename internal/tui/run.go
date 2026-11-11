@@ -9,6 +9,9 @@ import (
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/store"
+	"github.com/gsxhnd/batcher/internal/task"
 )
 
 // version/buildDate/gitCommit 由 GoReleaser 在发布时通过 ldflags 注入；
@@ -29,11 +32,24 @@ func badgeVersion() string {
 
 // Run 启动交互式 TUI（备用屏幕全屏模式，由 View 的 AltScreen 开启）。
 func Run() error {
+	db, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	task.BindStore(db)
+	presets.Bind(db)
+	if err := task.RecoverStored(); err != nil {
+		return err
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	m := newModel()
+	m.db = db
 	m.ctx = ctx
 	m.initQueue(make(chan tea.Msg, 256))
+	m.syncRoster()
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	final, err := p.Run()
 	canceled := ctx.Err() != nil

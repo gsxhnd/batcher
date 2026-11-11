@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gsxhnd/batcher/internal/command"
+	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -13,9 +14,7 @@ import (
 func TestModalEnterAdvancesAndCtrlSaves(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{AddSubtitle: true}
-	m.focus = panelSubs
-	press(&m, "n")
+	m.openSubModal(-1)
 	require.NotNil(t, m.modal)
 	require.Equal(t, modalSub, m.modal.kind)
 	require.Equal(t, 0, m.modal.focus)
@@ -47,7 +46,7 @@ func TestModalEnterAdvancesAndCtrlSaves(t *testing.T) {
 	assert.Equal(t, defaults, m.subs[0])
 
 	// 中途字段也可 ctrl+s：补全合法值后保存关闭
-	press(&m, "n")
+	m.openSubModal(-1)
 	require.NotNil(t, m.modal)
 	m.modal.fields[0].input.SetValue("chi.ass")
 	m.modal.fields[1].input.SetValue("chi")
@@ -62,9 +61,7 @@ func TestModalEnterAdvancesAndCtrlSaves(t *testing.T) {
 func TestModalEnterSavesOnLastField(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.focus = panelPresets
-	press(&m, "a")
+	m.openPresetModal(-1, presets.Preset{})
 	require.NotNil(t, m.modal)
 	require.Equal(t, modalPreset, m.modal.kind)
 

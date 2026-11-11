@@ -16,7 +16,8 @@ type fieldKind int
 const (
 	fieldString fieldKind = iota
 	fieldInt
-	fieldBool // 勾选型字段：不吃文本输入，space 切换勾选状态
+	fieldBool   // 勾选型字段：不吃文本输入，space 切换勾选状态
+	fieldChoice // 在若干选项间切换，左右键改变当前项
 )
 
 // fieldDef 描述一个表单项映射到 VideoBatchOption 的哪个配置。
@@ -60,11 +61,14 @@ var presetFieldDefs = []fieldDef{
 
 // field 保存表单项的运行时状态。
 type field struct {
-	def      fieldDef
-	input    textinput.Model
-	err      string
-	checked  bool   // bool 字段（fieldBool）的勾选状态
-	fallback string // 输入为空时采用的默认值，以灰色占位显示，不写成白色正文
+	def        fieldDef
+	input      textinput.Model
+	err        string
+	checked    bool   // bool 字段（fieldBool）的勾选状态
+	fallback   string // 输入为空时采用的默认值，以灰色占位显示，不写成白色正文
+	options    []string
+	choiceArgs []string // 与 options 对齐；空字符串表示不改写高级参数
+	choice     int
 }
 
 // newField 构建一个可编辑的表单项，默认提示文字为字段标签。

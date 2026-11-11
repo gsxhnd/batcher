@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,6 +67,81 @@ func TestViewsRenderNarrow(t *testing.T) {
 	m.focus = panelRun
 	out := m.render()
 	require.NotEmpty(t, out)
+}
+
+func TestFormBodyShowsSelectedFieldAndItsFiles(t *testing.T) {
+	isolatePresets(t)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.mp4"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "不要列出.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "b.mp4"), []byte("x"), 0o644))
+
+	m := newModel()
+	m.width, m.height = 100, 34
+	m.resizePanes()
+	m.focus = panelForm
+	m.ops = command.Selection{Convert: true, AddFonts: true}
+	m.rebuildFields()
+	setField(&m, "input_path", dir)
+	setField(&m, "input_format", "mp4")
+	setField(&m, "output_path", t.TempDir())
+	m.focusNo = 0
+	loadDirList(t, &m)
+
+	body := m.formBody()
+	assert.Contains(t, body, "源视频路径")
+	assert.Contains(t, body, "a.mp4")
+	assert.Contains(t, body, filepath.Join("sub", "b.mp4"))
+	assert.NotContains(t, body, "不要列出.txt")
+	assert.NotContains(t, body, "输出目录")
+	assert.NotContains(t, body, "字体文件夹")
+
+	for i := range m.fields {
+		if m.fields[i].def.key == "output_format" {
+			m.focusNo = i
+		}
+	}
+	body = m.formBody()
+	assert.Contains(t, body, "输出后缀")
+	assert.NotContains(t, body, "a.mp4", "非文件夹参数不显示文件列表")
+	assert.NotContains(t, body, "源视频路径")
+
+	fontDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fontDir, "a.ttf"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(fontDir, "no.mp4"), []byte("x"), 0o644))
+	setField(&m, "fonts_path", fontDir)
+	for i := range m.fields {
+		if m.fields[i].def.key == "fonts_path" {
+			m.focusNo = i
+		}
+	}
+	loadDirList(t, &m)
+	body = m.formBody()
+	assert.Contains(t, body, "字体文件夹")
+	assert.Contains(t, body, "a.ttf")
+	assert.NotContains(t, body, "no.mp4")
+	assert.NotContains(t, body, "源视频路径")
+
+	next, _ := m.Update(dirListMsg{seq: m.dirSeq - 1, files: []string{"gone.mp4"}})
+	m = next.(model)
+	assert.NotContains(t, m.formBody(), "gone.mp4")
+}
+
+func setField(m *model, key, value string) {
+	f, ok := findField(&m.fields, key)
+	if !ok {
+		panic("缺少字段 " + key)
+	}
+	f.input.SetValue(value)
+}
+
+func loadDirList(t *testing.T, m *model) {
+	t.Helper()
+	cmd := m.scheduleDirList(0)
+	require.NotNil(t, cmd)
+	next, _ := m.Update(cmd())
+	*m = next.(model)
 }
 
 // TestPresetsPaneScrolls 长列表超出面板高度时按光标滚动窗口，光标行始终可见。

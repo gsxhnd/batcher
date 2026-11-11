@@ -105,16 +105,68 @@ func (q *Queue) CancelCurrent() {
 // Enqueue 把一个已规划的批处理加入队列末尾；队列已停止时返回错误。
 func (q *Queue) Enqueue(plan *command.BatchPlan, sel command.Selection) (*Batch, error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.stopped {
+		q.mu.Unlock()
 		return nil, fmt.Errorf("队列已停止，无法入队")
 	}
 	id := NewID(time.Now())
 	b := NewBatch(id, plan, sel, time.Now())
 	q.batches = append(q.batches, b)
+	q.mu.Unlock()
+	_ = b.Save()
 	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
 	q.wake()
 	return b, nil
+}
+
+// Requeue 把不在队列里的历史任务重新放回队尾。
+// 已完成的子任务保持原样，失败、取消或中断的子任务重置为 pending。
+func (q *Queue) Requeue(src *Batch) error {
+	if src == nil || src.ID == "" {
+		return fmt.Errorf("任务无效")
+	}
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return fmt.Errorf("队列已停止，无法入队")
+	}
+	for _, exist := range q.batches {
+		if exist.ID == src.ID {
+			q.mu.Unlock()
+			return q.RetryBatch(src.ID)
+		}
+	}
+	b, err := CloneBatch(src)
+	if err != nil {
+		q.mu.Unlock()
+		return err
+	}
+	switch b.Status {
+	case StatusFailed, StatusCanceled, StatusInterrupted, StatusPaused, StatusRunning:
+		for _, it := range b.Items {
+			if it.Removed || it.Status == StatusDone || it.Status == StatusSkipped {
+				continue
+			}
+			it.Status = StatusPending
+			it.PartialOutput = false
+			it.Error = ""
+		}
+		b.Status = StatusPending
+		b.FinishedAt = time.Time{}
+	case StatusPending:
+	case StatusDone:
+		q.mu.Unlock()
+		return fmt.Errorf("任务已完成，无需重试")
+	default:
+		q.mu.Unlock()
+		return fmt.Errorf("任务状态 %s 不可重试", b.Status)
+	}
+	q.batches = append(q.batches, b)
+	q.mu.Unlock()
+	_ = b.Save()
+	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
+	q.wake()
+	return nil
 }
 
 // BatchStatus 加锁读取主任务的当前状态。
@@ -295,8 +347,8 @@ func (q *Queue) completeDiscard(b *Batch) bool {
 	}
 	delete(q.discard, b.ID)
 	q.mu.Unlock()
-	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: b.ID})
 	_ = b.Save()
+	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: b.ID})
 	return true
 }
 

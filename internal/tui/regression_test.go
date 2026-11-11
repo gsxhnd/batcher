@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,27 +22,32 @@ import (
 
 func TestPresetBoundaryActions(t *testing.T) {
 	for _, count := range []int{0, 2} {
-		for _, item := range []string{"最后一个内置项", "手动输入"} {
-			for _, key := range []string{"e", "d", "J", "K"} {
-				t.Run(fmt.Sprintf("%d/%s/%s", count, item, key), func(t *testing.T) {
-					isolatePresets(t)
-					m := newModel()
-					m.ops.Convert, m.focus = true, panelPresets
-					if count > 0 {
-						m.presets = []presets.Preset{{Args: "a"}, {Args: "b"}}
-					}
-					m.presetCursor = m.presetUserOffset() - 1
-					if item == "手动输入" {
-						m.presetCursor = m.presetCount() - 1
-					}
-					before := append([]presets.Preset(nil), m.presets...)
-					require.NotPanics(t, func() { press(&m, key) })
-					assert.Equal(t, before, m.presets)
-					assert.Nil(t, m.modal)
-				})
-			}
+		for _, key := range []string{"e", "d", "J", "K"} {
+			t.Run(fmt.Sprintf("%d/最后一个内置项/%s", count, key), func(t *testing.T) {
+				isolatePresets(t)
+				m := newModel()
+				if count > 0 {
+					require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}}))
+					m.presets = []presets.Preset{{Args: "a"}, {Args: "b"}}
+				}
+				m.openPresetList()
+				m.presetCursor = m.presetUserOffset() - 1
+				m.modal.focus = m.presetCursor
+				before := slices.Clone(m.presets)
+				require.NotPanics(t, func() { press(&m, key) })
+				assert.Equal(t, before, m.presets)
+				require.NotNil(t, m.modal)
+				assert.Equal(t, modalPresetList, m.modal.kind)
+			})
 		}
 	}
+}
+
+type failPresetStore struct{}
+
+func (failPresetStore) LoadPresets() ([]presets.Preset, error) { return nil, nil }
+func (failPresetStore) SavePresets([]presets.Preset) error {
+	return fmt.Errorf("写入失败")
 }
 
 func TestPresetPersistenceFailureDoesNotCommit(t *testing.T) {
@@ -56,9 +62,7 @@ func TestPresetPersistenceFailureDoesNotCommit(t *testing.T) {
 			m.presetCursor = m.presetUserOffset()
 			m.manualAdvance = "-c copy"
 			m.applyAdvanceToForm()
-			blocked := filepath.Join(t.TempDir(), "不是目录")
-			require.NoError(t, os.WriteFile(blocked, []byte("保留"), 0o644))
-			t.Setenv("BATCHER_PRESETS_DIR", blocked)
+			presets.Bind(failPresetStore{})
 			switch action {
 			case "新增", "编辑":
 				index := -1
@@ -159,28 +163,19 @@ func TestExecutionRequiresLatestPreview(t *testing.T) {
 	testQueue(t, &m)
 	m.plan, m.previewDone, m.planLoading = testPlan("a.mkv"), true, true
 	press(&m, "x")
-	assert.Equal(t, panelRun, m.focus, "预览未就绪时 x 只进入任务列表")
-	assert.Empty(t, m.queue.Snapshot(), "预览未就绪不能入队")
-	m.planLoading = false
-	next, _ := m.Update(planMsg{seq: m.planSeq, plan: testPlanOut(t, "a.mkv")})
-	m = next.(model)
-	assert.Empty(t, m.queue.Snapshot(), "计划生成后仍不自动入队")
-	assert.NotContains(t, m.filePane(8), "a.mkv", "未入队不显示文件")
-	assert.NotContains(t, m.runBody(), "a.mkv")
+	assert.Empty(t, m.queue.Snapshot(), "按 x 不入队")
 	press(&m, "enter")
 	assert.Empty(t, m.queue.Snapshot(), "回车不入队")
-	press(&m, "x")
-	require.NotNil(t, m.modal, "入队前应弹出确认")
-	assert.Equal(t, modalConfirm, m.modal.kind)
-	assert.Contains(t, m.modal.prompt, "源视频路径：./")
-	assert.Empty(t, m.queue.Snapshot(), "确认前不入队")
-	press(&m, "enter")
-	batches := m.queue.Snapshot()
-	require.Len(t, batches, 1, "弹窗确认后才入队")
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	assert.Empty(t, m.queue.Snapshot(), "打开创建弹窗还不入队")
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	require.NoError(t, err)
+	require.Len(t, batch.Items, 1)
 	seq := m.planSeq
-	next, _ = m.Update(planMsg{seq: seq, plan: testPlanOut(t, "不应替换.mkv")})
+	next, _ := m.Update(planMsg{seq: seq, plan: testPlanOut(t, "不应替换.mkv")})
 	m = next.(model)
-	assert.Equal(t, "a.mkv", batches[0].Items[0].Input, "入队复制的快照不受后续计划影响")
+	assert.Equal(t, "a.mkv", batch.Items[0].Input, "入队复制的快照不受后续计划影响")
 }
 
 // TestRosterShowsBatchesAndItemStates 验证任务面板的队列视图：
@@ -268,6 +263,61 @@ func TestPausedTimerFreezesElapsed(t *testing.T) {
 	m.resumeTimer()
 	assert.InDelta(t, float64(time.Minute), float64(m.elapsedNow()), float64(2*time.Second),
 		"恢复后耗时不含暂停时段")
+}
+
+func TestFinishedElapsedStaysPut(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	m.total, m.done = 1, 1
+	m.startAt = time.Now().Add(-3 * time.Second)
+	m.elapsed = 3 * time.Second
+	m.running = false
+	first := m.progressBlock()
+	time.Sleep(1100 * time.Millisecond)
+	second := m.progressBlock()
+	assert.Equal(t, first, second, "任务结束后耗时应停在结束时的值")
+	assert.Contains(t, first, "3s")
+}
+
+func TestRetryAddsAttemptRow(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 36
+	m.resizePanes()
+	m.focus = panelRun
+	testQueue(t, &m)
+	_, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	require.NoError(t, err)
+	waitBatchEvent(t, &m, task.QueueBatchPaused)
+	require.Equal(t, 1, attemptRows(&m))
+	frozen := m.progressHint()
+	time.Sleep(1100 * time.Millisecond)
+	assert.Equal(t, frozen, m.progressHint(), "暂停等待决策时耗时要停住")
+
+	// 停在失败的这一次上再按 r，和手动查看后重试一样。
+	for i, row := range m.roster {
+		if row.attempt > 0 {
+			m.fileCursor = i
+			m.pinRosterCursor()
+			m.fileFollow = false
+		}
+	}
+	press(&m, "r")
+	waitBatchEvent(t, &m, task.QueueItemStarted)
+	assert.Equal(t, 2, attemptRows(&m), "重试后应出现第 2 次")
+	assert.Contains(t, m.subtaskStatusLine(), "第 2 次")
+}
+
+func attemptRows(m *model) int {
+	n := 0
+	for _, row := range m.roster {
+		if row.attempt > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // TestQueueEventsFlowWhenIdle 验证队列事件监听链常驻：
@@ -490,18 +540,33 @@ func TestHiddenAndEmptyFieldValuesSurviveRebuild(t *testing.T) {
 func TestOnlyOneDefaultSubtitle(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops.AddSubtitle, m.focus = true, panelSubs
-	m.subs = []command.SubtitleOption{{Suffix: "chi.ass", Default: true}, {Suffix: "eng.ass"}}
-	m.subCursor = 1
-	press(&m, "t")
-	assert.False(t, m.subs[0].Default)
-	assert.True(t, m.subs[1].Default)
-	m.openSubModal(0)
-	m.modal.fields[1].input.SetValue("chi")
-	m.modal.fields[3].checked = true
-	m.saveSubModal()
-	assert.True(t, m.subs[0].Default)
-	assert.False(t, m.subs[1].Default)
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	m.modal.focus = 1
+	press(&m, "space")
+	press(&m, "ctrl+n")
+	defaults := 0
+	for i := range m.modal.fields {
+		if m.modal.fields[i].def.key == "sub_default" {
+			m.modal.fields[i].checked = true
+			defaults++
+		}
+	}
+	require.Equal(t, 2, defaults)
+	press(&m, "ctrl+s")
+	require.NotNil(t, m.modal)
+	assert.Contains(t, m.modal.err, "默认字幕")
+
+	seen := false
+	for i := range m.modal.fields {
+		if m.modal.fields[i].def.key == "sub_default" && !seen {
+			m.modal.fields[i].checked = false
+			seen = true
+		}
+	}
+	press(&m, "ctrl+s")
+	assert.NotContains(t, m.modal.err, "默认字幕")
+	assert.True(t, m.creating, "只保留一条默认字幕时应开始创建")
 }
 
 func TestCopyIncludesOnlyCommandsAndResultsKeepLogs(t *testing.T) {
@@ -586,13 +651,14 @@ func TestInvalidOrEmptyPreviewNeverExecutes(t *testing.T) {
 			m.ops.Convert, m.previewDone = true, true
 			m.rebuildFields()
 			m.plan = testPlan()
+			testQueue(t, &m)
 			if invalid {
 				m.planErr = fmt.Errorf("参数无效")
 			}
 			press(&m, "x")
 			assert.False(t, m.running)
-			assert.Equal(t, panelRun, m.focus)
-			assert.NotEmpty(t, m.statusMsg)
+			assert.Nil(t, m.modal, "按 x 不打开入队确认")
+			assert.Empty(t, m.queue.Snapshot())
 		})
 	}
 }
@@ -634,9 +700,9 @@ func TestRunningFooterShowsTaskKeys(t *testing.T) {
 	m.running = true
 	m.roster = []rosterRow{{batchID: "b", title: "任务"}}
 	text := m.footer()
-	assert.Contains(t, text, "重试任务")
-	assert.Contains(t, text, "删除子任务/主任务")
-	assert.Contains(t, text, "取消任务")
+	assert.Contains(t, text, "重试")
+	assert.Contains(t, text, "删除")
+	assert.Contains(t, text, "取消")
 }
 
 func TestRetryDoesNotAdvanceSettledProgress(t *testing.T) {
@@ -892,24 +958,14 @@ func TestTaskPanelXDoesNotEnqueue(t *testing.T) {
 
 	press(&m, "x")
 	assert.Empty(t, m.queue.Snapshot(), "任务列表里按 x 不应新建主任务")
-	assert.Contains(t, m.statusMsg, "不会新建")
-
-	m.focus = panelOps
-	m.roster = nil
-	press(&m, "x")
-	assert.Equal(t, panelRun, m.focus)
 	assert.Nil(t, m.modal)
-	assert.Empty(t, m.queue.Snapshot(), "进入任务列表不入队")
-	assert.NotContains(t, m.filePane(8), "a.mkv")
-	press(&m, "x")
-	require.NotNil(t, m.modal, "入队前应弹出确认")
-	assert.Empty(t, m.queue.Snapshot())
+
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	assert.Empty(t, m.queue.Snapshot(), "打开创建弹窗还不入队")
 	press(&m, "esc")
 	assert.Nil(t, m.modal)
-	assert.Empty(t, m.queue.Snapshot(), "取消确认不入队")
-	press(&m, "x")
-	press(&m, "enter")
-	assert.Len(t, m.queue.Snapshot(), 1, "弹窗确认后才入队")
+	assert.Empty(t, m.queue.Snapshot(), "取消创建不入队")
 }
 
 func TestRunBodySplitsFixedAndOutput(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
+	"github.com/gsxhnd/batcher/internal/media"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/store"
 	"github.com/gsxhnd/batcher/internal/task"
 )
 
@@ -129,9 +132,22 @@ type model struct {
 	fieldValues map[string]string // 保留暂时隐藏字段以及显式清空的值
 	focusNo     int               // 表单内的字段下标
 	editing     bool              // 是否处于表单输入状态
+	dirSeq      int               // 文件夹文件列表的序号，用来丢掉过期结果
+	dirPending  string            // 正在读取的列表键
+	dirKey      string            // 当前 dirFiles 对应的列表键
+	dirLoading  bool              // 正在读取源视频或字体文件夹
+	dirFiles    []string          // 当前参数要处理的文件
+	dirErr      error             // 最近一次读取失败的原因
 
-	// 弹窗（预设/字幕编辑、删除确认），非空时按键全部交给弹窗
-	modal *modal
+	// 弹窗（创建任务、预设管理、编辑与确认），非空时按键全部交给弹窗
+	modal         *modal
+	db            *store.DB
+	savedList     []*task.Batch
+	forget        map[string]struct{} // 要从列表和数据库删掉的主任务
+	managePresets bool
+	creating      bool
+	createSeq     int
+	createSel     command.Selection
 
 	// 实时命令预览：配置变化后防抖生成，planSeq 丢弃过期结果
 	planSeq      int
@@ -201,7 +217,7 @@ type model struct {
 func newModel() model {
 	m := model{
 		ctx:   context.Background(),
-		focus: panelOps,
+		focus: panelRun,
 		bar: progress.New(
 			progress.WithColors(lipgloss.Color("81"), lipgloss.Color("114")),
 			progress.WithScaled(true),
@@ -245,13 +261,13 @@ func (m model) presetCount() int {
 // presetUserOffset 返回自定义预设区在完整列表中的起始下标。
 func (m model) presetUserOffset() int { return len(m.builtins) }
 
-// presetHintText 返回用户预设文件路径，用于状态提示。
+// presetHintText 返回任务数据库路径，预设和任务都写在这里。
 func presetHintText() string {
-	path, err := presets.FilePath()
+	dir, err := store.Dir()
 	if err != nil {
-		return "预设文件夹（无法解析位置: " + err.Error() + "）"
+		return "数据库（无法解析位置: " + err.Error() + "）"
 	}
-	return path
+	return filepath.Join(dir, store.FileName)
 }
 
 // panelEnabled 判断面板当前是否可用：未勾选对应操作的面板变灰不可进入。
@@ -324,8 +340,35 @@ type planMsg struct {
 	err  error
 }
 
+// createPlanMsg 是新建任务弹窗里一次目录扫描的结果。
+type createPlanMsg struct {
+	seq  int
+	plan *command.BatchPlan
+	err  error
+}
+
 // planDebounceMsg 是配置变化后的防抖时钟：到期且序号仍是最新时才重新生成命令。
 type planDebounceMsg struct{ seq int }
+
+// dirDebounceMsg 是文件夹路径变化后的防抖时钟。
+type dirDebounceMsg struct{ seq int }
+
+// dirListMsg 是一次文件夹扫描的结果。
+type dirListMsg struct {
+	seq   int
+	key   string
+	files []string
+	err   error
+}
+
+// dirQuery 描述当前要列出文件的参数。
+type dirQuery struct {
+	key    string
+	kind   string
+	path   string
+	format string
+	output string
+}
 
 type eventMsg struct {
 	runID int
@@ -359,6 +402,92 @@ func planCmd(ctx context.Context, opt *command.VideoBatchOption, sel command.Sel
 	}
 }
 
+// scheduleDirList 在当前参数是源视频或字体文件夹时读取其中要处理的文件。
+// 路径没变且已经有结果时不重复读取。离开这类参数时清掉列表。
+func (m *model) scheduleDirList(delay time.Duration) tea.Cmd {
+	q, ok := m.dirQuery()
+	if !ok {
+		m.dirSeq++
+		m.dirPending = ""
+		m.dirKey = ""
+		m.dirLoading = false
+		m.dirFiles = nil
+		m.dirErr = nil
+		return nil
+	}
+	if q.key == m.dirKey && !m.dirLoading {
+		return nil
+	}
+	if q.key == m.dirPending && m.dirLoading {
+		return nil
+	}
+	if q.key != m.dirKey {
+		m.dirFiles = nil
+		m.dirErr = nil
+	}
+	m.dirPending = q.key
+	m.dirLoading = true
+	m.dirSeq++
+	seq := m.dirSeq
+	if delay <= 0 {
+		return dirListCmd(m.ctx, seq, q)
+	}
+	return tea.Tick(delay, func(time.Time) tea.Msg { return dirDebounceMsg{seq: seq} })
+}
+
+func dirListCmd(ctx context.Context, seq int, q dirQuery) tea.Cmd {
+	return func() tea.Msg {
+		var files []string
+		var err error
+		switch q.kind {
+		case "input_path":
+			files, err = media.Videos(ctx, q.path, q.output, q.format)
+		case "fonts_path":
+			files, err = media.Fonts(ctx, q.path)
+		}
+		if err == nil {
+			slices.Sort(files)
+		}
+		return dirListMsg{seq: seq, key: q.key, files: files, err: err}
+	}
+}
+
+// dirQuery 返回当前选中的文件夹参数。其他参数不列文件。
+func (m model) dirQuery() (dirQuery, bool) {
+	if m.focus != panelForm || len(m.fields) == 0 {
+		return dirQuery{}, false
+	}
+	f := m.fields[clamp(m.focusNo, 0, len(m.fields)-1)]
+	path := f.resolved()
+	if path == "" {
+		return dirQuery{}, false
+	}
+	switch f.def.key {
+	case "input_path":
+		format := m.fieldResolved("input_format")
+		output := m.fieldResolved("output_path")
+		q := dirQuery{kind: "input_path", path: path, format: format, output: output}
+		q.key = strings.Join([]string{q.kind, path, format, output}, "\n")
+		return q, true
+	case "fonts_path":
+		q := dirQuery{kind: "fonts_path", path: path}
+		q.key = q.kind + "\n" + path
+		return q, true
+	default:
+		return dirQuery{}, false
+	}
+}
+
+// fieldResolved 返回指定参数的当前值，空白时用灰色占位里的默认值。
+func (m model) fieldResolved(key string) string {
+	for i := range m.fields {
+		if m.fields[i].def.key == key {
+			return m.fields[i].resolved()
+		}
+	}
+	return ""
+}
+
 func listenEvents(ctx context.Context, ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -379,6 +508,25 @@ func tickCmd(runID int) tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case createPlanMsg:
+		if msg.seq != m.createSeq || m.modal == nil || m.modal.kind != modalTask {
+			m.creating = false
+			return m, nil
+		}
+		m.creating = false
+		if msg.err != nil {
+			m.modal.err = msg.err.Error()
+			return m, nil
+		}
+		if msg.plan == nil || len(msg.plan.Jobs) == 0 {
+			m.modal.err = "未找到匹配的视频文件"
+			return m, nil
+		}
+		m.ops = m.createSel
+		m.modal = nil
+		m.managePresets = false
+		return m, m.enqueue(msg.plan)
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resizePanes()
@@ -407,6 +555,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq == m.planSeq && m.planGenerate {
 			return m, m.runPlan()
 		}
+		return m, nil
+
+	case dirDebounceMsg:
+		if msg.seq != m.dirSeq {
+			return m, nil
+		}
+		q, ok := m.dirQuery()
+		if !ok {
+			m.dirLoading = false
+			return m, nil
+		}
+		return m, dirListCmd(m.ctx, msg.seq, q)
+
+	case dirListMsg:
+		if msg.seq != m.dirSeq {
+			return m, nil
+		}
+		m.dirLoading = false
+		m.dirKey = msg.key
+		m.dirFiles = msg.files
+		m.dirErr = msg.err
 		return m, nil
 
 	case eventMsg:
@@ -465,7 +634,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKey 按当前状态分发按键：弹窗 > 表单编辑 > 执行中查看 > 全局键 > 面板按键。
+// handleKey 按当前状态分发按键：弹窗 > 输出查看 > 执行中取消 > 全局键 > 任务列表。
 func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 	if m.modal != nil {
 		return m.updateModal(key)
@@ -486,8 +655,7 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 
-	if m.running {
-		// 运行期间允许查看其他面板与编辑配置；q/esc 取消当前批次，队列继续处理后续任务。
+	if m.running || m.pausedBatch != "" {
 		switch s {
 		case "q", "esc":
 			if s == "esc" && m.outputFocus {
@@ -495,7 +663,6 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 				return nil
 			}
 			if m.pausedBatch != "" {
-				// 暂停中等待决策：q/esc 视作中止当前主任务。
 				m.queue.Decide(task.DecisionAbort)
 				m.statusMsg = "已发送中止指令"
 				return nil
@@ -505,76 +672,25 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 				m.statusMsg = "已发送取消请求，等待正在执行的任务结束…"
 			}
 			return nil
-		case "1", "2", "3", "4", "5", "tab", "shift+tab", "shift+down", "shift+up", "down", "up", "j", "k", "?", "x":
-			// 面板切换、焦点移动、帮助与入队（x 运行中被守卫拦截）交给下方全局分发。
-		default:
-			return m.updateRunPanel(key)
+		case "a":
+			m.statusMsg = "当前任务还未结束，结束后再按 a 创建"
+			return nil
 		}
 	}
 
 	switch s {
-	case "1":
-		m.setFocus(panelOps)
-		return nil
-	case "2":
-		m.setFocus(panelPresets)
-		return nil
-	case "3":
-		m.setFocus(panelSubs)
-		return nil
-	case "4":
-		m.setFocus(panelForm)
-		return nil
-	case "5":
-		m.setFocus(panelRun)
-		return nil
-	case "tab":
-		m.nextPanel(1)
-		return nil
-	case "shift+tab":
-		m.nextPanel(-1)
+	case "a":
+		return m.openTaskModal()
+	case "p":
+		m.openPresetList()
 		return nil
 	case "q":
 		return tea.Quit
 	case "?":
 		m.openHelpModal()
 		return nil
-	case "x":
-		if m.focus == panelRun && m.queueViewActive() {
-			m.statusMsg = "任务列表中按 x 不会新建主任务"
-			return nil
-		}
-		if m.focus != panelRun {
-			// 进入任务列表只展示参数，不入队。入队要在任务面板里再按一次 x。
-			m.setFocus(panelRun)
-			m.statusMsg = "已进入任务列表。按 x 弹出确认后才会入队"
-			return nil
-		}
-		return m.tryStartRun()
-	case "enter":
-		// 进入任务列表只查看预览或操作已有任务，不入队。入队只走 x。
-		if m.focus == panelRun {
-			return m.updateRunPanel(key)
-		}
 	}
-
-	if !m.panelEnabled(m.focus) {
-		// 聚焦面板已被禁用（例如执行结束取消勾选转码），不响应面板内按键。
-		return nil
-	}
-	switch m.focus {
-	case panelOps:
-		return m.updateOpsPanel(key)
-	case panelPresets:
-		return m.updatePresetsPanel(key)
-	case panelSubs:
-		return m.updateSubsPanel(key)
-	case panelForm:
-		return m.updateFormPanel(key)
-	case panelRun:
-		return m.updateRunPanel(key)
-	}
-	return nil
+	return m.updateRunPanel(key)
 }
 
 // handleMouse 处理鼠标滚轮事件：任务面板滚动命令/日志，帮助弹窗滚动帮助文本，其余面板忽略。
@@ -583,10 +699,10 @@ func (m *model) handleMouse(msg tea.MouseWheelMsg) tea.Cmd {
 	switch {
 	case m.modal != nil && m.modal.kind == modalHelp:
 		m.modal.vp, cmd = m.modal.vp.Update(msg)
-	case m.focus == panelRun && (m.running || m.queueViewActive()):
+	case m.running || m.queueViewActive():
 		m.logVp, cmd = m.logVp.Update(msg)
 		m.logFollow = m.logVp.AtBottom()
-	case m.focus == panelRun && m.previewDone && m.planErr == nil:
+	case m.previewDone && m.planErr == nil:
 		m.vp, cmd = m.vp.Update(msg)
 	}
 	return cmd
@@ -1120,7 +1236,7 @@ func (m model) subtaskStatusLine() string {
 	}
 	if m.queue != nil && len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
 		row := m.roster[m.fileCursor]
-		if snap, ok := m.queue.BatchCopy(row.batchID); ok {
+		if snap, ok := m.batchByID(row.batchID); ok {
 			for _, it := range snap.Items {
 				if it.ID != row.itemID || it.Status != task.StatusFailed || it.Error == "" {
 					continue
@@ -1179,7 +1295,7 @@ func (m model) focusedAttemptNumber() int {
 		return 0
 	}
 	row := m.roster[m.fileCursor]
-	snap, ok := m.queue.BatchCopy(row.batchID)
+	snap, ok := m.batchByID(row.batchID)
 	if !ok {
 		return 0
 	}
@@ -1207,7 +1323,7 @@ func (m *model) beginAttempt(idx int) {
 	it := &m.files[idx]
 	n := len(it.attempts) + 1
 	if m.queue != nil && m.activeBatch != "" {
-		if snap, ok := m.queue.BatchCopy(m.activeBatch); ok && idx < len(snap.Items) && snap.Items[idx].Attempts > n {
+		if snap, ok := m.batchByID(m.activeBatch); ok && idx < len(snap.Items) && snap.Items[idx].Attempts > n {
 			n = snap.Items[idx].Attempts
 		}
 	}
@@ -1233,7 +1349,7 @@ func (m model) oneAttemptLines(row rosterRow) []string {
 		}
 	}
 	if m.queue != nil {
-		if snap, ok := m.queue.BatchCopy(row.batchID); ok {
+		if snap, ok := m.batchByID(row.batchID); ok {
 			for _, it := range snap.Items {
 				if it.ID != row.itemID || row.attempt != it.Attempts {
 					continue
@@ -1266,7 +1382,7 @@ func (m model) batchItemLines(batchID string) []string {
 	if m.queue == nil {
 		return []string{descStyle.Render("暂无子任务")}
 	}
-	snap, ok := m.queue.BatchCopy(batchID)
+	snap, ok := m.batchByID(batchID)
 	if !ok || snap == nil {
 		return []string{descStyle.Render("任务已不在队列中")}
 	}
@@ -1341,7 +1457,7 @@ func itemStateText(s task.Status) string {
 
 // historyLines 返回历史/等待中批次的只读内容（不保留完整日志，只展示状态与错误尾部）。
 func (m *model) historyLines(row rosterRow) []string {
-	b, ok := m.queue.BatchCopy(row.batchID)
+	b, ok := m.batchByID(row.batchID)
 	if !ok {
 		return nil
 	}
@@ -1519,7 +1635,7 @@ func (m model) attemptSnapshots(batchID, itemID string) []attemptSnap {
 	if m.queue == nil {
 		return nil
 	}
-	snap, ok := m.queue.BatchCopy(batchID)
+	snap, ok := m.batchByID(batchID)
 	if !ok {
 		return nil
 	}
@@ -1540,19 +1656,12 @@ func (m model) attemptSnapshots(batchID, itemID string) []attemptSnap {
 	return nil
 }
 
-// syncRoster 从队列快照重建任务面板左侧的批次列表（含展开的子任务行），
-// 并尽量把光标恢复到钉住的行；队列未就绪时清空列表回到预览文件列表。
+// syncRoster 从队列和已保存的任务重建左侧列表（含展开的子任务行），
+// 并尽量把光标恢复到钉住的行。队列里的状态优先于数据库里的副本。
 func (m *model) syncRoster() {
-	if m.queue == nil {
-		m.roster = nil
-		return
-	}
+	m.reloadSaved()
 	rows := make([]rosterRow, 0, 8)
-	for _, ptr := range m.queue.Snapshot() {
-		b, ok := m.queue.BatchCopy(ptr.ID)
-		if !ok {
-			continue
-		}
+	for _, b := range m.rosterBatches() {
 		c := b.Counts()
 		settled := c.Done + c.Skipped + c.Canceled
 		title := fmt.Sprintf("%s（%s %d/%d）", b.Name, batchStateText(b.Status), settled, c.Total)
@@ -1775,9 +1884,6 @@ func (m model) itemProgressLabel(batchID, itemID string, status task.Status) str
 
 // focusedSnapshot 返回光标所在主任务；没有队列列表时返回当前正在执行的批次。
 func (m model) focusedSnapshot() (*task.Batch, bool) {
-	if m.queue == nil {
-		return nil, false
-	}
 	id := m.activeBatch
 	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
 		id = m.roster[m.fileCursor].batchID
@@ -1785,7 +1891,61 @@ func (m model) focusedSnapshot() (*task.Batch, bool) {
 	if id == "" {
 		return nil, false
 	}
-	return m.queue.BatchCopy(id)
+	return m.batchByID(id)
+}
+
+// batchByID 先取队列中的实时副本，否则取数据库里的任务。
+func (m model) batchByID(id string) (*task.Batch, bool) {
+	if id == "" {
+		return nil, false
+	}
+	if m.queue != nil {
+		if b, ok := m.queue.BatchCopy(id); ok {
+			return b, true
+		}
+	}
+	for _, b := range m.savedList {
+		if b != nil && b.ID == id {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// rosterBatches 返回左侧列表要展示的主任务：队列中的在前，仅存在于数据库的历史任务在后。
+func (m model) rosterBatches() []*task.Batch {
+	var out []*task.Batch
+	seen := map[string]bool{}
+	if m.queue != nil {
+		for _, ptr := range m.queue.Snapshot() {
+			b, ok := m.queue.BatchCopy(ptr.ID)
+			if !ok || b == nil {
+				continue
+			}
+			seen[b.ID] = true
+			out = append(out, b)
+		}
+	}
+	for _, b := range m.savedList {
+		if b == nil || seen[b.ID] {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// reloadSaved 从数据库重新读取任务列表。未打开数据库时保持原样。
+func (m *model) reloadSaved() {
+	if m.db == nil {
+		return
+	}
+	list, err := m.db.ListTasks()
+	if err != nil {
+		m.statusMsg = "× 读取任务失败: " + err.Error()
+		return
+	}
+	m.savedList = list
 }
 
 // focusedBatchRow 返回光标所在的主任务行。
@@ -1943,7 +2103,8 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		m.resumeTimer()
 		if idx := itemIndexOf(e.ItemID); idx >= 0 && idx < len(m.files) {
 			cmd = m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandStart, Index: idx, Total: m.total, Command: m.files[idx].cmd})
-			if m.fileFollow {
+			// 正在看这个子任务时，重试后光标跟到新的一次；浏览其他任务时不抢走光标。
+			if m.fileFollow || (m.rosterPinBatch == e.BatchID && m.rosterPinItem == e.ItemID) {
 				m.rosterPinBatch, m.rosterPinItem = e.BatchID, e.ItemID
 				m.rosterPinAttempt = m.attemptNumber(idx)
 			}
@@ -1980,7 +2141,7 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 	case task.QueueBatchPaused:
 		m.pausedBatch = e.BatchID
 		m.pauseTimer()
-		m.statusMsg = "任务已暂停：r 重试 / d 删除 / c 取消"
+		m.statusMsg = "任务已暂停：r 重试 / s 跳过 / x 中止"
 	case task.QueueBatchDone, task.QueueBatchFailed, task.QueueBatchCanceled:
 		// 只有正在执行时才收尾；取消队列里等待中的其他批次只刷新列表。
 		if m.running {
@@ -1990,8 +2151,26 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		// 由 quitCleanup 或程序 ctx 触发，无需界面处理。
 	}
 	m.syncRoster()
+	if e.Type == task.QueueBatchRemoved {
+		m.dropForgotten(e.BatchID)
+		m.syncRoster()
+	}
 	m.syncLogPane()
 	return cmd
+}
+
+// dropForgotten 在队列已经移除主任务之后，把它从数据库里删掉。
+func (m *model) dropForgotten(id string) {
+	if _, ok := m.forget[id]; !ok {
+		return
+	}
+	delete(m.forget, id)
+	if m.db == nil {
+		return
+	}
+	if err := m.db.DeleteTask(id); err != nil {
+		m.statusMsg = "× 删除任务记录失败: " + err.Error()
+	}
 }
 
 // applyBatchStart 从队列快照重建文件列表并初始化执行状态。
@@ -1999,7 +2178,7 @@ func (m *model) applyBatchStart(batchID string) tea.Cmd {
 	if batchID == "" {
 		return nil
 	}
-	snap, ok := m.queue.BatchCopy(batchID)
+	snap, ok := m.batchByID(batchID)
 	if !ok {
 		return nil
 	}
@@ -2042,7 +2221,7 @@ func (m *model) applyBatchFinish(e task.QueueEvent) tea.Cmd {
 		return nil // 结束的是旧批次消息，忽略
 	}
 	m.resumeTimer()
-	if snap, ok := m.queue.BatchCopy(e.BatchID); ok {
+	if snap, ok := m.batchByID(e.BatchID); ok {
 		states := buildQueueItems(snap.Items)
 		for i := range states {
 			if i >= len(m.files) {
