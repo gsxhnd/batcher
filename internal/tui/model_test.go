@@ -105,6 +105,8 @@ func TestPresetModalAddEditDuplicate(t *testing.T) {
 	require.NotNil(t, m.modal, "按 a 应打开新增弹窗")
 	require.Equal(t, modalPreset, m.modal.kind)
 	require.Equal(t, 2, len(m.modal.fields), "弹窗应包含名称与参数两个字段")
+	assert.Empty(t, m.modal.fields[0].input.Value(), "空白新建时名称应为空")
+	assert.Empty(t, m.modal.fields[1].input.Value(), "空白新建时参数应为空")
 	fill := func(name, args string) {
 		m.modal.fields[0].input.SetValue(name)
 		m.modal.fields[1].input.SetValue(args)
@@ -135,8 +137,8 @@ func TestPresetModalAddEditDuplicate(t *testing.T) {
 	require.Equal(t, modalPresetList, m.modal.kind, "esc 取消编辑并回到列表")
 
 	// 编辑第二条自定义预设
-	m.presetCursor = m.presetUserOffset() + 1
-	m.modal.focus = m.presetCursor
+	m.presetCursor = 1
+	m.modal.focus = 1
 	press(&m, "e")
 	require.NotNil(t, m.modal)
 	m.modal.fields[0].input.SetValue("H.264")
@@ -160,8 +162,8 @@ func TestPresetDeleteUsesConfirmModal(t *testing.T) {
 	m.manualAdvance = "a" // 删除当前选中预设时应同步清空主表单
 
 	press(&m, "p")
-	m.presetCursor = m.presetUserOffset()
-	m.modal.focus = m.presetCursor
+	m.presetCursor = 0
+	m.modal.focus = 0
 
 	press(&m, "d")
 	require.NotNil(t, m.modal, "第一次按 d 应弹确认窗")
@@ -171,16 +173,16 @@ func TestPresetDeleteUsesConfirmModal(t *testing.T) {
 	require.Equal(t, modalPresetList, m.modal.kind, "取消删除后回到预设列表")
 	assert.Len(t, m.presets, 2, "esc 取消删除")
 
-	m.presetCursor = m.presetUserOffset()
-	m.modal.focus = m.presetCursor
+	m.presetCursor = 0
+	m.modal.focus = 0
 	press(&m, "d")
 	press(&m, "enter")
 	assert.Equal(t, []presets.Preset{{Args: "b"}}, m.presets, "enter 确认后删除")
 	assert.Equal(t, "", m.manualAdvance, "删除当前选中预设后应清空已选参数")
 	require.Equal(t, modalPresetList, m.modal.kind)
 
-	m.presetCursor = m.presetUserOffset()
-	m.modal.focus = m.presetCursor
+	m.presetCursor = 0
+	m.modal.focus = 0
 	press(&m, "d")
 	press(&m, "j")
 	require.NotNil(t, m.modal, "确认弹窗内按无关键应保持打开")
@@ -192,12 +194,12 @@ func TestPresetReorderPersists(t *testing.T) {
 	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}, {Args: "c"}}))
 	m := newModel()
 	press(&m, "p")
-	m.presetCursor = m.presetUserOffset()
-	m.modal.focus = m.presetCursor
+	m.presetCursor = 0
+	m.modal.focus = 0
 
 	press(&m, "J")
 	assert.Equal(t, []presets.Preset{{Args: "b"}, {Args: "a"}, {Args: "c"}}, m.presets)
-	assert.Equal(t, m.presetUserOffset()+1, m.presetCursor, "移动后光标跟随条目")
+	assert.Equal(t, 1, m.presetCursor, "移动后光标跟随条目")
 
 	loaded, err := presets.Load()
 	require.NoError(t, err)
@@ -209,37 +211,39 @@ func TestPresetGuardsBuiltins(t *testing.T) {
 	m := newModel()
 	press(&m, "p")
 	require.Equal(t, modalPresetList, m.modal.kind)
-	m.presetCursor = 0
-	m.modal.focus = 0
-
-	press(&m, "d")
-	assert.Empty(t, m.presets, "内置预设不可删除")
-	assert.Equal(t, modalPresetList, m.modal.kind)
-	assert.NotEmpty(t, m.statusMsg)
-
 	press(&m, "e")
-	assert.Equal(t, modalPresetList, m.modal.kind, "内置条目不进入编辑弹窗")
-	assert.NotEmpty(t, m.statusMsg, "内置条目按 e 应提示只读")
+	assert.Equal(t, modalPresetList, m.modal.kind)
+	assert.Contains(t, m.presetListContent(), "还没有预设", "提示应出现在预设弹窗里")
+	assert.Empty(t, m.presets)
+
+	m.presets = []presets.Preset{{Name: "可删除", Args: "-c copy"}}
+	m.openPresetList()
+	press(&m, "d")
+	require.Equal(t, modalConfirm, m.modal.kind)
+	press(&m, "enter")
+	assert.Empty(t, m.presets, "数据库里的预设可以删除")
 }
 
 func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
+	src := presets.Preset{Name: m.builtins[0].Name, Args: m.builtins[0].Args}
+	m.presets = []presets.Preset{src}
 	press(&m, "p")
-	require.NotEmpty(t, m.builtins)
 	require.Equal(t, 0, m.modal.focus)
 
-	press(&m, "a")
-	require.NotNil(t, m.modal, "选中内置预设按 a 应打开复制弹窗")
+	press(&m, "c")
+	require.NotNil(t, m.modal, "选中预设按 c 应打开复制弹窗")
 	require.Equal(t, modalPreset, m.modal.kind)
-	assert.Equal(t, m.builtins[0].Name, m.modal.fields[0].input.Value(), "名称预填内置预设名")
-	assert.Equal(t, m.builtins[0].Args, m.modal.fields[1].input.Value(), "参数预填内置预设参数")
+	assert.Equal(t, src.Name, m.modal.fields[0].input.Value(), "名称预填被复制的预设")
+	assert.Equal(t, src.Args, m.modal.fields[1].input.Value(), "参数预填被复制的预设")
 
+	m.modal.fields[1].input.SetValue(src.Args + " -sn")
 	m.modal.focus = 1
 	press(&m, "ctrl+s")
 	require.Equal(t, modalPresetList, m.modal.kind, "保存后回到预设列表")
-	assert.Equal(t, []presets.Preset{{Name: m.builtins[0].Name, Args: m.builtins[0].Args}}, m.presets,
-		"复制后成为自定义预设")
+	require.Len(t, m.presets, 2)
+	assert.Equal(t, src.Args+" -sn", m.presets[1].Args)
 }
 
 // TestModalSwallowsGlobalKeys 弹窗打开时全局快捷键不应生效。

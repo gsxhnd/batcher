@@ -156,8 +156,9 @@ func helpText() string {
 
 	section("转码预设")
 	row("p", "打开预设管理")
-	row("a", "新增；选中内置预设时复制为自定义")
-	row("e", "编辑自定义预设（内置只读）")
+	row("a", "从空白表单新建自定义预设")
+	row("c", "把当前选中的预设复制成一条新的")
+	row("e", "编辑当前预设")
 	row("d", "删除自定义预设（弹窗确认）")
 	row("J / K", "下移 / 上移自定义预设")
 	if version != "" || buildDate != "" || gitCommit != "" {
@@ -419,7 +420,11 @@ func (m *model) savePresetModal() tea.Cmd {
 			md.err = "保存失败: " + err.Error()
 			return nil
 		}
-		m.presetCursor = m.presetUserOffset() + md.editIndex
+		if m.managePresets {
+			m.presetCursor = md.editIndex
+		} else {
+			m.presetCursor = m.presetUserOffset() + md.editIndex
+		}
 		m.syncManualAdvance(oldArgs, entry.Args)
 	} else {
 		// 新增不影响当前选中的预设参数，只把光标指向新条目。
@@ -428,7 +433,11 @@ func (m *model) savePresetModal() tea.Cmd {
 			md.err = "保存失败: " + err.Error()
 			return nil
 		}
-		m.presetCursor = m.presetCount() - 2 // 手动输入项之前
+		if m.managePresets {
+			m.presetCursor = len(next) - 1
+		} else {
+			m.presetCursor = m.presetCount() - 2 // 手动输入项之前
+		}
 	}
 	m.modal = nil
 	if m.managePresets {

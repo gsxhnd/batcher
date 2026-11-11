@@ -228,8 +228,12 @@ func (db *DB) SavePresets(list []presets.Preset) error {
 	return nil
 }
 
-// importLegacyPresets 在第一次打开数据库时，把旧的 advance_presets.json 导入预设桶。
+// importLegacyPresets 在第一次打开数据库时准备预设。
+// 预设键已经存在就保持原样。键不存在时，有旧的 JSON 就导入，否则写入内置预设。
 func (db *DB) importLegacyPresets() error {
+	if presetListRaw(db) != nil {
+		return db.markPresetsImported()
+	}
 	var imported bool
 	err := db.bolt.View(func(tx *bolt.Tx) error {
 		imported = len(tx.Bucket(bucketMeta).Get(keyImported)) > 0
@@ -238,27 +242,47 @@ func (db *DB) importLegacyPresets() error {
 	if err != nil {
 		return fmt.Errorf("读取预设迁移标记: %w", err)
 	}
-	if imported {
-		return nil
-	}
-	existing, err := db.LoadPresets()
-	if err != nil {
-		return err
-	}
-	if len(existing) == 0 {
-		if dir, err := presets.Dir(); err == nil {
-			legacy, err := presets.LoadFrom(dir)
-			if err != nil {
-				return fmt.Errorf("导入旧预设: %w", err)
-			}
-			if len(legacy) > 0 {
-				if err := db.SavePresets(legacy); err != nil {
-					return err
-				}
-			}
+	var list []presets.Preset
+	if !imported {
+		list, err = legacyPresetList()
+		if err != nil {
+			return err
 		}
 	}
-	err = db.bolt.Update(func(tx *bolt.Tx) error {
+	if len(list) == 0 {
+		for _, b := range presets.Builtins() {
+			list = append(list, presets.Preset{Name: b.Name, Args: b.Args})
+		}
+	}
+	if err := db.SavePresets(list); err != nil {
+		return err
+	}
+	return db.markPresetsImported()
+}
+
+func presetListRaw(db *DB) []byte {
+	var data []byte
+	_ = db.bolt.View(func(tx *bolt.Tx) error {
+		data = tx.Bucket(bucketPresets).Get(keyPresetList)
+		return nil
+	})
+	return data
+}
+
+func legacyPresetList() ([]presets.Preset, error) {
+	dir, err := presets.Dir()
+	if err != nil {
+		return nil, nil
+	}
+	list, err := presets.LoadFrom(dir)
+	if err != nil {
+		return nil, fmt.Errorf("导入旧预设: %w", err)
+	}
+	return list, nil
+}
+
+func (db *DB) markPresetsImported() error {
+	err := db.bolt.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketMeta).Put(keyImported, []byte("1"))
 	})
 	if err != nil {

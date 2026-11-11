@@ -247,15 +247,19 @@ func TestTaskModalFillsTheScreen(t *testing.T) {
 	box := m.taskModalView()
 	lines := strings.Split(strings.TrimSuffix(box, "\n"), "\n")
 	require.NotEmpty(t, lines)
-	assert.GreaterOrEqual(t, lipgloss.Width(lines[0]), 110, "创建弹窗应接近终端宽度")
-	assert.GreaterOrEqual(t, len(lines), 30, "创建弹窗应接近终端高度")
+	assert.LessOrEqual(t, lipgloss.Width(lines[0]), 76, "创建弹窗不应铺满终端宽度")
+	assert.GreaterOrEqual(t, lipgloss.Width(lines[0]), 60)
+	assert.LessOrEqual(t, len(lines), 24, "创建弹窗不应铺满终端高度")
+	assert.GreaterOrEqual(t, len(lines), 14)
 	width := lipgloss.Width(lines[0])
 	for i, ln := range lines {
 		assert.Equal(t, width, lipgloss.Width(ln), "第 %d 行宽度不一致", i+1)
 	}
-	for _, word := range []string{"操作", "源与输出", "转码", "字体", "字幕 1", "手动输入"} {
-		assert.Contains(t, box, word)
-	}
+	assert.Contains(t, box, "操作")
+	assert.Contains(t, box, "源与输出")
+	m.modal.focus = len(m.modal.fields) - 1
+	lower := m.taskModalView()
+	assert.Contains(t, lower, "字幕")
 	out := m.render()
 	for i, ln := range strings.Split(out, "\n") {
 		assert.Equal(t, m.width, lipgloss.Width(ln), "压暗后的整页第 %d 行宽度不一致", i+1)

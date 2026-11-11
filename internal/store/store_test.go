@@ -76,6 +76,55 @@ func TestOpenImportsLegacyPresetsOnce(t *testing.T) {
 	assert.Equal(t, "-c copy", ps[0].Args, "导入只发生一次，之后以数据库为准")
 }
 
+func TestOpenSeedsBuiltinsOnce(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BATCHER_DATA_DIR", root)
+	t.Setenv("BATCHER_PRESETS_DIR", filepath.Join(root, "没有旧预设"))
+
+	db, err := Open()
+	require.NoError(t, err)
+	ps, err := db.LoadPresets()
+	require.NoError(t, err)
+	require.Len(t, ps, len(presets.Builtins()))
+	assert.Equal(t, presets.Builtins()[0].Args, ps[0].Args)
+	kept := ps[1:]
+	require.NoError(t, db.SavePresets(kept))
+	require.NoError(t, db.Close())
+
+	db, err = Open()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ps, err = db.LoadPresets()
+	require.NoError(t, err)
+	assert.Equal(t, kept, ps, "数据库里已经有预设时不再插入内置项")
+
+	require.NoError(t, db.SavePresets(nil))
+	require.NoError(t, db.Close())
+	db, err = Open()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ps, err = db.LoadPresets()
+	require.NoError(t, err)
+	assert.Empty(t, ps, "用户删空之后不会把内置预设再写回去")
+}
+
+func TestOpenSeedsWhenMarkerExistsButListMissing(t *testing.T) {
+	root := t.TempDir()
+	db, err := OpenDir(root)
+	require.NoError(t, err)
+	require.NoError(t, db.markPresetsImported())
+	require.NoError(t, db.Close())
+
+	t.Setenv("BATCHER_DATA_DIR", root)
+	t.Setenv("BATCHER_PRESETS_DIR", filepath.Join(root, "没有旧预设"))
+	db, err = Open()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ps, err := db.LoadPresets()
+	require.NoError(t, err)
+	assert.Len(t, ps, len(presets.Builtins()))
+}
+
 func TestDirUsesExecutableFolder(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "batcher")

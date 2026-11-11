@@ -63,16 +63,23 @@ func (m *model) updatePresetsPanel(msg tea.Msg) tea.Cmd {
 		m.applyAdvanceToForm()
 		return m.schedulePlan(0)
 	case "a", "n":
+		return m.openPresetModal(-1, presets.Preset{})
+	case "c":
 		if m.presetCursor < offset {
 			b := m.builtins[m.presetCursor]
-			return m.openPresetModal(-1, presets.Preset(b))
+			return m.openPresetModal(-1, presets.Preset{Name: b.Name, Args: b.Args})
 		}
-		return m.openPresetModal(-1, presets.Preset{})
+		if idx, ok := m.selectedUserPreset(); ok {
+			p := m.presets[idx]
+			return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
+		}
+		m.statusMsg = "先选中一条预设，再按 c 复制"
+		return nil
 	case "e":
 		if idx, ok := m.selectedUserPreset(); ok {
 			return m.openPresetModal(idx, m.presets[idx])
 		}
-		m.statusMsg = "仅自定义预设可编辑；内置预设按 a 复制，手动参数在面板 4 编辑"
+		m.statusMsg = "内置预设只读。按 a 从空白新建，按 c 复制这条"
 		return nil
 	case "d":
 		idx, ok := m.selectedUserPreset()
@@ -139,6 +146,9 @@ func (m *model) deletePreset(idx int) tea.Cmd {
 // movePreset 把当前自定义预设上移（-1）或下移（+1），并保存顺序。
 func (m *model) movePreset(delta int) {
 	idx, ok := m.selectedUserPreset()
+	if m.managePresets {
+		idx, ok = m.listedPreset()
+	}
 	to := idx + delta
 	if !ok || len(m.presets) < 2 || to < 0 || to >= len(m.presets) {
 		return
@@ -146,7 +156,11 @@ func (m *model) movePreset(delta int) {
 	next := slices.Clone(m.presets)
 	next[idx], next[to] = next[to], next[idx]
 	if err := m.persistPresets(next, "已调整顺序"); err == nil {
-		m.presetCursor = m.presetUserOffset() + to
+		if m.managePresets {
+			m.presetCursor = to
+		} else {
+			m.presetCursor = m.presetUserOffset() + to
+		}
 	}
 }
 

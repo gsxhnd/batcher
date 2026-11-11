@@ -46,10 +46,6 @@ func (m *model) openTaskModal() tea.Cmd {
 func (m model) presetChoices() (labels, args []string) {
 	labels = append(labels, "手动输入")
 	args = append(args, "")
-	for _, b := range m.builtins {
-		labels = append(labels, b.Name)
-		args = append(args, b.Args)
-	}
 	for _, p := range m.presets {
 		label := p.Name
 		if label == "" {
@@ -254,10 +250,25 @@ func focusTaskField(md *modal, key string) tea.Cmd {
 }
 
 func (m model) presetManageCount() int {
-	return len(m.builtins) + len(m.presets)
+	return len(m.presets)
 }
 
-// openPresetList 打开转码预设管理。内置项只读，自定义项可以增删改和排序。
+// listedPreset 是预设管理列表里的当前项。列表里的每一条都存在数据库中，可以编辑和删除。
+func (m model) listedPreset() (int, bool) {
+	if m.presetCursor >= 0 && m.presetCursor < len(m.presets) {
+		return m.presetCursor, true
+	}
+	return 0, false
+}
+
+func (m *model) notePresetList(msg string) {
+	m.statusMsg = msg
+	if m.modal != nil && m.modal.kind == modalPresetList {
+		m.modal.err = msg
+	}
+}
+
+// openPresetList 打开转码预设管理。列表来自数据库，每一条都可以编辑和删除。
 func (m *model) openPresetList() {
 	m.managePresets = true
 	n := m.presetManageCount()
@@ -283,40 +294,76 @@ func (m *model) updatePresetList(key string) tea.Cmd {
 		if n > 0 {
 			m.presetCursor = (m.presetCursor - 1 + n) % n
 		}
+		if m.modal != nil {
+			m.modal.err = ""
+		}
 	case "down", "j":
 		if n > 0 {
 			m.presetCursor = (m.presetCursor + 1) % n
 		}
+		if m.modal != nil {
+			m.modal.err = ""
+		}
 	case "a", "n":
-		if n > 0 && m.presetCursor < len(m.builtins) {
-			b := m.builtins[m.presetCursor]
-			return m.openPresetModal(-1, presets.Preset{Name: b.Name, Args: b.Args})
-		}
 		return m.openPresetModal(-1, presets.Preset{})
+	case "c":
+		return m.copyPresetModal()
 	case "e", "enter":
-		if idx, ok := m.selectedUserPreset(); ok {
-			return m.openPresetModal(idx, m.presets[idx])
-		}
-		m.statusMsg = "内置预设只读，按 a 复制成自定义预设"
-		return nil
-	case "d":
-		idx, ok := m.selectedUserPreset()
+		idx, ok := m.listedPreset()
 		if !ok {
-			m.statusMsg = "仅自定义预设可删除"
+			m.notePresetList("还没有预设，按 a 从空白新建")
+			return nil
+		}
+		return m.openPresetModal(idx, m.presets[idx])
+	case "d":
+		idx, ok := m.listedPreset()
+		if !ok {
+			m.notePresetList("还没有预设，按 a 从空白新建")
 			return nil
 		}
 		name := presetDisplayName(m.presets[idx])
-		m.openConfirmModal("删除自定义预设", fmt.Sprintf("删除「%s」？enter 确认，esc 取消", name),
+		m.openConfirmModal("删除预设", fmt.Sprintf("删除「%s」？enter 确认，esc 取消", name),
 			func(m *model) tea.Cmd { return m.deletePreset(idx) })
 		return nil
 	case "K", "shift+up":
+		if _, ok := m.listedPreset(); !ok {
+			m.notePresetList("还没有预设，按 a 从空白新建")
+			return nil
+		}
 		m.movePreset(-1)
 	case "J", "shift+down":
+		if _, ok := m.listedPreset(); !ok {
+			m.notePresetList("还没有预设，按 a 从空白新建")
+			return nil
+		}
 		m.movePreset(1)
 	}
 	if m.modal != nil && m.modal.kind == modalPresetList {
 		m.modal.focus = m.presetCursor
 	}
+	return nil
+}
+
+// copyPresetModal 把当前选中的内置或自定义预设复制成一条新的自定义预设。
+func (m *model) copyPresetModal() tea.Cmd {
+	if m.managePresets {
+		idx, ok := m.listedPreset()
+		if !ok {
+			m.notePresetList("还没有预设，按 a 从空白新建")
+			return nil
+		}
+		p := m.presets[idx]
+		return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
+	}
+	if m.presetCursor >= 0 && m.presetCursor < len(m.builtins) {
+		b := m.builtins[m.presetCursor]
+		return m.openPresetModal(-1, presets.Preset{Name: b.Name, Args: b.Args})
+	}
+	if idx, ok := m.selectedUserPreset(); ok {
+		p := m.presets[idx]
+		return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
+	}
+	m.statusMsg = "先选中一条预设，再按 c 复制"
 	return nil
 }
 
@@ -326,37 +373,33 @@ func (m model) presetListContent() string {
 	if m.modal != nil {
 		cur = m.modal.focus
 	}
-	offset := len(m.builtins)
 	rows := make([]string, 0, n)
+	if n == 0 {
+		rows = append(rows, "  "+descStyle.Render("还没有预设"))
+	}
 	for i := 0; i < n; i++ {
-		label, tag := "", "内置"
-		if i < offset {
-			label = m.builtins[i].Name
-		} else {
-			p := m.presets[i-offset]
-			label = p.Name
-			if label == "" {
-				label = p.Args
-			}
-			tag = "自定义"
+		p := m.presets[i]
+		label := p.Name
+		if label == "" {
+			label = p.Args
 		}
 		mark := "  "
 		if i == cur {
 			mark = "▸ "
 		}
-		rows = append(rows, mark+label+"  "+descStyle.Render(tag))
+		rows = append(rows, mark+label)
 	}
 	var b strings.Builder
 	for _, line := range windowRows(rows, cur, max(m.bodyH()-10, 6)) {
 		b.WriteString(line + "\n")
 	}
-	switch {
-	case cur >= 0 && cur < offset:
-		b.WriteString("\n  " + codeStyle.Render(m.builtins[cur].Args) + "\n")
-	case cur >= offset && cur-offset < len(m.presets):
-		b.WriteString("\n  " + codeStyle.Render(m.presets[cur-offset].Args) + "\n")
+	if cur >= 0 && cur < len(m.presets) {
+		b.WriteString("\n  " + codeStyle.Render(m.presets[cur].Args) + "\n")
 	}
-	b.WriteString("  " + descStyle.Render("a 新增 · e 编辑 · d 删除 · J/K 排序 · esc 关闭") + "\n")
+	if m.modal != nil && m.modal.err != "" {
+		b.WriteString("  " + errorStyle.Render("× "+m.modal.err) + "\n")
+	}
+	b.WriteString("  " + descStyle.Render("a 空白新建 · c 复制当前 · e 编辑 · d 删除 · J/K 排序 · esc 关闭") + "\n")
 	return b.String()
 }
 
@@ -366,21 +409,21 @@ type taskLine struct {
 	text  string
 }
 
-// taskModalSize 让创建弹窗几乎铺满终端，只在四周留出一圈压暗的主界面。
+// taskModalSize 把创建弹窗限制在适中尺寸：比一行表单宽，但不铺满整个终端。
 func (m model) taskModalSize() (w, contentH int) {
-	w = 48
-	if m.width >= 40 {
-		w = m.width - 4
+	w = 72
+	contentH = 20
+	if m.width > 0 {
+		w = min(72, max(m.width-10, 40))
+		if w > m.width-2 {
+			w = max(m.width-2, 12)
+		}
 	}
-	if m.width > 0 && w > m.width-2 {
-		w = max(m.width-2, 12)
-	}
-	contentH = 16
-	if m.height >= 20 {
-		contentH = m.height - 6
-	}
-	if m.height > 0 && contentH+2 > m.height-1 {
-		contentH = max(m.height-3, 6)
+	if m.height > 0 {
+		contentH = min(20, max(m.height-10, 12))
+		if contentH+2 > m.height-1 {
+			contentH = max(m.height-3, 6)
+		}
 	}
 	return w, contentH
 }

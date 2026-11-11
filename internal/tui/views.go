@@ -286,7 +286,7 @@ func (m model) presetsPane(h int) string {
 	manual := m.presetUserOffset() + len(m.presets)
 	extra := ""
 	if len(m.presets) == 0 {
-		extra = "按 a 复制内置"
+		extra = "按 a 空白新建"
 	}
 	rows = append(rows, m.presetsRow(m.presetCursor == manual, "(手动输入)", extra))
 	return sidebarRows(rows, m.presetCursor, h)
@@ -1153,7 +1153,7 @@ func (m model) footer() string {
 			case modalTask:
 				hints = []string{"↑/↓ 切换", "space 勾选", "ctrl+n 加字幕", "ctrl+s 创建", "esc 取消"}
 			case modalPresetList:
-				hints = []string{"↑/↓ 选择", "a 新增", "e 编辑", "d 删除", "J/K 排序", "esc 关闭"}
+				hints = []string{"↑/↓ 选择", "a 空白新建", "c 复制", "e 编辑", "d 删除", "J/K 排序", "esc 关闭"}
 			}
 		}
 	case m.outputFocus:
