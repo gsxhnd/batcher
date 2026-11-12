@@ -35,15 +35,19 @@ const (
 // modal 是覆盖在主界面上的浮层。非空时全部按键由弹窗处理，
 // 保存失败时错误显示在弹窗内且弹窗保持打开，方便直接修改。
 type modal struct {
-	kind      modalKind
-	title     string
-	fields    []field
-	focus     int            // 表单弹窗内的字段下标
-	picking   bool           // 新建任务里转码预设列表是否展开
-	err       string         // 表单校验错误，显示在弹窗底部
-	editIndex int            // 编辑的条目下标，-1 表示新增
-	prompt    string         // 确认弹窗的说明文字 / 帮助弹窗的原始文本
-	vp        viewport.Model // 帮助弹窗的滚动视口
+	kind         modalKind
+	title        string
+	fields       []field
+	focus        int            // 表单弹窗内的字段下标
+	picking      bool           // 新建任务里转码预设列表是否展开
+	err          string         // 表单校验错误，显示在弹窗底部
+	editIndex    int            // 编辑的条目下标，-1 表示新增
+	prompt       string         // 确认弹窗的说明文字 / 帮助弹窗的原始文本
+	jobs         []enqueueJob   // 入队确认里的子任务；为空时按普通确认框处理
+	sharedFonts  []string       // 各子任务字体相同时，列在列表上方
+	showJobFonts bool           // 字体不同，展开后写在各自的子任务里
+	jobOpen      []bool         // 与 jobs 等长，默认全部展开
+	vp           viewport.Model // 帮助弹窗的滚动视口
 	// onConfirm 确认回调：由打开处捕获需要的下标等上下文，内部完成变更并清理弹窗。
 	onConfirm func(*model) tea.Cmd
 	returnTo  modalReturn
@@ -120,13 +124,18 @@ func (m *model) resizeModal() {
 }
 
 // layoutConfirm 内容放得下时按原文高度显示；超出一屏则放进可滚动视口。
+// 入队确认会把光标所在的子任务滚进视口。
 func (m *model) layoutConfirm() {
 	md := m.modal
 	if md == nil || md.kind != modalConfirm {
 		return
 	}
-	_, inner := m.confirmModalSize()
+	w, inner := m.confirmModalSize()
 	maxH := max(m.bodyH()-6, 4)
+	if len(md.jobs) > 0 {
+		m.layoutEnqueueConfirm(max(w-2, 4), maxH)
+		return
+	}
 	wrapped := wrapText(md.prompt, max(inner-2, 4))
 	n := 1
 	if wrapped != "" {
@@ -139,6 +148,61 @@ func (m *model) layoutConfirm() {
 	md.vp.SetWidth(inner)
 	md.vp.SetHeight(maxH)
 	md.vp.SetContent(wrapped)
+}
+
+// layoutEnqueueConfirm 按展开状态重画子任务列表。放得下就不用视口。
+func (m *model) layoutEnqueueConfirm(width, maxH int) {
+	md := m.modal
+	lines, spans := enqueueConfirmLines(md, width)
+	if len(lines) <= maxH {
+		md.vp = viewport.Model{}
+		return
+	}
+	offset := 0
+	if md.vp.Height() > 0 {
+		offset = md.vp.YOffset()
+	}
+	md.vp.SetWidth(width)
+	md.vp.SetHeight(maxH)
+	md.vp.SetContent(strings.Join(lines, "\n"))
+	if md.focus >= 0 && md.focus < len(spans) {
+		offset = offsetForSpan(offset, maxH, len(lines), spans[md.focus].start, spans[md.focus].end)
+	}
+	md.vp.SetYOffset(offset)
+}
+
+// offsetForSpan 让 [start, end] 尽量落在视口里。这一段比视口高时，把第一行对齐到顶。
+func offsetForSpan(offset, height, total, start, end int) int {
+	if height <= 0 || total <= 0 {
+		return 0
+	}
+	maxOff := max(total-height, 0)
+	clampOff := func(n int) int {
+		if n < 0 {
+			return 0
+		}
+		if n > maxOff {
+			return maxOff
+		}
+		return n
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if end >= total {
+		end = total - 1
+	}
+	// 标题已经在视口里时保持原位，避免一打开就把共用字体滚出屏幕。
+	if start >= offset && start < offset+height {
+		return clampOff(offset)
+	}
+	if start < offset || end-start+1 >= height {
+		return clampOff(start)
+	}
+	return clampOff(end - height + 1)
 }
 
 // helpText 组装快捷键帮助内容（多行，带样式段落标题）。
@@ -176,7 +240,8 @@ func helpText() string {
 	row("enter", "下一项；转码预设先展开列表，上下选择后再确认；最后一项先确认输入再创建")
 	row("ctrl+n / ctrl+d", "增加或删除一条字幕")
 	row("字幕组", "多条字幕时，没选中的组收成一行，移到该行展开")
-	row("ctrl+s", "任意位置生成任务，确认每条命令的 -i 后再加入队列")
+	row("ctrl+s", "生成任务；确认弹窗里再按一次，把任务加入队列")
+	row("确认入队", "子任务默认全部展开，↑/↓ 选择，enter 收起或展开")
 	row("esc", "关闭预设列表，否则取消")
 
 	section("转码预设")
@@ -221,6 +286,14 @@ func (m model) modalView() string {
 	case modalTask:
 		return m.taskModalView()
 	case modalConfirm:
+		if len(md.jobs) > 0 {
+			if md.vp.Height() > 0 {
+				content = md.vp.View()
+				break
+			}
+			content = m.enqueueConfirmBody()
+			break
+		}
 		if md.vp.Height() > 0 {
 			content = md.vp.View()
 			break
@@ -330,6 +403,9 @@ func (m *model) updateHelpModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 
 func (m *model) updateConfirmModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 	md := m.modal
+	if len(md.jobs) > 0 {
+		return m.updateEnqueueConfirm(key, msg)
+	}
 	switch key.String() {
 	case "enter", "y":
 		m.modal = nil
@@ -345,6 +421,47 @@ func (m *model) updateConfirmModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 		}
 		return nil
 	case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+		if md.vp.Height() > 0 {
+			var cmd tea.Cmd
+			m.modal.vp, cmd = m.modal.vp.Update(msg)
+			return cmd
+		}
+	}
+	return nil
+}
+
+// updateEnqueueConfirm 在入队确认里移动和展开子任务。enter 只切换展开，ctrl+s 才加入队列。
+func (m *model) updateEnqueueConfirm(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
+	md := m.modal
+	switch key.String() {
+	case "ctrl+s", "y":
+		m.modal = nil
+		if md.onConfirm != nil {
+			return md.onConfirm(m)
+		}
+		return nil
+	case "esc", "n", "q":
+		m.modal = nil
+		return nil
+	case "enter":
+		if md.focus >= 0 && md.focus < len(md.jobOpen) {
+			md.jobOpen[md.focus] = !md.jobOpen[md.focus]
+			m.layoutConfirm()
+		}
+		return nil
+	case "up", "k":
+		if md.focus > 0 {
+			md.focus--
+			m.layoutConfirm()
+		}
+		return nil
+	case "down", "j":
+		if md.focus < len(md.jobs)-1 {
+			md.focus++
+			m.layoutConfirm()
+		}
+		return nil
+	case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
 		if md.vp.Height() > 0 {
 			var cmd tea.Cmd
 			m.modal.vp, cmd = m.modal.vp.Update(msg)

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/commandline"
 	"github.com/gsxhnd/batcher/internal/presets"
@@ -377,11 +378,11 @@ func (m *model) startTaskScan(sel command.Selection, opt command.VideoBatchOptio
 	}
 }
 
-// cliInputs 取出一条 ffmpeg 参数里的全部 -i 输入。
-func cliInputs(args []string) []string {
+// cliFlagValues 取出一条 ffmpeg 参数里某个旗标后面的值。
+func cliFlagValues(args []string, flag string) []string {
 	var out []string
 	for i := 0; i+1 < len(args); i++ {
-		if args[i] != "-i" {
+		if args[i] != flag {
 			continue
 		}
 		out = append(out, args[i+1])
@@ -390,33 +391,190 @@ func cliInputs(args []string) []string {
 	return out
 }
 
-// enqueueInputSummary 列出即将入队的每条命令的 -i，供创建前确认。
-func enqueueInputSummary(plan *command.BatchPlan) string {
-	var b strings.Builder
+// cliInputs 取出一条 ffmpeg 参数里的全部 -i 输入。
+func cliInputs(args []string) []string {
+	return cliFlagValues(args, "-i")
+}
+
+// enqueueJob 是入队确认里的一条子任务。字体相同的批次不把字体放进每一条。
+type enqueueJob struct {
+	name  string
+	files []string
+	fonts []string
+}
+
+// jobSpan 是一条子任务在确认列表里占用的行，含标题，不含它前面的空行。
+type jobSpan struct {
+	start, end int
+}
+
+// enqueueJobs 拆出入队确认要展示的标题、共用字体和各子任务。
+// 字体由 -attach 写入，不在 -i 里；各任务字体相同时只准备一份。
+func enqueueJobs(plan *command.BatchPlan) (header string, shared []string, jobs []enqueueJob, showJobFonts bool) {
 	n := 0
 	if plan != nil {
 		n = len(plan.Jobs)
 	}
-	fmt.Fprintf(&b, "确认将 %d 个任务加入队列？\n", n)
-	b.WriteString("每条命令的输入（-i）：\n")
-	if plan == nil {
-		return b.String()
+	header = fmt.Sprintf("确认将 %d 个任务加入队列？", n)
+	if plan == nil || n == 0 {
+		return header, nil, nil, false
 	}
+
+	fontSets := make([][]string, n)
+	sameFonts := true
 	for i, job := range plan.Jobs {
-		fmt.Fprintf(&b, "\n[%d]\n", i+1)
-		inputs := cliInputs(job.Args)
-		if len(inputs) == 0 && job.Input != "" {
-			inputs = []string{job.Input}
-		}
-		if len(inputs) == 0 {
-			b.WriteString("  （没有 -i）\n")
-			continue
-		}
-		for _, in := range inputs {
-			fmt.Fprintf(&b, "  -i %s\n", in)
+		fontSets[i] = cliFlagValues(job.Args, "-attach")
+		if i > 0 && !slices.Equal(fontSets[i], fontSets[0]) {
+			sameFonts = false
 		}
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	if sameFonts && len(fontSets[0]) > 0 {
+		shared = fontSets[0]
+	}
+	showJobFonts = !sameFonts
+	jobs = make([]enqueueJob, n)
+	for i, job := range plan.Jobs {
+		name := filepath.Base(job.Input)
+		if name == "" || name == "." {
+			name = fmt.Sprintf("任务 %d", i+1)
+		}
+		jobs[i] = enqueueJob{name: name, files: jobInputs(job)}
+		if showJobFonts {
+			jobs[i].fonts = fontSets[i]
+		}
+	}
+	return header, shared, jobs, showJobFonts
+}
+
+// openEnqueueConfirm 打开入队确认。子任务默认全部展开，enter 收起或展开，ctrl+s 加入队列。
+func (m *model) openEnqueueConfirm(plan *command.BatchPlan, onConfirm func(*model) tea.Cmd) {
+	header, shared, jobs, showFonts := enqueueJobs(plan)
+	open := make([]bool, len(jobs))
+	for i := range open {
+		open[i] = true
+	}
+	m.modal = &modal{
+		kind:         modalConfirm,
+		title:        "确认加入队列",
+		prompt:       header,
+		jobs:         jobs,
+		sharedFonts:  shared,
+		showJobFonts: showFonts,
+		jobOpen:      open,
+		onConfirm:    onConfirm,
+	}
+	m.layoutConfirm()
+}
+
+// enqueueConfirmBody 画出当前展开状态下的入队确认正文。
+func (m model) enqueueConfirmBody() string {
+	if m.modal == nil {
+		return ""
+	}
+	w, _ := m.confirmModalSize()
+	lines, _ := enqueueConfirmLines(m.modal, max(w-2, 4))
+	return strings.Join(lines, "\n")
+}
+
+// enqueueConfirmLines 按展开状态生成确认列表，并标出每条子任务的行范围。
+func enqueueConfirmLines(md *modal, width int) ([]string, []jobSpan) {
+	width = max(width, 8)
+	var lines []string
+	add := func(s string) {
+		for _, ln := range strings.Split(wrapText(s, width), "\n") {
+			lines = append(lines, ln)
+		}
+	}
+	add(md.prompt)
+	if len(md.sharedFonts) > 0 {
+		add("")
+		add(sectionTitleStyle.Render("字体"))
+		for _, font := range md.sharedFonts {
+			add("  " + font)
+		}
+	}
+	spans := make([]jobSpan, len(md.jobs))
+	for i, job := range md.jobs {
+		add("")
+		start := len(lines)
+		open := i < len(md.jobOpen) && md.jobOpen[i]
+		add(fitLine(jobHeaderLine(job, i, open, i == md.focus, md.showJobFonts), width))
+		if open {
+			lines = append(lines, pathSection(job.files, "文件", width)...)
+			if md.showJobFonts {
+				lines = append(lines, pathSection(job.fonts, "字体", width)...)
+			}
+		}
+		spans[i] = jobSpan{start: start, end: max(len(lines)-1, start)}
+	}
+	return lines, spans
+}
+
+func jobHeaderLine(job enqueueJob, index int, open, focused, showFonts bool) string {
+	mark := "▾"
+	if !open {
+		mark = "▸"
+	}
+	title := fmt.Sprintf("%s [%d] %s", mark, index+1, job.name)
+	if !open {
+		title += "  " + jobFoldSummary(job, showFonts)
+	}
+	switch {
+	case focused:
+		return selectedStyle.Render(title)
+	case open:
+		return sectionTitleStyle.Render(title)
+	default:
+		return descStyle.Render(title)
+	}
+}
+
+func jobFoldSummary(job enqueueJob, showFonts bool) string {
+	parts := []string{countPhrase(len(job.files), "文件")}
+	if showFonts {
+		parts = append(parts, countPhrase(len(job.fonts), "字体"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func countPhrase(n int, name string) string {
+	if n == 0 {
+		return "没有" + name
+	}
+	return fmt.Sprintf("%d 个%s", n, name)
+}
+
+func pathSection(paths []string, title string, width int) []string {
+	var lines []string
+	add := func(s string) {
+		for _, ln := range strings.Split(wrapText(s, width), "\n") {
+			lines = append(lines, ln)
+		}
+	}
+	add("  " + descStyle.Render(title))
+	if len(paths) == 0 {
+		add("    " + descStyle.Render("（没有"+title+"）"))
+		return lines
+	}
+	for _, p := range paths {
+		add("    " + p)
+	}
+	return lines
+}
+
+func fitLine(s string, width int) string {
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	return truncateText(s, width)
+}
+
+func jobInputs(job command.Job) []string {
+	inputs := cliInputs(job.Args)
+	if len(inputs) == 0 && job.Input != "" {
+		return []string{job.Input}
+	}
+	return inputs
 }
 
 func focusTaskField(md *modal, key string) tea.Cmd {

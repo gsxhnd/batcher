@@ -289,7 +289,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		plan := msg.plan
 		sel := m.createSel
-		m.openConfirmModal("确认加入队列", enqueueInputSummary(plan), func(m *model) tea.Cmd {
+		m.openEnqueueConfirm(plan, func(m *model) tea.Cmd {
 			return m.enqueue(plan, sel)
 		})
 		return m, nil

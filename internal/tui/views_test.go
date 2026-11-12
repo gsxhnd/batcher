@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -139,6 +141,34 @@ func TestRenderRowsUniform(t *testing.T) {
 			assert.Equal(t, size[0], lipgloss.Width(ln), "第 %d 行宽度应为 %d: %q", i+1, size[0], ln)
 		}
 	}
+}
+
+func TestHeaderStatusPointsAtRetry(t *testing.T) {
+	m := newModel()
+	m.runErr = errors.New("主任务失败")
+	failed := ansi.Strip(m.headerStatus())
+	assert.Contains(t, failed, "按 r 重试")
+	assert.NotContains(t, failed, "修改")
+
+	m.runErr = context.Canceled
+	canceled := ansi.Strip(m.headerStatus())
+	assert.Contains(t, canceled, "已取消")
+	assert.Contains(t, canceled, "按 r 重试")
+	assert.NotContains(t, canceled, "修改")
+
+	m.runErr = nil
+	m.total, m.done, m.failed = 2, 1, 1
+	partial := ansi.Strip(m.headerStatus())
+	assert.Contains(t, partial, "1/2 成功")
+	assert.Contains(t, partial, "按 r 重试")
+	assert.NotContains(t, partial, "修改")
+
+	m.failed = 0
+	m.done = 2
+	done := ansi.Strip(m.headerStatus())
+	assert.Contains(t, done, "2/2 成功")
+	assert.NotContains(t, done, "修改")
+	assert.NotContains(t, done, "重试")
 }
 
 func TestTaskModalFillsTheScreen(t *testing.T) {

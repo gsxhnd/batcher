@@ -211,12 +211,15 @@ func (m model) headerStatus() string {
 		text = "执行中…"
 		style = stepActiveStyle
 	case errors.Is(m.runErr, context.Canceled):
-		text = "上次执行已取消，可修改后重跑"
+		text = "上次执行已取消，按 r 重试"
 	case m.runErr != nil:
-		text = "上次执行失败，可修改后重跑"
+		text = "上次执行失败，按 r 重试"
+		style = stepErrStyle
+	case m.total > 0 && m.failed > 0:
+		text = fmt.Sprintf("上次执行 %d/%d 成功，按 r 重试", m.done, m.total)
 		style = stepErrStyle
 	case m.total > 0:
-		text = fmt.Sprintf("上次执行 %d/%d 成功，可修改后重跑", m.done, m.total)
+		text = fmt.Sprintf("上次执行 %d/%d 成功", m.done, m.total)
 		style = stepOkStyle
 	default:
 		n := 0
@@ -842,6 +845,10 @@ func (m model) footer() string {
 		case modalHelp:
 			hints = []string{"↑/↓ 滚动", "esc 关闭"}
 		case modalConfirm:
+			if len(m.modal.jobs) > 0 {
+				hints = []string{"↑/↓ 选择", "enter 展开/收起", "ctrl+s 加入队列", "esc 取消"}
+				break
+			}
 			hints = []string{"enter 确认", "esc 取消", "? 快捷键"}
 			if m.modal.vp.Height() > 0 {
 				hints = []string{"↑/↓ 滚动", "enter 确认", "esc 取消"}

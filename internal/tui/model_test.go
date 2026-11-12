@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -597,8 +598,8 @@ func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
 	m.resizePanes()
 	testQueue(t, &m)
 	plan := &command.BatchPlan{Jobs: []command.Job{
-		{Input: "/v/a.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/a.mkv", "-i", "/v/a.chi.ass", "/out/a.mkv"}},
-		{Input: "/v/b.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/b.mkv", "/out/b.mkv"}},
+		{Input: "/v/a.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/a.mkv", "-i", "/v/a.chi.ass", "-attach", "/fonts/a.ttf", "-metadata:s:t:m:filename:a.ttf", "mimetype=application/x-truetype-font", "/out/a.mkv"}},
+		{Input: "/v/b.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/b.mkv", "-attach", "/fonts/a.ttf", "-metadata:s:t:m:filename:a.ttf", "mimetype=application/x-truetype-font", "/out/b.mkv"}},
 	}}
 
 	m.createSeq = 1
@@ -607,10 +608,30 @@ func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
 	m = next.(model)
 	require.NotNil(t, m.modal)
 	assert.Equal(t, modalConfirm, m.modal.kind)
-	assert.Contains(t, m.modal.prompt, "-i /v/a.mkv")
-	assert.Contains(t, m.modal.prompt, "-i /v/a.chi.ass")
-	assert.Contains(t, m.modal.prompt, "-i /v/b.mkv")
+	require.Len(t, m.modal.jobOpen, 2)
+	assert.True(t, m.modal.jobOpen[0] && m.modal.jobOpen[1], "子任务默认全部展开")
+	shown := m.modalView()
+	assert.Contains(t, shown, "文件")
+	assert.Contains(t, shown, "/v/a.mkv")
+	assert.Contains(t, shown, "/v/a.chi.ass")
+	assert.Contains(t, shown, "/v/b.mkv")
+	assert.Contains(t, shown, "字体")
+	assert.Equal(t, 1, strings.Count(shown, "/fonts/a.ttf"), "各任务字体相同时只列一次")
+	assert.Contains(t, m.footer(), "展开/收起")
 	assert.Empty(t, m.queue.Snapshot(), "确认前不应入队")
+
+	press(&m, "enter")
+	assert.False(t, m.modal.jobOpen[0], "enter 收起当前子任务")
+	assert.True(t, m.modal.jobOpen[1])
+	folded := m.modalView()
+	assert.NotContains(t, folded, "/v/a.chi.ass")
+	assert.Contains(t, folded, "/v/b.mkv")
+	assert.Contains(t, folded, "/fonts/a.ttf", "共用字体不受子任务收起影响")
+	assert.Empty(t, m.queue.Snapshot(), "收起不应入队")
+
+	press(&m, "enter")
+	assert.True(t, m.modal.jobOpen[0])
+	assert.Contains(t, m.modalView(), "/v/a.chi.ass")
 
 	press(&m, "esc")
 	assert.Nil(t, m.modal)
@@ -620,8 +641,70 @@ func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
 	m.modal = &modal{kind: modalTask}
 	next, _ = m.Update(createPlanMsg{seq: 2, plan: plan})
 	m = next.(model)
-	press(&m, "enter")
+	press(&m, "ctrl+s")
 	require.Len(t, m.queue.Snapshot(), 1)
+}
+
+func TestEnqueueConfirmListsFilesAndFonts(t *testing.T) {
+	sharedPlan := &command.BatchPlan{Jobs: []command.Job{
+		{Input: "/v/a.mkv", Args: []string{"-i", "/v/a.mkv", "-attach", "/fonts/a.ttf"}},
+		{Input: "/v/b.mkv", Args: []string{"-i", "/v/b.mkv", "-attach", "/fonts/a.ttf"}},
+	}}
+	m := newModel()
+	m.width, m.height = 100, 40
+	m.openEnqueueConfirm(sharedPlan, nil)
+	shared := m.modalView()
+	assert.Contains(t, shared, "文件")
+	assert.Contains(t, shared, "/v/a.mkv")
+	assert.Contains(t, shared, "/v/b.mkv")
+	assert.Equal(t, 1, strings.Count(shared, "字体"))
+	assert.Equal(t, 1, strings.Count(shared, "/fonts/a.ttf"))
+
+	differentPlan := &command.BatchPlan{Jobs: []command.Job{
+		{Input: "/v/a.mkv", Args: []string{"-i", "/v/a.mkv", "-attach", "/fonts/a.ttf"}},
+		{Input: "/v/b.mkv", Args: []string{"-i", "/v/b.mkv", "-attach", "/fonts/b.otf"}},
+	}}
+	m.openEnqueueConfirm(differentPlan, nil)
+	different := m.modalView()
+	assert.Contains(t, different, "/fonts/a.ttf")
+	assert.Contains(t, different, "/fonts/b.otf")
+	assert.Equal(t, 2, strings.Count(different, "字体"))
+	press(&m, "down")
+	press(&m, "enter")
+	folded := m.modalView()
+	assert.Contains(t, folded, "/fonts/a.ttf")
+	assert.NotContains(t, folded, "/fonts/b.otf", "收起后不再列出该子任务的字体")
+	assert.Contains(t, folded, "1 个字体")
+
+	none := &command.BatchPlan{Jobs: []command.Job{
+		{Input: "/v/a.mkv", Args: []string{"-i", "/v/a.mkv"}},
+	}}
+	m.openEnqueueConfirm(none, nil)
+	text := m.modalView()
+	assert.Contains(t, text, "文件")
+	assert.NotContains(t, text, "字体")
+}
+
+func TestEnqueueConfirmScrollsToFocusedJob(t *testing.T) {
+	args := []string{"-i", "/v/a.mkv"}
+	for i := 0; i < 12; i++ {
+		args = append(args, "-i", fmt.Sprintf("/v/a.%02d.ass", i))
+	}
+	plan := &command.BatchPlan{Jobs: []command.Job{
+		{Input: "/v/a.mkv", Args: args},
+		{Input: "/v/b.mkv", Args: []string{"-i", "/v/b.mkv"}},
+	}}
+	m := newModel()
+	m.width, m.height = 80, 12
+	m.openEnqueueConfirm(plan, nil)
+	require.Positive(t, m.modal.vp.Height(), "内容超出一屏时应可滚动")
+	assert.Equal(t, 0, m.modal.vp.YOffset(), "打开时停在列表顶部")
+	assert.Contains(t, m.modalView(), "确认将")
+
+	press(&m, "down")
+	assert.Equal(t, 1, m.modal.focus)
+	assert.Positive(t, m.modal.vp.YOffset(), "移到下面的子任务时应把它滚进视口")
+	assert.Contains(t, m.modal.vp.View(), "b.mkv")
 }
 
 func TestSavedTaskRemainsAfterRestart(t *testing.T) {
