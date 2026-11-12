@@ -32,6 +32,7 @@ type modal struct {
 	title     string
 	fields    []field
 	focus     int            // 表单弹窗内的字段下标
+	picking   bool           // 新建任务里转码预设列表是否展开
 	err       string         // 表单校验错误，显示在弹窗底部
 	editIndex int            // 编辑的条目下标，-1 表示新增
 	prompt    string         // 确认弹窗的说明文字 / 帮助弹窗的原始文本
@@ -150,12 +151,11 @@ func helpText() string {
 	section("新建任务")
 	row("a", "打开创建弹窗，所有参数在同一个弹窗里填写")
 	row("space", "勾选转码、字幕、字体")
-	row("←/→", "切换转码预设，并填入高级参数")
+	row("enter", "下一项；转码预设先展开列表，上下选择后再确认；最后一项直接创建")
 	row("ctrl+n / ctrl+d", "增加或删除一条字幕")
 	row("字幕组", "多条字幕时，没选中的组收成一行，移到该行展开")
-	row("enter", "下一项；最后一项直接创建")
 	row("ctrl+s", "任意位置创建任务")
-	row("esc", "取消")
+	row("esc", "关闭预设列表，否则取消")
 
 	section("转码预设")
 	row("p", "打开预设管理")
@@ -298,6 +298,9 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 	if md.kind == modalPresetList {
 		return m.updatePresetList(key.String())
 	}
+	if md.kind == modalTask && md.picking {
+		return m.updatePresetPick(key.String())
+	}
 
 	switch key.String() {
 	case "esc":
@@ -332,6 +335,10 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		if md.focus == len(md.fields)-1 {
 			return m.saveModal()
 		}
+		if md.kind == modalTask && md.fields[md.focus].def.kind == fieldChoice {
+			md.picking = true
+			return nil
+		}
 		if md.kind == modalTask {
 			md.focus = nextTaskFocus(md, 1)
 		} else {
@@ -355,15 +362,6 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		return nil
 	case "left", "right", "h", "l":
 		f := &md.fields[md.focus]
-		if f.def.kind == fieldChoice && len(f.options) > 0 {
-			delta := 1
-			if key.String() == "left" || key.String() == "h" {
-				delta = -1
-			}
-			f.choice = (f.choice + delta + len(f.options)) % len(f.options)
-			m.applyPresetChoice(f)
-			return nil
-		}
 		if f.def.kind == fieldBool || f.def.kind == fieldChoice {
 			return nil
 		}

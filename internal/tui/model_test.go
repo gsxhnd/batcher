@@ -42,6 +42,10 @@ func press(m *model, s string) {
 		key = tea.KeyPressMsg{Code: tea.KeyUp}
 	case "down":
 		key = tea.KeyPressMsg{Code: tea.KeyDown}
+	case "left":
+		key = tea.KeyPressMsg{Code: tea.KeyLeft}
+	case "right":
+		key = tea.KeyPressMsg{Code: tea.KeyRight}
 	case "pgup":
 		key = tea.KeyPressMsg{Code: tea.KeyPgUp}
 	case "pgdown":
@@ -138,6 +142,75 @@ func TestTaskModalStopsAtTheEnds(t *testing.T) {
 	scrolled := m.taskModalView()
 	assert.Contains(t, top, "ctrl+s")
 	assert.Contains(t, scrolled, "ctrl+s", "滚到下面后快捷键提示仍在")
+}
+
+func TestPresetOpensAList(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 40
+	m.presets = []presets.Preset{
+		{Name: "H.264 通用", Args: "-c:v libx264 -crf 23"},
+		{Name: "H.265 通用", Args: "-c:v libx265 -crf 26"},
+	}
+	press(&m, "a")
+	require.NotNil(t, m.modal)
+	preset := -1
+	for i, f := range m.modal.fields {
+		if f.def.key == "preset" {
+			preset = i
+		}
+	}
+	require.GreaterOrEqual(t, preset, 0)
+	m.modal.focus = preset
+
+	press(&m, "right")
+	assert.Equal(t, 0, m.modal.fields[preset].choice, "左右键不再切换预设")
+	assert.False(t, m.modal.picking)
+
+	press(&m, "enter")
+	assert.True(t, m.modal.picking)
+	assert.Equal(t, preset, m.modal.focus)
+	list := taskModalText(&m)
+	assert.Contains(t, list, "手动输入")
+	assert.Contains(t, list, "H.264 通用")
+	assert.Contains(t, list, "H.265 通用")
+
+	press(&m, "down")
+	assert.Equal(t, 1, m.modal.fields[preset].choice)
+	assert.Equal(t, preset, m.modal.focus)
+	adv, ok := findField(&m.modal.fields, "advance")
+	require.True(t, ok)
+	assert.Equal(t, "-c:v libx264 -crf 23", adv.Value())
+
+	press(&m, "down")
+	press(&m, "down")
+	assert.Equal(t, 2, m.modal.fields[preset].choice, "最后一项再向下停住")
+
+	press(&m, "esc")
+	assert.False(t, m.modal.picking)
+	assert.NotNil(t, m.modal, "esc 只收起列表")
+	assert.Equal(t, preset, m.modal.focus)
+
+	press(&m, "enter")
+	require.True(t, m.modal.picking)
+	press(&m, "enter")
+	assert.False(t, m.modal.picking)
+	assert.Equal(t, "advance", m.modal.fields[m.modal.focus].def.key)
+}
+
+func TestPresetPickKeepsLongNameOnOneLine(t *testing.T) {
+	f := field{choice: 1, options: []string{
+		"手动输入",
+		"无损封装（仅换容器）",
+		"Apple H.264 (VideoToolbox)",
+	}}
+	for _, ln := range presetPickLines(&f, 72) {
+		assert.Equal(t, 1, strings.Count(ln, "\n"), "每一项只占一行: %q", ln)
+	}
+	f.choice = 2
+	for _, ln := range presetPickLines(&f, 72) {
+		assert.Equal(t, 1, strings.Count(ln, "\n"), "每一项只占一行: %q", ln)
+	}
 }
 
 func TestCreateTaskRejectsEmptySelection(t *testing.T) {

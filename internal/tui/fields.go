@@ -17,7 +17,7 @@ const (
 	fieldString fieldKind = iota
 	fieldInt
 	fieldBool   // 勾选型字段：不吃文本输入，space 切换勾选状态
-	fieldChoice // 在若干选项间切换，左右键改变当前项
+	fieldChoice // 若干选项里选一个；新建任务里按 enter 展开列表
 )
 
 // fieldDef 描述一个表单项映射到 VideoBatchOption 的哪个配置。

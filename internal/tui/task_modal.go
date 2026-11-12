@@ -57,6 +57,71 @@ func (m model) presetChoices() (labels, args []string) {
 	return labels, args
 }
 
+func (m model) taskModalHint() string {
+	if m.modal != nil && m.modal.picking {
+		return "↑/↓ 选择预设 · enter 确定 · esc 返回"
+	}
+	return "↑/↓ 切换 · enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕"
+}
+
+// updatePresetPick 处理展开后的转码预设列表。上下移动选项，esc 只收起列表。
+func (m *model) updatePresetPick(key string) tea.Cmd {
+	md := m.modal
+	switch key {
+	case "up", "k":
+		m.stepPresetChoice(-1)
+		return nil
+	case "down", "j":
+		m.stepPresetChoice(1)
+		return nil
+	case "esc":
+		md.picking = false
+		return nil
+	case "enter", "tab":
+		md.picking = false
+		if md.focus == len(md.fields)-1 {
+			return m.saveModal()
+		}
+		md.focus = nextTaskFocus(md, 1)
+		return focusField(md.fields, md.focus)
+	case "shift+tab":
+		md.picking = false
+		md.focus = nextTaskFocus(md, -1)
+		return focusField(md.fields, md.focus)
+	case "ctrl+s":
+		md.picking = false
+		return m.saveModal()
+	case "ctrl+n":
+		md.picking = false
+		m.appendSubtitleFields(subtitleDefaults())
+		md.focus = len(md.fields) - 4
+		return focusField(md.fields, md.focus)
+	case "ctrl+d":
+		md.picking = false
+		m.removeSubtitleFields()
+		return focusField(md.fields, md.focus)
+	default:
+		return nil
+	}
+}
+
+func (m *model) stepPresetChoice(delta int) {
+	md := m.modal
+	if md == nil || md.focus < 0 || md.focus >= len(md.fields) {
+		return
+	}
+	f := &md.fields[md.focus]
+	if f.def.kind != fieldChoice || len(f.options) == 0 {
+		return
+	}
+	next := f.choice + delta
+	if next < 0 || next >= len(f.options) {
+		return
+	}
+	f.choice = next
+	m.applyPresetChoice(f)
+}
+
 func (m *model) applyPresetChoice(f *field) {
 	if m.modal == nil || f.choice < 0 || f.choice >= len(f.choiceArgs) {
 		return
@@ -464,7 +529,7 @@ func (m model) taskModalView() string {
 	for len(body)+1 < contentH {
 		body = append(body, "\n")
 	}
-	body = append(body, "  "+descStyle.Render("↑/↓ 切换 · enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕")+"\n")
+	body = append(body, "  "+descStyle.Render(m.taskModalHint())+"\n")
 	var b strings.Builder
 	for _, ln := range body {
 		b.WriteString(ln)
@@ -535,10 +600,16 @@ func (m model) taskModalLines(boxW int) []taskLine {
 	fieldsOf := func(idxs []int, extra map[string]string) {
 		for _, idx := range idxs {
 			f := &md.fields[idx]
-			for _, ln := range taskFieldLines(f, idx == md.focus, boxW, extra[f.def.key]) {
+			picking := f.def.kind == fieldChoice && idx == md.focus && md.picking
+			for _, ln := range taskFieldLines(f, idx == md.focus, picking, boxW, extra[f.def.key]) {
 				add(idx, ln)
 			}
 			if f.def.key == "preset" {
+				if idx == md.focus && md.picking {
+					for _, ln := range presetPickLines(f, boxW) {
+						add(idx, ln)
+					}
+				}
 				for _, ln := range presetPreviewLines(f, boxW) {
 					add(idx, ln)
 				}
@@ -580,7 +651,7 @@ func (m model) taskModalLines(boxW int) []taskLine {
 
 	note := "未勾选转码时，这里的参数不会写入命令"
 	if convertOn {
-		note = "左右键选用预设，也可以直接改高级参数"
+		note = "enter 展开预设列表，也可以直接改高级参数"
 	}
 	rule()
 	head("转码", note)
@@ -623,7 +694,7 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		if f.def.key == "sub_default" {
 			extra = "同一任务里只能有一条"
 		}
-		for _, ln := range taskFieldLines(f, idx == md.focus, boxW, extra) {
+		for _, ln := range taskFieldLines(f, idx == md.focus, false, boxW, extra) {
 			add(idx, ln)
 		}
 	}
@@ -718,7 +789,7 @@ func subtitleFoldLine(fields []field, suffixIdx, group int) string {
 	return "  " + descStyle.Render(text)
 }
 
-func taskFieldLines(f *field, focused bool, boxW int, extra string) []string {
+func taskFieldLines(f *field, focused, picking bool, boxW int, extra string) []string {
 	lbl := labelStyle.Render(f.def.label)
 	if focused {
 		lbl = labelFocusedStyle.Render(f.def.label)
@@ -748,7 +819,11 @@ func taskFieldLines(f *field, focused bool, boxW int, extra string) []string {
 		if f.choice >= 0 && f.choice < len(f.options) {
 			label = f.options[f.choice]
 		}
-		body = lbl + " " + codeStyle.Render(label) + "  " + descStyle.Render("←/→ 切换")
+		hint := "enter 选择"
+		if picking {
+			hint = "↑/↓ 选择"
+		}
+		body = lbl + " " + codeStyle.Render(label) + "  " + descStyle.Render(hint)
 	default:
 		f.input.SetWidth(inputWidth(boxW))
 		body = lbl + " " + f.input.View()
@@ -756,6 +831,35 @@ func taskFieldLines(f *field, focused bool, boxW int, extra string) []string {
 	lines := []string{lead + body + "\n"}
 	if f.err != "" {
 		lines = append(lines, "    "+errorStyle.Render("× "+f.err)+"\n")
+	}
+	return lines
+}
+
+// presetPickLines 画出展开的预设列表，当前项用 ▸ 标出，过长时只显示附近几条。
+func presetPickLines(f *field, boxW int) []string {
+	const window = 7
+	n := len(f.options)
+	if n == 0 {
+		return nil
+	}
+	start := f.choice - window/2
+	if start < 0 {
+		start = 0
+	}
+	if start+window > n {
+		start = max(n-window, 0)
+	}
+	end := min(start+window, n)
+	width := max(boxW-8, 8)
+	var lines []string
+	for i := start; i < end; i++ {
+		name := truncateText(f.options[i], max(width-2, 4))
+		if i == f.choice {
+			// 不用带固定宽度的标签样式，长名称会在 16 列处被折行，把边框挤乱。
+			lines = append(lines, "    "+selectedStyle.Render("▸ "+name)+"\n")
+			continue
+		}
+		lines = append(lines, "    "+descStyle.Render("  "+name)+"\n")
 	}
 	return lines
 }
