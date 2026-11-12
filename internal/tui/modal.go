@@ -260,6 +260,9 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 			if f.def.kind != fieldBool && f.def.kind != fieldChoice {
 				var cmd tea.Cmd
 				f.input, cmd = f.input.Update(msg)
+				if md.kind == modalTask {
+					m.syncTaskOutputPlaceholder()
+				}
 				return cmd
 			}
 		}
@@ -330,25 +333,30 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		}
 		return focusField(md.fields, md.focus)
 	case "enter":
-		// enter 在中间字段推进到下一项；在末字段（含 bool）直接保存，
-		// 避免循环跳回开头的困惑。中途任意字段也可 ctrl+s 保存。
-		if md.focus == len(md.fields)-1 {
-			return m.saveModal()
-		}
+		// enter 在中间字段推进到下一项；在最后一项（含被折叠后看不见的后续字段）直接保存。
+		// 中途任意字段也可 ctrl+s 保存。
 		if md.kind == modalTask && md.fields[md.focus].def.kind == fieldChoice {
 			md.picking = true
 			return nil
 		}
 		if md.kind == modalTask {
-			md.focus = nextTaskFocus(md, 1)
-		} else {
-			md.focus++
+			next := nextTaskFocus(md, 1)
+			if next == md.focus {
+				return m.saveModal()
+			}
+			md.focus = next
+			return focusField(md.fields, md.focus)
 		}
+		if md.focus == len(md.fields)-1 {
+			return m.saveModal()
+		}
+		md.focus++
 		return focusField(md.fields, md.focus)
 	case "ctrl+s":
 		return m.saveModal()
 	case "ctrl+n":
 		if md.kind == modalTask {
+			m.checkTaskOp("op_subtitle")
 			m.appendSubtitleFields(subtitleDefaults())
 			md.focus = len(md.fields) - 4
 			return focusField(md.fields, md.focus)
@@ -367,6 +375,9 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		}
 		var cmd tea.Cmd
 		f.input, cmd = f.input.Update(msg)
+		if md.kind == modalTask {
+			m.syncTaskOutputPlaceholder()
+		}
 		return cmd
 	default:
 		if len(md.fields) == 0 {
@@ -385,6 +396,9 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		}
 		var cmd tea.Cmd
 		f.input, cmd = f.input.Update(msg)
+		if md.kind == modalTask {
+			m.syncTaskOutputPlaceholder()
+		}
 		return cmd
 	}
 }

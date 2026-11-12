@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -40,7 +41,51 @@ func (m *model) openTaskModal() tea.Cmd {
 	}
 	m.modal = &modal{kind: modalTask, title: "新建任务", fields: fields}
 	m.appendSubtitleFields(subtitleDefaults())
+	m.syncTaskOutputPlaceholder()
 	return focusField(m.modal.fields, 0)
+}
+
+// defaultOutputDir 是未填写输出目录时的位置：源目录下的 result。
+func defaultOutputDir(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		input = "."
+	}
+	return filepath.Join(input, "result")
+}
+
+// syncTaskOutputPlaceholder 在输出目录还没手填时，把灰色占位改成源目录下的 result。
+func (m *model) syncTaskOutputPlaceholder() {
+	md := m.modal
+	if md == nil {
+		return
+	}
+	var input string
+	var output *field
+	for i := range md.fields {
+		switch md.fields[i].def.key {
+		case "input_path":
+			input = md.fields[i].resolved()
+		case "output_path":
+			output = &md.fields[i]
+		}
+	}
+	if output == nil || output.Value() != "" {
+		return
+	}
+	output.useDefault(defaultOutputDir(input))
+}
+
+// checkTaskOp 勾选新建任务里的一项操作，用来在添加字幕时把字幕区展开。
+func (m *model) checkTaskOp(key string) {
+	if m.modal == nil {
+		return
+	}
+	for i := range m.modal.fields {
+		if m.modal.fields[i].def.key == key {
+			m.modal.fields[i].checked = true
+		}
+	}
 }
 
 func (m model) presetChoices() (labels, args []string) {
@@ -93,6 +138,7 @@ func (m *model) updatePresetPick(key string) tea.Cmd {
 		return m.saveModal()
 	case "ctrl+n":
 		md.picking = false
+		m.checkTaskOp("op_subtitle")
 		m.appendSubtitleFields(subtitleDefaults())
 		md.focus = len(md.fields) - 4
 		return focusField(md.fields, md.focus)
@@ -646,7 +692,7 @@ func (m model) taskModalLines(boxW int) []taskLine {
 	})
 
 	rule()
-	head("源与输出", "递归扫描视频；已有输出文件不会覆盖")
+	head("源与输出", "递归扫描视频；输出留空则写到源目录下的 result")
 	fieldsOf(paths, nil)
 
 	note := "未勾选转码时，这里的参数不会写入命令"
@@ -657,25 +703,24 @@ func (m model) taskModalLines(boxW int) []taskLine {
 	head("转码", note)
 	fieldsOf(encode, nil)
 
-	note = "未勾选添加字体时，不会读取这个文件夹"
 	if fontOn {
-		note = "目录里的字体都会作为附件写入"
+		rule()
+		head("字体", "目录里的字体都会作为附件写入")
+		fieldsOf(fonts, nil)
 	}
-	rule()
-	head("字体", note)
-	fieldsOf(fonts, nil)
 
-	note = "未勾选添加字幕时，下面的字幕组不会写入命令"
 	if subOn {
-		note = "语言用三字母码，例如 chi / eng；最多一条默认字幕"
-	}
-	rule()
-	head("字幕", note)
-	if len(subs) == 0 {
-		add(-1, "  "+descStyle.Render("还没有字幕组，按 ctrl+n 添加"))
+		rule()
+		head("字幕", "语言用三字母码，例如 chi / eng；最多一条默认字幕")
+		if len(subs) == 0 {
+			add(-1, "  "+descStyle.Render("还没有字幕组，按 ctrl+n 添加"))
+		}
 	}
 	group := 0
 	openGroup := 0
+	if !subOn {
+		return lines
+	}
 	for _, idx := range subs {
 		f := &md.fields[idx]
 		if f.def.key == "sub_suffix" {
@@ -727,13 +772,30 @@ func taskFieldReachable(fields []field, focus, idx int) bool {
 		return false
 	}
 	switch fields[idx].def.key {
-	case "sub_lang", "sub_title", "sub_default":
+	case "fonts_path":
+		return taskOpChecked(fields, "op_fonts")
+	case "sub_suffix", "sub_lang", "sub_title", "sub_default":
+		if !taskOpChecked(fields, "op_subtitle") {
+			return false
+		}
+		if fields[idx].def.key == "sub_suffix" {
+			return true
+		}
 		g, ok := subtitleGroup(fields, idx)
 		fg, fok := subtitleGroup(fields, focus)
 		return ok && fok && g == fg
 	default:
 		return true
 	}
+}
+
+func taskOpChecked(fields []field, key string) bool {
+	for i := range fields {
+		if fields[i].def.key == key {
+			return fields[i].checked
+		}
+	}
+	return false
 }
 
 // subtitleGroup 返回字幕字段所属的组号（从 1 起）。

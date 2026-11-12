@@ -213,6 +213,54 @@ func TestPresetPickKeepsLongNameOnOneLine(t *testing.T) {
 	}
 }
 
+func TestTaskModalHidesUncheckedSections(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 40
+	press(&m, "a")
+	require.NotNil(t, m.modal)
+
+	plain := taskModalText(&m)
+	assert.NotContains(t, plain, "目录里的字体都会作为附件写入")
+	assert.NotContains(t, plain, "▸ 字幕")
+
+	m.modal.focus = 2 // 添加字体
+	press(&m, "space")
+	fonts := taskModalText(&m)
+	assert.Contains(t, fonts, "目录里的字体都会作为附件写入")
+	assert.Contains(t, fonts, "字体文件夹")
+	assert.NotContains(t, fonts, "▸ 字幕")
+
+	m.modal.focus = 1 // 添加字幕
+	press(&m, "space")
+	shown := taskModalText(&m)
+	assert.Contains(t, shown, "▸ 字幕 1")
+	assert.Contains(t, shown, "字体文件夹")
+}
+
+func TestTaskOutputFollowsInput(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	press(&m, "a")
+	in, ok := findField(&m.modal.fields, "input_path")
+	require.True(t, ok)
+	out, ok := findField(&m.modal.fields, "output_path")
+	require.True(t, ok)
+	assert.Empty(t, out.Value())
+	assert.Equal(t, defaultOutputDir(in.resolved()), out.resolved())
+
+	in.input.SetValue("/videos/show")
+	m.syncTaskOutputPlaceholder()
+	assert.Equal(t, defaultOutputDir("/videos/show"), out.resolved())
+	assert.Empty(t, out.Value(), "跟着源目录走的输出仍是灰色占位")
+
+	out.input.SetValue("/custom/out")
+	m.syncTaskOutputPlaceholder()
+	in.input.SetValue("/videos/other")
+	m.syncTaskOutputPlaceholder()
+	assert.Equal(t, "/custom/out", out.resolved(), "手填的输出目录保持不变")
+}
+
 func TestCreateTaskRejectsEmptySelection(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
