@@ -701,7 +701,7 @@ func TestIsISO639Code(t *testing.T) {
 	}
 }
 
-func TestOverwriteNeedsTwoConfirms(t *testing.T) {
+func TestOverwriteConfirmsOnce(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.width, m.height = 120, 36
@@ -728,21 +728,44 @@ func TestOverwriteNeedsTwoConfirms(t *testing.T) {
 
 	press(&m, "o")
 	press(&m, "enter")
-	require.NotNil(t, m.modal)
-	assert.Equal(t, "再次确认覆盖", m.modal.title)
-	assert.Contains(t, b.Items[0].PlanArgs, "-n", "第一次确认后还不能覆盖")
-
-	press(&m, "esc")
-	assert.Nil(t, m.modal)
-	assert.False(t, b.Items[0].Overwrite)
-
-	press(&m, "o")
-	press(&m, "enter")
-	press(&m, "enter")
 	assert.Nil(t, m.modal)
 	assert.True(t, b.Items[0].Overwrite)
 	assert.Contains(t, b.Items[0].PlanArgs, "-y")
 	assert.NotContains(t, b.Items[0].PlanArgs, "-n")
+}
+
+func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	testQueue(t, &m)
+	plan := &command.BatchPlan{Jobs: []command.Job{
+		{Input: "/v/a.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/a.mkv", "-i", "/v/a.chi.ass", "/out/a.mkv"}},
+		{Input: "/v/b.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/b.mkv", "/out/b.mkv"}},
+	}}
+
+	m.createSeq = 1
+	m.modal = &modal{kind: modalTask}
+	next, _ := m.Update(createPlanMsg{seq: 1, plan: plan})
+	m = next.(model)
+	require.NotNil(t, m.modal)
+	assert.Equal(t, modalConfirm, m.modal.kind)
+	assert.Contains(t, m.modal.prompt, "-i /v/a.mkv")
+	assert.Contains(t, m.modal.prompt, "-i /v/a.chi.ass")
+	assert.Contains(t, m.modal.prompt, "-i /v/b.mkv")
+	assert.Empty(t, m.queue.Snapshot(), "确认前不应入队")
+
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	assert.Empty(t, m.queue.Snapshot())
+
+	m.createSeq = 2
+	m.modal = &modal{kind: modalTask}
+	next, _ = m.Update(createPlanMsg{seq: 2, plan: plan})
+	m = next.(model)
+	press(&m, "enter")
+	require.Len(t, m.queue.Snapshot(), 1)
 }
 
 func TestSavedTaskRemainsAfterRestart(t *testing.T) {

@@ -62,7 +62,7 @@ type Item struct {
 	Removed bool `json:"removed,omitempty"`
 	// PartialOutput 在子任务启动前置真、成功后置回假：崩溃后据此判断输出是不是半成品。
 	PartialOutput bool `json:"partialOutput"`
-	// Overwrite 为真时允许替换已有输出。只在界面两次确认后置位。
+	// Overwrite 为真时允许替换已有输出。只在界面确认后置位。
 	Overwrite  bool     `json:"overwrite,omitempty"`
 	DurationMs int64    `json:"durationMs"`
 	Error      string   `json:"error,omitempty"`

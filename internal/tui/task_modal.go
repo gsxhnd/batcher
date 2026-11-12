@@ -106,7 +106,7 @@ func (m model) taskModalHint() string {
 	if m.modal != nil && m.modal.picking {
 		return "↑/↓ 选择预设 · enter 确定 · esc 返回"
 	}
-	return "↑/↓ 切换 · enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕"
+	return "↑/↓ 切换 · enter 下一项 · ctrl+s 确认创建 · ctrl+n / ctrl+d 增删字幕"
 }
 
 // updatePresetPick 处理展开后的转码预设列表。上下移动选项，esc 只收起列表。
@@ -348,6 +348,48 @@ func (m *model) saveTaskModal() tea.Cmd {
 		plan, err := command.BuildPlan(ctx, &optCopy, sel)
 		return createPlanMsg{seq: seq, plan: plan, err: err}
 	}
+}
+
+// cliInputs 取出一条 ffmpeg 参数里的全部 -i 输入。
+func cliInputs(args []string) []string {
+	var out []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "-i" {
+			continue
+		}
+		out = append(out, args[i+1])
+		i++
+	}
+	return out
+}
+
+// enqueueInputSummary 列出即将入队的每条命令的 -i，供创建前确认。
+func enqueueInputSummary(plan *command.BatchPlan) string {
+	var b strings.Builder
+	n := 0
+	if plan != nil {
+		n = len(plan.Jobs)
+	}
+	fmt.Fprintf(&b, "确认将 %d 个任务加入队列？\n", n)
+	b.WriteString("每条命令的输入（-i）：\n")
+	if plan == nil {
+		return b.String()
+	}
+	for i, job := range plan.Jobs {
+		fmt.Fprintf(&b, "\n[%d]\n", i+1)
+		inputs := cliInputs(job.Args)
+		if len(inputs) == 0 && job.Input != "" {
+			inputs = []string{job.Input}
+		}
+		if len(inputs) == 0 {
+			b.WriteString("  （没有 -i）\n")
+			continue
+		}
+		for _, in := range inputs {
+			fmt.Fprintf(&b, "  -i %s\n", in)
+		}
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func focusTaskField(md *modal, key string) tea.Cmd {

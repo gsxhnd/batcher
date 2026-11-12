@@ -524,9 +524,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ops = m.createSel
-		m.modal = nil
 		m.managePresets = false
-		return m, m.enqueue(msg.plan)
+		plan := msg.plan
+		m.openConfirmModal("确认加入队列", enqueueInputSummary(plan), func(m *model) tea.Cmd {
+			return m.enqueue(plan)
+		})
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.clearSelection()
@@ -706,7 +709,7 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 func (m *model) handleMouse(msg tea.MouseWheelMsg) tea.Cmd {
 	var cmd tea.Cmd
 	switch {
-	case m.modal != nil && m.modal.kind == modalHelp:
+	case m.modal != nil && (m.modal.kind == modalHelp || (m.modal.kind == modalConfirm && m.modal.vp.Height() > 0)):
 		m.modal.vp, cmd = m.modal.vp.Update(msg)
 	case m.modal != nil:
 		return nil
@@ -2184,7 +2187,7 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		m.pausedBatch = e.BatchID
 		m.pauseTimer()
 		if e.Err != nil && task.IsOutputExists(e.Err.Error()) {
-			m.setStatus("输出文件已存在，任务已暂停：r 重试 / o 覆盖（需确认两次）/ s 跳过 / x 中止")
+			m.setStatus("输出文件已存在，任务已暂停：r 重试 / o 覆盖 / s 跳过 / x 中止")
 		} else {
 			m.setStatus("任务已暂停：r 重试 / s 跳过 / x 中止")
 		}

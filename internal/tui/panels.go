@@ -487,7 +487,7 @@ func (m *model) runTaskKeys(key string) bool {
 	}
 }
 
-// confirmOverwrite 对「输出已存在」的失败做两次确认，然后带覆盖重试。
+// confirmOverwrite 对「输出已存在」的失败确认一次，然后带覆盖重试。
 func (m *model) confirmOverwrite(row rosterRow) bool {
 	if m.queue == nil || m.pausedBatch == "" || row.batchID != m.pausedBatch {
 		return false
@@ -512,16 +512,13 @@ func (m *model) confirmOverwrite(row rosterRow) bool {
 		return true
 	}
 	batchID, id, path := row.batchID, target.ID, target.Output
-	m.openConfirmModal("覆盖已有文件", fmt.Sprintf("输出文件已存在：\n%s\n\n覆盖会替换该文件。enter 继续，esc 取消", path), func(m *model) tea.Cmd {
-		m.openConfirmModal("再次确认覆盖", fmt.Sprintf("再次确认覆盖：\n%s\n\n已有文件将被替换，无法恢复。enter 覆盖并重试，esc 取消", path), func(m *model) tea.Cmd {
-			if err := m.queue.PrepareOverwrite(batchID, id); err != nil {
-				m.setStatus("× 覆盖失败: " + err.Error())
-				return nil
-			}
-			m.queue.Decide(task.DecisionRetry)
-			m.clearPause("已确认覆盖，正在重试")
+	m.openConfirmModal("覆盖已有文件", fmt.Sprintf("输出文件已存在：\n%s\n\n覆盖会替换该文件，无法恢复。enter 覆盖并重试，esc 取消", path), func(m *model) tea.Cmd {
+		if err := m.queue.PrepareOverwrite(batchID, id); err != nil {
+			m.setStatus("× 覆盖失败: " + err.Error())
 			return nil
-		})
+		}
+		m.queue.Decide(task.DecisionRetry)
+		m.clearPause("已确认覆盖，正在重试")
 		return nil
 	})
 	return true

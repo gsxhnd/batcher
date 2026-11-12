@@ -1241,6 +1241,9 @@ func (m model) footer() string {
 			hints = []string{"↑/↓ 滚动", "esc 关闭"}
 		case modalConfirm:
 			hints = []string{"enter 确认", "esc 取消", "? 快捷键"}
+			if m.modal.vp.Height() > 0 {
+				hints = []string{"↑/↓ 滚动", "enter 确认", "esc 取消"}
+			}
 		default:
 			hints = []string{"↑/↓/Tab 切换", "enter 下一项/保存", "esc 取消", "? 快捷键"}
 			switch m.modal.kind {

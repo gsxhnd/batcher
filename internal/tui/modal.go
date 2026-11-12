@@ -91,8 +91,10 @@ func (m *model) openSubModal(index int) tea.Cmd {
 }
 
 // openConfirmModal 打开通用确认弹窗，onConfirm 里完成实际变更并负责关闭弹窗。
+// 内容超过一屏时可以上下滚动，enter 仍然确认。
 func (m *model) openConfirmModal(title, prompt string, onConfirm func(*model) tea.Cmd) {
 	m.modal = &modal{kind: modalConfirm, title: title, prompt: prompt, onConfirm: onConfirm}
+	m.layoutConfirm()
 }
 
 // openHelpModal 打开快捷键帮助弹窗（? 键开关），内容放入可滚动视口。
@@ -110,14 +112,41 @@ func (m model) helpModalSize() (w, inner int) {
 
 // resizeModal 按当前尺寸重设帮助弹窗的视口（打开时与终端尺寸变化时调用）。
 func (m *model) resizeModal() {
-	if m.modal == nil || m.modal.kind != modalHelp {
+	if m.modal == nil {
+		return
+	}
+	switch m.modal.kind {
+	case modalHelp:
+		_, inner := m.helpModalSize()
+		md := m.modal
+		md.vp.SetWidth(inner)
+		md.vp.SetHeight(max(m.bodyH()-4, 3))
+		md.vp.SetContent(wrapText(helpText(), inner))
+	case modalConfirm:
+		m.layoutConfirm()
+	}
+}
+
+// layoutConfirm 内容放得下时按原文高度显示；超出一屏则放进可滚动视口。
+func (m *model) layoutConfirm() {
+	md := m.modal
+	if md == nil || md.kind != modalConfirm {
 		return
 	}
 	_, inner := m.helpModalSize()
-	md := m.modal
+	maxH := max(m.bodyH()-6, 4)
+	wrapped := wrapText(md.prompt, inner)
+	n := 1
+	if wrapped != "" {
+		n = len(strings.Split(strings.TrimSuffix(wrapped, "\n"), "\n"))
+	}
+	if n <= maxH {
+		md.vp = viewport.Model{}
+		return
+	}
 	md.vp.SetWidth(inner)
-	md.vp.SetHeight(max(m.bodyH()-4, 3))
-	md.vp.SetContent(wrapText(helpText(), inner))
+	md.vp.SetHeight(maxH)
+	md.vp.SetContent(wrapped)
 }
 
 // helpText 组装快捷键帮助内容（多行，带样式段落标题）。
@@ -141,7 +170,7 @@ func helpText() string {
 	row("enter", "折叠/展开主任务或某一次；进入输出后 esc 返回")
 	row("y", "复制当前子任务的命令（主任务行=整个任务全部命令）")
 	row("r", "重试失败的子任务；已结束或历史任务重新排队")
-	row("o", "输出已存在时覆盖。需要连续确认两次，然后重试")
+	row("o", "输出已存在时覆盖。确认一次后重试")
 	row("d", "删除子任务，或把主任务从列表和数据库移除")
 	row("c", "取消主任务：执行中的停止，等待中的不再开始")
 	row("x", "等待中的主任务：开始执行")
@@ -152,10 +181,10 @@ func helpText() string {
 	section("新建任务")
 	row("a", "打开创建弹窗，所有参数在同一个弹窗里填写")
 	row("space", "勾选转码、字幕、字体")
-	row("enter", "下一项；转码预设先展开列表，上下选择后再确认；最后一项直接创建")
+	row("enter", "下一项；转码预设先展开列表，上下选择后再确认；最后一项先确认输入再创建")
 	row("ctrl+n / ctrl+d", "增加或删除一条字幕")
 	row("字幕组", "多条字幕时，没选中的组收成一行，移到该行展开")
-	row("ctrl+s", "任意位置创建任务")
+	row("ctrl+s", "任意位置生成任务，确认每条命令的 -i 后再加入队列")
 	row("esc", "关闭预设列表，否则取消")
 
 	section("转码预设")
@@ -196,6 +225,10 @@ func (m model) modalView() string {
 	case modalTask:
 		return m.taskModalView()
 	case modalConfirm:
+		if md.vp.Height() > 0 {
+			content = md.vp.View()
+			break
+		}
 		var b strings.Builder
 		for _, line := range strings.Split(md.prompt, "\n") {
 			b.WriteString("  " + line + "\n")
@@ -294,6 +327,13 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 			m.modal = nil
 			if m.managePresets {
 				m.openPresetList()
+			}
+			return nil
+		case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+			if md.vp.Height() > 0 {
+				var cmd tea.Cmd
+				m.modal.vp, cmd = m.modal.vp.Update(msg)
+				return cmd
 			}
 			return nil
 		}

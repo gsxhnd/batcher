@@ -755,7 +755,7 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 	return true
 }
 
-// PrepareOverwrite 在两次确认之后，允许这个失败的子任务替换已有输出。
+// PrepareOverwrite 在确认之后，允许这个失败的子任务替换已有输出。
 // 只改参数，不开始执行；调用方接着发重试决策。
 func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
 	q.mu.Lock()
