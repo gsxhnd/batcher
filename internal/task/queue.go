@@ -64,6 +64,7 @@ type Queue struct {
 	cancel      context.CancelFunc
 	batchCancel context.CancelFunc  // 取消当前正在执行的主任务（不影响队列本身）
 	discard     map[string]struct{} // 用户要求删除的主任务 ID：消费者收尾时直接取消并移除
+	armed       map[string]struct{} // 用户按了开始的主任务；未标记的 pending 不会被拉起
 	discardCh   chan string         // 删除信号：正在暂停等待决策的批次被删除时通知消费者收尾
 	done        chan struct{}       // 消费者退出时关闭
 	onEvent     func(QueueEvent)
@@ -91,8 +92,8 @@ func (q *Queue) Stop() {
 	<-q.done
 }
 
-// CancelCurrent 取消当前正在执行的主任务；主任务标为 canceled，队列继续执行后续任务。
-// 不在执行任何任务时为空操作。
+// CancelCurrent 取消当前正在执行的主任务；主任务标为 canceled。
+// 已经手动开始、还在等待的后续任务会接着执行。不在执行任何任务时为空操作。
 func (q *Queue) CancelCurrent() {
 	q.mu.Lock()
 	cancel := q.batchCancel
@@ -102,7 +103,8 @@ func (q *Queue) CancelCurrent() {
 	}
 }
 
-// Enqueue 把一个已规划的批处理加入队列末尾；队列已停止时返回错误。
+// Enqueue 把一个已规划的批处理加入队列末尾，状态为等待，不开始执行。
+// 队列已停止时返回错误。要跑起来需再调用 Start。
 func (q *Queue) Enqueue(plan *command.BatchPlan, sel command.Selection) (*Batch, error) {
 	q.mu.Lock()
 	if q.stopped {
@@ -115,8 +117,35 @@ func (q *Queue) Enqueue(plan *command.BatchPlan, sel command.Selection) (*Batch,
 	q.mu.Unlock()
 	_ = b.Save()
 	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
-	q.wake()
 	return b, nil
+}
+
+// Start 开始一个等待中的主任务。当前有任务在执行或暂停时，这一条会排到它结束之后。
+func (q *Queue) Start(batchID string) error {
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return fmt.Errorf("队列已停止，无法开始")
+	}
+	var target *Batch
+	for _, b := range q.batches {
+		if b.ID == batchID {
+			target = b
+			break
+		}
+	}
+	if target == nil {
+		q.mu.Unlock()
+		return fmt.Errorf("未找到任务 %s", batchID)
+	}
+	if target.Status != StatusPending {
+		q.mu.Unlock()
+		return fmt.Errorf("任务不在等待执行")
+	}
+	q.armLocked(batchID)
+	q.mu.Unlock()
+	q.wake()
+	return nil
 }
 
 // Requeue 把不在队列里的历史任务重新放回队尾。
@@ -162,6 +191,7 @@ func (q *Queue) Requeue(src *Batch) error {
 		return fmt.Errorf("任务状态 %s 不可重试", b.Status)
 	}
 	q.batches = append(q.batches, b)
+	q.armLocked(b.ID)
 	q.mu.Unlock()
 	_ = b.Save()
 	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
@@ -274,6 +304,7 @@ func (q *Queue) RetryBatch(batchID string) error {
 		}
 		return fmt.Errorf("任务状态 %s 不可重试", status)
 	}
+	q.armLocked(b.ID)
 	q.mu.Unlock()
 	_ = b.Save()
 	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
@@ -508,6 +539,14 @@ func (q *Queue) Snapshot() []*Batch {
 	return out
 }
 
+// armLocked 把主任务标成可以执行。调用方需持有 q.mu。
+func (q *Queue) armLocked(batchID string) {
+	if q.armed == nil {
+		q.armed = map[string]struct{}{}
+	}
+	q.armed[batchID] = struct{}{}
+}
+
 func (q *Queue) wake() {
 	select {
 	case q.notify <- struct{}{}:
@@ -542,15 +581,20 @@ func (q *Queue) run(ctx context.Context) {
 	}
 }
 
-// runPending 取出下一个 pending 主任务并执行；返回 false 表示应退出。
+// runPending 取出下一个已经手动开始的 pending 主任务并执行；返回 false 表示应退出。
 func (q *Queue) runPending(ctx context.Context) bool {
 	q.mu.Lock()
 	var next *Batch
 	for _, b := range q.batches {
-		if b.Status == StatusPending {
-			next = b
-			break
+		if b.Status != StatusPending {
+			continue
 		}
+		if _, ok := q.armed[b.ID]; !ok {
+			continue
+		}
+		next = b
+		delete(q.armed, b.ID)
+		break
 	}
 	q.mu.Unlock()
 	if next == nil {
@@ -589,7 +633,7 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 			status = StatusCanceled
 		}
 		q.finishBatch(b, status)
-		q.wake() // 空闲后立即尝试下一个主任务
+		q.wake() // 空闲后继续已经手动开始的下一个主任务
 	}
 
 	continueItem := func(it *Item) bool {
@@ -699,7 +743,7 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 		finalStatus = StatusFailed
 	}
 	finish(finalStatus)
-	// 主任务结束后立即尝试下一个主任务。
+	// 主任务结束后继续已经手动开始的下一个主任务。
 	q.wake()
 	return true
 }

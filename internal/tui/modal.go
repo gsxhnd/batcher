@@ -142,6 +142,7 @@ func helpText() string {
 	row("r", "重试失败的子任务；已结束或历史任务重新排队")
 	row("d", "删除子任务，或把主任务从列表和数据库移除")
 	row("c", "取消主任务：执行中的停止，等待中的不再开始")
+	row("x", "等待中的主任务：开始执行")
 	row("s / x", "暂停时：跳过当前子任务 / 中止当前主任务")
 	row("f", "跳回正在执行的子任务")
 	row("pgup/pgdn/滚轮", "滚动命令和日志")
@@ -151,6 +152,7 @@ func helpText() string {
 	row("space", "勾选转码、字幕、字体")
 	row("←/→", "切换转码预设，并填入高级参数")
 	row("ctrl+n / ctrl+d", "增加或删除一条字幕")
+	row("字幕组", "多条字幕时，没选中的组收成一行，移到该行展开")
 	row("enter", "下一项；最后一项直接创建")
 	row("ctrl+s", "任意位置创建任务")
 	row("esc", "取消")
@@ -311,10 +313,18 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		m.managePresets = false
 		return nil
 	case "tab", "down":
-		md.focus = (md.focus + 1) % len(md.fields)
+		if md.kind == modalTask {
+			md.focus = nextTaskFocus(md, 1)
+		} else {
+			md.focus = (md.focus + 1) % len(md.fields)
+		}
 		return focusField(md.fields, md.focus)
 	case "shift+tab", "up":
-		md.focus = (md.focus - 1 + len(md.fields)) % len(md.fields)
+		if md.kind == modalTask {
+			md.focus = nextTaskFocus(md, -1)
+		} else {
+			md.focus = (md.focus - 1 + len(md.fields)) % len(md.fields)
+		}
 		return focusField(md.fields, md.focus)
 	case "enter":
 		// enter 在中间字段推进到下一项；在末字段（含 bool）直接保存，
@@ -322,7 +332,11 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		if md.focus == len(md.fields)-1 {
 			return m.saveModal()
 		}
-		md.focus++
+		if md.kind == modalTask {
+			md.focus = nextTaskFocus(md, 1)
+		} else {
+			md.focus++
+		}
 		return focusField(md.fields, md.focus)
 	case "ctrl+s":
 		return m.saveModal()

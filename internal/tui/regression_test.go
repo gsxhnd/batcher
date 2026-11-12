@@ -172,10 +172,13 @@ func TestExecutionRequiresLatestPreview(t *testing.T) {
 	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
 	require.NoError(t, err)
 	require.Len(t, batch.Items, 1)
+	absIn, err := filepath.Abs("a.mkv")
+	require.NoError(t, err)
+	assert.Equal(t, absIn, batch.Items[0].Input, "入队时输入改为绝对路径")
 	seq := m.planSeq
 	next, _ := m.Update(planMsg{seq: seq, plan: testPlanOut(t, "不应替换.mkv")})
 	m = next.(model)
-	assert.Equal(t, "a.mkv", batch.Items[0].Input, "入队复制的快照不受后续计划影响")
+	assert.Equal(t, absIn, batch.Items[0].Input, "入队复制的快照不受后续计划影响")
 }
 
 // TestRosterShowsBatchesAndItemStates 验证任务面板的队列视图：
@@ -188,6 +191,7 @@ func TestRosterShowsBatchesAndItemStates(t *testing.T) {
 	testQueue(t, &m)
 	batch, err := m.queue.Enqueue(testPlanOut(t, "a", "b"), command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, m.queue.Start(batch.ID))
 	batchID := batch.ID
 	_ = batchID
 	waitBatchEvent(t, &m, task.QueueItemStarted)
@@ -288,8 +292,9 @@ func TestRetryAddsAttemptRow(t *testing.T) {
 	m.resizePanes()
 	m.focus = panelRun
 	testQueue(t, &m)
-	_, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, m.queue.Start(batch.ID))
 	waitBatchEvent(t, &m, task.QueueBatchPaused)
 	require.Equal(t, 1, attemptRows(&m))
 	frozen := m.progressHint()
@@ -321,8 +326,8 @@ func attemptRows(m *model) int {
 }
 
 // TestQueueEventsFlowWhenIdle 验证队列事件监听链常驻：
-// 程序启动即由 Init 挂上监听，空闲（未在执行）时入队也能立刻进入执行。
-// 此前的缺陷是监听只在 eventing=true 时重挂，空闲时第一条事件后即断链，入队永远不执行。
+// 程序启动即由 Init 挂上监听，空闲时手动开始也能把执行事件送进界面。
+// 此前的缺陷是监听只在 eventing=true 时重挂，空闲时第一条事件后即断链，开始后永远不执行。
 func TestQueueEventsFlowWhenIdle(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -331,6 +336,7 @@ func TestQueueEventsFlowWhenIdle(t *testing.T) {
 	testQueue(t, &m)
 	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, m.queue.Start(batch.ID))
 	batchID := batch.ID
 	_ = batchID
 
@@ -366,6 +372,7 @@ func TestStalesPlanMessagesDuringRun(t *testing.T) {
 	testQueue(t, &m)
 	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
 	require.NoError(t, err)
+	require.NoError(t, m.queue.Start(batch.ID))
 	waitBatchEvent(t, &m, task.QueueBatchStarted)
 	require.True(t, m.running)
 	require.Len(t, m.files, 1)
@@ -414,6 +421,7 @@ func TestBatchMessagesDrainBeforeCompletion(t *testing.T) {
 	testQueue(t, &m)
 	batch, err := m.queue.Enqueue(plan, queueSelection())
 	require.NoError(t, err)
+	require.NoError(t, m.queue.Start(batch.ID))
 	// 暂停后立刻决策中止，驱动批次快速收尾；捕获队列指针，避免与 Update 的值拷贝竞态。
 	q := m.queue
 	go func() {
@@ -467,8 +475,9 @@ func TestCancelledQueueDropsEventsFast(t *testing.T) {
 	m := newModel()
 	m.ctx = ctx
 	testQueue(t, &m)
-	_, err := m.queue.Enqueue(plan, queueSelection())
+	batch, err := m.queue.Enqueue(plan, queueSelection())
 	require.NoError(t, err)
+	require.NoError(t, m.queue.Start(batch.ID))
 	waitBatchEvent(t, &m, task.QueueItemStarted)
 	cancel()
 	stopped := make(chan struct{})

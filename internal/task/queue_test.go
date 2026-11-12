@@ -125,6 +125,7 @@ func TestQueueRunsRealMediaToCompletion(t *testing.T) {
 	plan := mediaFixturePlan(t, fx)
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 
 	done := waitBatchTerminal(t, q, batchID, 25*time.Second)
@@ -184,6 +185,8 @@ func TestQueueSerialExecution(t *testing.T) {
 	require.NoError(t, err)
 	b2, err := q.Enqueue(plan2, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b1.ID))
+	require.NoError(t, q.Start(b2.ID))
 
 	done1 := waitBatchTerminal(t, q, b1.ID, 50*time.Second)
 	done2 := waitBatchTerminal(t, q, b2.ID, 50*time.Second)
@@ -205,6 +208,7 @@ func TestQueuePauseRetry(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 	// 占位文件无法转码，第一个子任务必然失败
 	deadline := time.Now().Add(10 * time.Second)
@@ -252,6 +256,7 @@ func TestQueuePauseAbort(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -283,6 +288,8 @@ func TestCancelCurrentCancelsBatchAndRunsNext(t *testing.T) {
 	require.NoError(t, err)
 	b2, err := q.Enqueue(plan2, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b1.ID))
+	require.NoError(t, q.Start(b2.ID))
 	id1, id2 := b1.ID, b2.ID
 
 	// 等第一个主任务失败进入暂停
@@ -367,6 +374,7 @@ func TestRetryBatchOnPausedRetriesFailedItem(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 	waitPaused(t, col)
 
@@ -398,6 +406,7 @@ func TestRetryAgainDoesNotSkip(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	waitPaused(t, col)
 
 	require.NoError(t, q.RetryBatch(b.ID))
@@ -428,6 +437,7 @@ func TestRetryBatchAfterAbortRequeuesWholeBatch(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 	waitPaused(t, col)
 
@@ -461,6 +471,7 @@ func TestDiscardPausesBatchMarksCanceledAndRemoves(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 	waitPaused(t, col)
 
@@ -492,8 +503,9 @@ func TestDiscardPendingAndTerminalBatches(t *testing.T) {
 	q, col := newTestQueue(ctx)
 	defer q.Stop()
 
-	_, err := q.Enqueue(plan1, command.Selection{Convert: true})
+	b1, err := q.Enqueue(plan1, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b1.ID))
 	b2, err := q.Enqueue(plan2, command.Selection{Convert: true})
 	require.NoError(t, err)
 	_, err = q.Enqueue(plan3, command.Selection{Convert: true})
@@ -524,6 +536,7 @@ func TestQueueCancelStopsExecution(t *testing.T) {
 	plan := mediaFixturePlan(t, fx)
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 
 	// 等到子任务开始后取消
@@ -592,6 +605,7 @@ func TestQueueFFmpegEventsForwarded(t *testing.T) {
 	plan := mediaFixturePlan(t, fx)
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	done := waitBatchTerminal(t, q, b.ID, 25*time.Second)
 	require.Equal(t, StatusDone, done.Status)
 
@@ -621,6 +635,7 @@ func TestQueuePartialOutputCleanup(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -649,6 +664,7 @@ func TestQueueRecordSavedAfterEachItem(t *testing.T) {
 	plan := mediaFixturePlan(t, fx)
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	done := waitBatchTerminal(t, q, b.ID, 25*time.Second)
 	require.Equal(t, StatusDone, done.Status)
 	q.Stop() // 等消费者完成最后一次落盘
@@ -706,6 +722,7 @@ func TestQueueSkipsDoneItems(t *testing.T) {
 
 	// 把第一个子任务预先标为 done，消费者应跳过它
 	q.setItemStatus(batchID, itemID, StatusDone)
+	require.NoError(t, q.Start(b.ID))
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -727,9 +744,10 @@ func TestQueueOutputDirCreatedOnlyOnExecution(t *testing.T) {
 	defer q.Stop()
 
 	assert.NoDirExists(t, fx.Out, "入队前输出目录不应存在")
-	_, err := q.Enqueue(plan, command.Selection{Convert: true})
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
 	assert.NoDirExists(t, fx.Out, "入队后、执行前输出目录仍不应存在")
+	require.NoError(t, q.Start(b.ID))
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -753,6 +771,7 @@ func TestQueueLogStderrTailOnFailure(t *testing.T) {
 
 	b, err := q.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
 	batchID := b.ID
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -768,6 +787,32 @@ func TestQueueLogStderrTailOnFailure(t *testing.T) {
 	assert.NotEmpty(t, snap.Items[0].Error)
 
 	q.Decide(DecisionAbort)
+}
+
+func TestEnqueueDoesNotRunUntilStart(t *testing.T) {
+	plan, _ := fixturePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	time.Sleep(80 * time.Millisecond)
+	s, ok := q.BatchStatus(b.ID)
+	require.True(t, ok)
+	assert.Equal(t, StatusPending, s)
+	assert.False(t, col.has(QueueBatchStarted))
+
+	require.NoError(t, q.Start(b.ID))
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if col.has(QueueBatchStarted) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("手动开始后应执行")
 }
 
 func TestQueueCanceledBeforeStart(t *testing.T) {

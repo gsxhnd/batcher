@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -80,6 +81,40 @@ func TestMainScreenOpensTaskAndPresetModals(t *testing.T) {
 	assert.Equal(t, modalPresetList, m.modal.kind)
 	press(&m, "esc")
 	assert.Nil(t, m.modal)
+}
+
+func TestSubtitleGroupsCollapseUntilFocused(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 40
+	press(&m, "a")
+	press(&m, "ctrl+n")
+	require.NotNil(t, m.modal)
+
+	m.modal.focus = 0
+	folded := taskModalText(&m)
+	assert.Contains(t, folded, "▸ 字幕 1")
+	assert.Contains(t, folded, "▸ 字幕 2")
+	assert.NotContains(t, folded, "默认字幕流")
+
+	suffix := -1
+	for i, f := range m.modal.fields {
+		if f.def.key == "sub_suffix" {
+			suffix = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, suffix, 0)
+	m.modal.focus = suffix
+	open := taskModalText(&m)
+	assert.Contains(t, open, "▾ 字幕 1")
+	assert.Contains(t, open, "默认字幕流")
+	assert.Contains(t, open, "▸ 字幕 2")
+
+	m.modal.focus = suffix + 3
+	press(&m, "down")
+	assert.Equal(t, suffix+4, m.modal.focus)
+	assert.Equal(t, "sub_suffix", m.modal.fields[m.modal.focus].def.key)
 }
 
 func TestCreateTaskRejectsEmptySelection(t *testing.T) {
@@ -472,6 +507,7 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	plan := testPlanOut(t, "a.mkv")
 	batch, err := m.queue.Enqueue(plan, command.Selection{Convert: true})
 	require.NoError(t, err)
+	require.NoError(t, m.queue.Start(batch.ID))
 	m.running = true
 	m.focus = panelRun
 	before := len(m.queue.Snapshot())
@@ -482,7 +518,7 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	assert.Nil(t, m.modal)
 	m.enqueue(testPlanOut(t, "b.mkv"))
 	assert.Len(t, m.queue.Snapshot(), before+1, "执行中创建的主任务排在后面")
-	assert.Contains(t, m.statusMsg, "之后")
+	assert.Contains(t, m.statusMsg, "按 x 开始")
 	press(&m, "enter")
 	assert.Len(t, m.queue.Snapshot(), before+1, "任务列表回车不入队")
 
@@ -522,6 +558,14 @@ func TestIsISO639Code(t *testing.T) {
 }
 
 // ---------- 辅助 ----------
+
+func taskModalText(m *model) string {
+	var b strings.Builder
+	for _, ln := range m.taskModalLines(80) {
+		b.WriteString(ln.text)
+	}
+	return b.String()
+}
 
 func slicesAny(fields []field, key string) bool {
 	for _, f := range fields {

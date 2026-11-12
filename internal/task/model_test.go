@@ -58,6 +58,28 @@ func TestNewBatchFromPlan(t *testing.T) {
 	}
 }
 
+func TestNewBatchMakesInputOutputAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	in := filepath.Join("src", "a.mp4")
+	out := filepath.Join("dst", "a.mkv")
+	plan := &command.BatchPlan{Jobs: []command.Job{{
+		Input:  in,
+		Output: out,
+		Args:   []string{"-i", in, "-c", "copy", out},
+	}}}
+	b := NewBatch("batch-abs", plan, command.Selection{Convert: true}, fixedNow)
+	absIn, err := filepath.Abs(in)
+	require.NoError(t, err)
+	absOut, err := filepath.Abs(out)
+	require.NoError(t, err)
+	require.Len(t, b.Items, 1)
+	assert.Equal(t, absIn, b.Items[0].Input)
+	assert.Equal(t, absOut, b.Items[0].Output)
+	assert.Equal(t, []string{"-i", absIn, "-c", "copy", absOut}, b.Items[0].PlanArgs)
+	assert.Equal(t, []string{"-i", in, "-c", "copy", out}, plan.Jobs[0].Args, "原计划保持调用方传入的路径")
+}
+
 func TestNewBatchCopiesPlan(t *testing.T) {
 	plan, _ := fixturePlan(t)
 	b := NewBatch("batch-1", plan, command.Selection{Convert: true}, fixedNow)

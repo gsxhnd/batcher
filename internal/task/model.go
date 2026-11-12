@@ -140,12 +140,19 @@ func NewBatch(id string, plan *command.BatchPlan, sel command.Selection, now tim
 		// 手工构造的计划可能没有携带 option；记录跟随第一个子任务的输出目录。
 		outputDir = filepath.Dir(plan.Jobs[0].Output)
 	}
+	if opt.InputPath != "" {
+		opt.InputPath = inputDir
+	}
+	outputDir = absPath(outputDir)
+	if opt.OutputPath != "" {
+		opt.OutputPath = outputDir
+	}
 	b := &Batch{
 		Version:   recordVersion,
 		ID:        id,
 		Name:      filepath.Base(inputDir),
 		InputDir:  inputDir,
-		OutputDir: absPath(outputDir),
+		OutputDir: outputDir,
 		Selection: sel,
 		Option:    opt,
 		Status:    StatusPending,
@@ -153,16 +160,42 @@ func NewBatch(id string, plan *command.BatchPlan, sel command.Selection, now tim
 		Items:     make([]*Item, 0, len(plan.Jobs)),
 	}
 	for i, job := range plan.Jobs {
+		input := job.Input
+		output := job.Output
+		if input != "" {
+			input = absPath(input)
+		}
+		if output != "" {
+			output = absPath(output)
+		}
+		planArgs := absArgs(job.Args, job.Input, input, job.Output, output)
 		b.Items = append(b.Items, &Item{
 			ID:       fmt.Sprintf("%03d", i+1),
-			Input:    job.Input,
-			Output:   job.Output,
-			Args:     ffmpeg.ExecArgs(job.Args),
-			PlanArgs: slices.Clone(job.Args),
+			Input:    input,
+			Output:   output,
+			Args:     ffmpeg.ExecArgs(planArgs),
+			PlanArgs: planArgs,
 			Status:   StatusPending,
 		})
 	}
 	return b
+}
+
+// absArgs 把参数里与输入、输出完全相同的路径换成绝对路径。
+func absArgs(args []string, fromTo ...string) []string {
+	out := slices.Clone(args)
+	for i := 0; i+1 < len(fromTo); i += 2 {
+		from, to := fromTo[i], fromTo[i+1]
+		if from == "" || from == to {
+			continue
+		}
+		for j, arg := range out {
+			if arg == from {
+				out[j] = to
+			}
+		}
+	}
+	return out
 }
 
 func absPath(path string) string {

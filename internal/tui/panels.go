@@ -476,6 +476,9 @@ func (m *model) runTaskKeys(key string) bool {
 	case "s":
 		return m.pauseDecision(row, task.DecisionSkip, "已发送跳过指令")
 	case "x":
+		if m.startFocused(row) {
+			return true
+		}
 		return m.pauseDecision(row, task.DecisionAbort, "已发送中止指令")
 	default:
 		return false
@@ -510,6 +513,41 @@ func (m *model) retryFocused(row rosterRow) bool {
 	}
 	m.setStatus("已发送重试指令，等待执行")
 	return true
+}
+
+// startFocused 开始光标所在、还在等待的主任务。暂停中的批次留给中止键。
+func (m *model) startFocused(row rosterRow) bool {
+	if m.queue == nil || row.batchID == "" || m.pausedBatch == row.batchID {
+		return false
+	}
+	snap, ok := m.batchByID(row.batchID)
+	if !ok || snap.Status != task.StatusPending {
+		return false
+	}
+	busy := m.running || m.pausedBatch != ""
+	if err := m.queue.Start(row.batchID); err != nil {
+		m.setStatus("× 开始失败: " + err.Error())
+		return true
+	}
+	if busy {
+		m.setStatus("已安排执行，当前任务结束后开始")
+		return true
+	}
+	m.setStatus("已开始执行")
+	return true
+}
+
+// canStartFocused 表示光标在一条等待执行的主任务上，底栏把 x 显示为开始。
+func (m model) canStartFocused() bool {
+	if m.queue == nil || m.fileCursor < 0 || m.fileCursor >= len(m.roster) {
+		return false
+	}
+	row := m.roster[m.fileCursor]
+	if row.batchID == "" || m.pausedBatch == row.batchID {
+		return false
+	}
+	snap, ok := m.batchByID(row.batchID)
+	return ok && snap.Status == task.StatusPending
 }
 
 // pauseDecision 在暂停等待时发送跳过或中止。子任务行与主任务行都作用于当前暂停的批次。
@@ -729,7 +767,7 @@ func parameterSummary(sel command.Selection, opt *command.VideoBatchOption, jobs
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// enqueue 把计划交给任务队列，队列空闲时立即开始执行。
+// enqueue 把计划交给任务队列。入队后停在等待，需在主任务上按 x 开始。
 func (m *model) enqueue(plan *command.BatchPlan) tea.Cmd {
 	if m.queue == nil {
 		m.setStatus("× 队列未就绪，请重启程序")
@@ -740,9 +778,6 @@ func (m *model) enqueue(plan *command.BatchPlan) tea.Cmd {
 		m.setStatus("× 入队失败: " + err.Error())
 		return nil
 	}
-	m.setStatus(fmt.Sprintf("已加入任务队列（%d 个任务），队列空闲时立即开始", len(b.Items)))
-	if m.running || m.pausedBatch != "" {
-		m.setStatus(fmt.Sprintf("已加入任务队列（%d 个任务），排在当前任务之后", len(b.Items)))
-	}
+	m.setStatus(fmt.Sprintf("已加入任务队列（%d 个任务），在该任务上按 x 开始", len(b.Items)))
 	return nil
 }

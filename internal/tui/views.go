@@ -1256,6 +1256,13 @@ func (m model) footer() string {
 		hints = []string{"↑/↓ 滚动输出", "esc 返回", "y 复制"}
 	case m.running || m.queueViewActive():
 		hints = []string{"↑/↓ 切换", "r 重试", "d 删除", "c 取消", "s 跳过", "x 中止", "y 复制", "f 跟随"}
+		if m.canStartFocused() {
+			for i, h := range hints {
+				if h == "x 中止" {
+					hints[i] = "x 开始"
+				}
+			}
+		}
 		if m.running || m.pausedBatch != "" {
 			hints = append(hints, "a 新建", "q 取消执行")
 		} else {

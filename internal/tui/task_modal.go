@@ -556,7 +556,7 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		}
 	}
 	add(-1, "  "+descStyle.Render(summary))
-	add(-1, "  "+descStyle.Render("enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕 · esc 取消"))
+	add(-1, "  "+descStyle.Render("enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕 · 未选中的字幕组会折叠"))
 
 	rule()
 	head("操作", "可以同时勾选，一次 ffmpeg 做完")
@@ -596,11 +596,20 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		add(-1, "  "+descStyle.Render("还没有字幕组，按 ctrl+n 添加"))
 	}
 	group := 0
+	openGroup := 0
 	for _, idx := range subs {
 		f := &md.fields[idx]
 		if f.def.key == "sub_suffix" {
 			group++
-			head(fmt.Sprintf("字幕 %d", group), "灰色是默认值，留空即使用")
+			if subtitleGroupOpen(md.fields, md.focus, idx) {
+				openGroup = group
+				head(fmt.Sprintf("▾ 字幕 %d", group), "灰色是默认值，留空即使用")
+			} else {
+				add(idx, subtitleFoldLine(md.fields, idx, group))
+				continue
+			}
+		} else if group != openGroup {
+			continue
 		}
 		extra := ""
 		if f.def.key == "sub_default" {
@@ -611,6 +620,90 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		}
 	}
 	return lines
+}
+
+// nextTaskFocus 在新建任务表单里移动光标，跳过折叠字幕组里的字段。
+func nextTaskFocus(md *modal, delta int) int {
+	n := len(md.fields)
+	if n == 0 {
+		return 0
+	}
+	i := md.focus
+	for range n {
+		i = (i + delta + n) % n
+		if taskFieldReachable(md.fields, md.focus, i) {
+			return i
+		}
+	}
+	return md.focus
+}
+
+// taskFieldReachable 报告字段能否成为光标。折叠组只保留后缀那一行。
+func taskFieldReachable(fields []field, focus, idx int) bool {
+	if idx < 0 || idx >= len(fields) {
+		return false
+	}
+	switch fields[idx].def.key {
+	case "sub_lang", "sub_title", "sub_default":
+		g, ok := subtitleGroup(fields, idx)
+		fg, fok := subtitleGroup(fields, focus)
+		return ok && fok && g == fg
+	default:
+		return true
+	}
+}
+
+// subtitleGroup 返回字幕字段所属的组号（从 1 起）。
+func subtitleGroup(fields []field, idx int) (int, bool) {
+	if idx < 0 || idx >= len(fields) {
+		return 0, false
+	}
+	switch fields[idx].def.key {
+	case "sub_suffix", "sub_lang", "sub_title", "sub_default":
+	default:
+		return 0, false
+	}
+	group := 0
+	for i := 0; i <= idx; i++ {
+		if fields[i].def.key == "sub_suffix" {
+			group++
+		}
+	}
+	return group, true
+}
+
+// subtitleGroupOpen 表示光标正在这组字幕里，字段需要展开。
+func subtitleGroupOpen(fields []field, focus, idx int) bool {
+	g, ok := subtitleGroup(fields, idx)
+	fg, fok := subtitleGroup(fields, focus)
+	return ok && fok && g == fg
+}
+
+// subtitleFoldLine 把一组字幕收成一行摘要。
+func subtitleFoldLine(fields []field, suffixIdx, group int) string {
+	suffix, lang, title := "", "", ""
+	def := false
+	if suffixIdx < len(fields) {
+		suffix = fields[suffixIdx].resolved()
+	}
+	if suffixIdx+1 < len(fields) {
+		lang = fields[suffixIdx+1].resolved()
+	}
+	if suffixIdx+2 < len(fields) {
+		title = fields[suffixIdx+2].resolved()
+	}
+	if suffixIdx+3 < len(fields) && fields[suffixIdx+3].def.key == "sub_default" {
+		def = fields[suffixIdx+3].checked
+	}
+	if title == "" {
+		title = "无标题"
+	}
+	mark := ""
+	if def {
+		mark = "  默认"
+	}
+	text := fmt.Sprintf("▸ 字幕 %d  .%s  %s  %s%s", group, suffix, lang, title, mark)
+	return "  " + descStyle.Render(text)
 }
 
 func taskFieldLines(f *field, focused bool, boxW int, extra string) []string {
