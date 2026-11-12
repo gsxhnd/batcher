@@ -440,9 +440,10 @@ func (m model) taskModalView() string {
 			break
 		}
 	}
-	pinned := 0
+	// 错误在顶部、快捷键在底部，这两行不参与滚动。
+	pinned := 1
 	if md.err != "" {
-		pinned = 1
+		pinned++
 	}
 	window := max(contentH-pinned, 1)
 	start := focusAt - max(window/5, 1)
@@ -453,12 +454,20 @@ func (m model) taskModalView() string {
 		start = max(len(lines)-window, 0)
 	}
 	end := min(start+window, len(lines))
-	var b strings.Builder
+	var body []string
 	if md.err != "" {
-		b.WriteString("  " + errorStyle.Render("× "+md.err) + "\n")
+		body = append(body, "  "+errorStyle.Render("× "+md.err)+"\n")
 	}
 	for _, ln := range lines[start:end] {
-		b.WriteString(ln.text)
+		body = append(body, ln.text)
+	}
+	for len(body)+1 < contentH {
+		body = append(body, "\n")
+	}
+	body = append(body, "  "+descStyle.Render("↑/↓ 切换 · enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕")+"\n")
+	var b strings.Builder
+	for _, ln := range body {
+		b.WriteString(ln)
 	}
 	title := "新建任务"
 	if len(lines) > window {
@@ -556,7 +565,6 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		}
 	}
 	add(-1, "  "+descStyle.Render(summary))
-	add(-1, "  "+descStyle.Render("enter 下一项 · ctrl+s 创建 · ctrl+n / ctrl+d 增删字幕 · 未选中的字幕组会折叠"))
 
 	rule()
 	head("操作", "可以同时勾选，一次 ffmpeg 做完")
@@ -623,19 +631,23 @@ func (m model) taskModalLines(boxW int) []taskLine {
 }
 
 // nextTaskFocus 在新建任务表单里移动光标，跳过折叠字幕组里的字段。
+// 到第一项或最后一项后停住，不再绕回另一头。
 func nextTaskFocus(md *modal, delta int) int {
 	n := len(md.fields)
-	if n == 0 {
-		return 0
+	if n == 0 || delta == 0 {
+		return md.focus
 	}
 	i := md.focus
-	for range n {
-		i = (i + delta + n) % n
+	for {
+		next := i + delta
+		if next < 0 || next >= n {
+			return md.focus
+		}
+		i = next
 		if taskFieldReachable(md.fields, md.focus, i) {
 			return i
 		}
 	}
-	return md.focus
 }
 
 // taskFieldReachable 报告字段能否成为光标。折叠组只保留后缀那一行。

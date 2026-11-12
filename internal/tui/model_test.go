@@ -117,6 +117,29 @@ func TestSubtitleGroupsCollapseUntilFocused(t *testing.T) {
 	assert.Equal(t, "sub_suffix", m.modal.fields[m.modal.focus].def.key)
 }
 
+func TestTaskModalStopsAtTheEnds(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 40
+	press(&m, "a")
+	require.NotNil(t, m.modal)
+
+	press(&m, "up")
+	assert.Equal(t, 0, m.modal.focus, "第一项再向上应停住")
+
+	last := len(m.modal.fields) - 1
+	m.modal.focus = last
+	press(&m, "down")
+	assert.Equal(t, last, m.modal.focus, "最后一项再向下应停住")
+
+	m.modal.focus = 0
+	top := m.taskModalView()
+	m.modal.focus = last
+	scrolled := m.taskModalView()
+	assert.Contains(t, top, "ctrl+s")
+	assert.Contains(t, scrolled, "ctrl+s", "滚到下面后快捷键提示仍在")
+}
+
 func TestCreateTaskRejectsEmptySelection(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
