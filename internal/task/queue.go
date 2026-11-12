@@ -396,6 +396,12 @@ func copyBatch(src *Batch) *Batch {
 			item.StderrTail = make([]string, len(it.StderrTail))
 			copy(item.StderrTail, it.StderrTail)
 		}
+		if it.AttemptLogs != nil {
+			item.AttemptLogs = make([][]string, len(it.AttemptLogs))
+			for i, lines := range it.AttemptLogs {
+				item.AttemptLogs[i] = slices.Clone(lines)
+			}
+		}
 		cp.Items[i] = &item
 	}
 	return &cp
@@ -807,6 +813,7 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 	q.mu.Lock()
 	it.Status = StatusRunning
 	it.Attempts++
+	it.BeginAttemptLog()
 	overwrite := it.Overwrite
 	args := slices.Clone(it.PlanArgs)
 	q.mu.Unlock()
@@ -818,6 +825,11 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 
 	runner := &ffmpeg.Runner{OnEvent: func(e ffmpeg.Event) {
 		evt := e
+		if evt.Type == ffmpeg.EventLog && evt.Message != "" {
+			q.mu.Lock()
+			it.AppendAttemptLog(evt.Message)
+			q.mu.Unlock()
+		}
 		q.emit(QueueEvent{Type: QueueFFmpeg, BatchID: b.ID, ItemID: it.ID, FFmpegEvt: &evt})
 	}}
 	idx := 0
@@ -893,6 +905,7 @@ func (q *Queue) failItem(b *Batch, it *Item, start time.Time, msg string) {
 	it.Status = StatusFailed
 	it.PartialOutput = false
 	it.Error = msg
+	it.AppendAttemptLog(msg)
 	it.DurationMs = time.Since(start).Milliseconds()
 	q.mu.Unlock()
 	q.emit(QueueEvent{Type: QueueItemFailed, BatchID: b.ID, ItemID: it.ID, Err: fmt.Errorf("%s", msg)})

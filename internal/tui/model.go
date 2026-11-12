@@ -1353,7 +1353,7 @@ func (m model) oneAttemptLines(row rosterRow) []string {
 					continue
 				}
 				if len(a.lines) == 0 {
-					return []string{descStyle.Render("（无输出）")}
+					break
 				}
 				return a.lines
 			}
@@ -1362,13 +1362,24 @@ func (m model) oneAttemptLines(row rosterRow) []string {
 	if m.queue != nil {
 		if snap, ok := m.batchByID(row.batchID); ok {
 			for _, it := range snap.Items {
-				if it.ID != row.itemID || row.attempt != it.Attempts {
+				if it.ID != row.itemID {
 					continue
 				}
-				if len(it.StderrTail) == 0 {
-					return []string{descStyle.Render("（无输出）")}
+				n := row.attempt
+				if n >= 1 && n <= len(it.AttemptLogs) && len(it.AttemptLogs[n-1]) > 0 {
+					out := make([]string, len(it.AttemptLogs[n-1]))
+					for i, line := range it.AttemptLogs[n-1] {
+						style := logLineDefaultStyle
+						if i == len(it.AttemptLogs[n-1])-1 && it.Status == task.StatusFailed && n == it.Attempts {
+							style = logLineFailedStyle
+						}
+						out[i] = style.Render(line)
+					}
+					return out
 				}
-				return it.StderrTail
+				if n == it.Attempts && it.Error != "" {
+					return []string{logLineFailedStyle.Render(it.Error)}
+				}
 			}
 		}
 	}
@@ -1384,6 +1395,15 @@ func (m model) attemptListLines(row rosterRow) []string {
 	lines := make([]string, 0, len(snaps))
 	for _, a := range snaps {
 		lines = append(lines, descStyle.Render(fmt.Sprintf("第 %d 次  %s", a.n, fileStateText(a.status))))
+		if a.status != fileFailed {
+			continue
+		}
+		for _, ln := range m.oneAttemptLines(rosterRow{batchID: row.batchID, itemID: row.itemID, attempt: a.n}) {
+			if strings.Contains(ln, "这次输出未保留") || strings.Contains(ln, "（无输出）") {
+				continue
+			}
+			lines = append(lines, ln)
+		}
 	}
 	return lines
 }
@@ -1609,17 +1629,17 @@ func batchStateText(s task.Status) string {
 	}
 }
 
-// itemAttemptsOpen 表示这个子任务的次数是否展开。正在执行，或暂停在失败的子任务上时默认展开。
+// itemAttemptsOpen 表示这个子任务的次数是否展开。正在执行或已经失败时默认展开，方便直接看输出。
 func (m *model) itemAttemptsOpen(b *task.Batch, it *task.Item) bool {
 	if m.itemExpanded != nil {
 		if v, ok := m.itemExpanded[b.ID+"\n"+it.ID]; ok {
 			return v
 		}
 	}
-	if it.Status == task.StatusRunning {
+	if it.Status == task.StatusRunning || it.Status == task.StatusFailed {
 		return true
 	}
-	return b.Status == task.StatusPaused && it.Status == task.StatusFailed
+	return false
 }
 
 // attemptSnap 是左侧次数行需要的序号和状态。

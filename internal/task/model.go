@@ -67,6 +67,8 @@ type Item struct {
 	DurationMs int64    `json:"durationMs"`
 	Error      string   `json:"error,omitempty"`
 	StderrTail []string `json:"stderrTail,omitempty"`
+	// AttemptLogs 按执行次数保存输出。下标 0 是第 1 次，失败次数展开时用它显示输出。
+	AttemptLogs [][]string `json:"attemptLogs,omitempty"`
 }
 
 // IsOutputExists 判断错误是不是「输出文件已经存在」。
@@ -76,6 +78,26 @@ func IsOutputExists(msg string) bool {
 		return false
 	}
 	return strings.Contains(msg, "已存在") || strings.Contains(strings.ToLower(msg), "already exists")
+}
+
+// BeginAttemptLog 为新的一次执行准备一段输出。调用方需已持有队列锁。
+func (it *Item) BeginAttemptLog() {
+	it.AttemptLogs = append(it.AttemptLogs, nil)
+}
+
+// AppendAttemptLog 把一行输出写入当前这一次，只保留末尾 maxStderrTail 行。调用方需已持有队列锁。
+func (it *Item) AppendAttemptLog(line string) {
+	if line == "" {
+		return
+	}
+	if len(it.AttemptLogs) == 0 {
+		it.AttemptLogs = append(it.AttemptLogs, nil)
+	}
+	last := len(it.AttemptLogs) - 1
+	it.AttemptLogs[last] = append(it.AttemptLogs[last], line)
+	if n := len(it.AttemptLogs[last]) - maxStderrTail; n > 0 {
+		it.AttemptLogs[last] = it.AttemptLogs[last][n:]
+	}
 }
 
 // AddStderr 追加一行日志，只保留末尾 maxStderrTail 行。

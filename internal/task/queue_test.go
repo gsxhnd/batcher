@@ -786,6 +786,8 @@ func TestQueueLogStderrTailOnFailure(t *testing.T) {
 	snap, _ := q.BatchCopy(batchID)
 	require.NotNil(t, snap)
 	assert.NotEmpty(t, snap.Items[0].Error)
+	require.NotEmpty(t, snap.Items[0].AttemptLogs)
+	assert.NotEmpty(t, snap.Items[0].AttemptLogs[0])
 
 	q.Decide(DecisionAbort)
 }

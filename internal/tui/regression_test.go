@@ -934,9 +934,9 @@ func TestRetryAttemptsAreNumberedAndFoldable(t *testing.T) {
 	assert.Contains(t, parent, "次数")
 	assert.Contains(t, parent, "第 1 次")
 	assert.Contains(t, parent, "第 2 次")
+	assert.Contains(t, parent, "first-output-UNIQUE", "失败次数里应直接看到该次输出")
+	assert.Contains(t, parent, "second-output-UNIQUE")
 	assert.NotContains(t, parent, "── 输出 ──")
-	assert.NotContains(t, parent, "first-output-UNIQUE")
-	assert.NotContains(t, parent, "second-output-UNIQUE")
 
 	m.roster = []rosterRow{
 		{batchID: "b", itemID: "001", title: "a.mkv", cmd: "ffmpeg -i a.mkv o.mkv"},
