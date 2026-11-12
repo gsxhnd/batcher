@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -813,6 +814,60 @@ func TestEnqueueDoesNotRunUntilStart(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("手动开始后应执行")
+}
+
+func TestExistingOutputFailsWithoutDeletingAndRetryCounts(t *testing.T) {
+	plan, _ := fixturePlan(t)
+	out := plan.Jobs[0].Output
+	require.NoError(t, os.MkdirAll(filepath.Dir(out), 0o755))
+	require.NoError(t, os.WriteFile(out, []byte("keep"), 0o644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, _ := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
+
+	waitAttempt := func(n int) *Batch {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			snap, ok := q.BatchCopy(b.ID)
+			if ok && snap.Status == StatusPaused && snap.Items[0].Attempts >= n && snap.Items[0].Status == StatusFailed {
+				return snap
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("未在暂停中看到第 %d 次失败", n)
+		return nil
+	}
+
+	snap := waitAttempt(1)
+	assert.True(t, IsOutputExists(snap.Items[0].Error))
+	assert.Equal(t, 1, snap.Items[0].Attempts)
+	data, err := os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(data))
+
+	q.Decide(DecisionRetry)
+	snap = waitAttempt(2)
+	assert.Equal(t, 2, snap.Items[0].Attempts, "r 重试应记成第 2 次")
+	assert.True(t, IsOutputExists(snap.Items[0].Error))
+	data, err = os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(data), "未确认覆盖时保留已有文件")
+
+	require.NoError(t, q.PrepareOverwrite(b.ID, snap.Items[0].ID))
+	snap, ok := q.BatchCopy(b.ID)
+	require.True(t, ok)
+	assert.True(t, snap.Items[0].Overwrite)
+	assert.Contains(t, snap.Items[0].PlanArgs, "-y")
+	assert.NotContains(t, snap.Items[0].PlanArgs, "-n")
+
+	q.Decide(DecisionAbort)
 }
 
 func TestQueueCanceledBeforeStart(t *testing.T) {

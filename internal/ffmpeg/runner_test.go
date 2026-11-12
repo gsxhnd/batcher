@@ -2,6 +2,9 @@ package ffmpeg
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,6 +35,32 @@ func TestRunnerEmitsLifecycleEvents(t *testing.T) {
 		assert.Equal(t, 2, e.Index)
 		assert.Equal(t, 5, e.Total)
 	}
+}
+
+func TestRunnerExistingOutputExitZeroIsFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ffmpeg")
+	body := "#!/bin/sh\necho \"File '/tmp/1.mkv' already exists. Exiting.\" >&2\necho \"Error opening output file /tmp/1.mkv.\" >&2\nexit 0\n"
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
+	orig := ffmpegBin
+	ffmpegBin = script
+	t.Cleanup(func() { ffmpegBin = orig })
+
+	var events []Event
+	r := &Runner{OnEvent: func(e Event) { events = append(events, e) }}
+	err := r.Run(context.Background(), Call{Total: 1, Args: []string{"-n", "-i", "a.mkv", "out.mkv"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "已存在")
+	assert.Contains(t, err.Error(), "already exists")
+	require.NotEmpty(t, events)
+	assert.Equal(t, EventCommandFailed, events[len(events)-1].Type)
+	var logged bool
+	for _, e := range events {
+		if e.Type == EventLog && strings.Contains(e.Message, "already exists") {
+			logged = true
+		}
+	}
+	assert.True(t, logged, "stderr 里的已存在提示仍要出现在日志里")
 }
 
 func TestRunnerReportsFailure(t *testing.T) {

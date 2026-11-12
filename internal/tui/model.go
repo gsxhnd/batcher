@@ -2163,7 +2163,11 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 	case task.QueueBatchPaused:
 		m.pausedBatch = e.BatchID
 		m.pauseTimer()
-		m.setStatus("任务已暂停：r 重试 / s 跳过 / x 中止")
+		if e.Err != nil && task.IsOutputExists(e.Err.Error()) {
+			m.setStatus("输出文件已存在，任务已暂停：r 重试 / o 覆盖（需确认两次）/ s 跳过 / x 中止")
+		} else {
+			m.setStatus("任务已暂停：r 重试 / s 跳过 / x 中止")
+		}
 	case task.QueueBatchDone, task.QueueBatchFailed, task.QueueBatchCanceled:
 		// 只有正在执行时才收尾；取消队列里等待中的其他批次只刷新列表。
 		if m.running {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -748,14 +749,70 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 	return true
 }
 
+// PrepareOverwrite 在两次确认之后，允许这个失败的子任务替换已有输出。
+// 只改参数，不开始执行；调用方接着发重试决策。
+func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var b *Batch
+	for _, other := range q.batches {
+		if other.ID == batchID {
+			b = other
+			break
+		}
+	}
+	if b == nil {
+		return fmt.Errorf("未找到任务 %s", batchID)
+	}
+	if b.Status != StatusPaused {
+		return fmt.Errorf("任务不在暂停，无法覆盖")
+	}
+	var it *Item
+	for _, item := range b.Items {
+		if itemID != "" && item.ID != itemID {
+			continue
+		}
+		if item.Status == StatusFailed && IsOutputExists(item.Error) {
+			it = item
+			break
+		}
+	}
+	if it == nil {
+		return fmt.Errorf("当前失败不是输出文件已存在")
+	}
+	it.Overwrite = true
+	it.PlanArgs = overwriteArgs(it.PlanArgs)
+	it.Args = ffmpeg.ExecArgs(it.PlanArgs)
+	return nil
+}
+
+// overwriteArgs 把禁止覆盖的 -n 换成 -y。没有 -n 时在参数开头补上 -y。
+func overwriteArgs(args []string) []string {
+	out := slices.Clone(args)
+	for i, arg := range out {
+		if arg == "-n" {
+			out[i] = "-y"
+			return out
+		}
+	}
+	if slices.Contains(out, "-y") {
+		return out
+	}
+	return append([]string{"-y"}, out...)
+}
+
 // runItem 执行单个子任务；返回 false 仅当 ctx 已取消。
 func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 	now := time.Now()
 	q.mu.Lock()
 	it.Status = StatusRunning
-	it.PartialOutput = true
 	it.Attempts++
+	overwrite := it.Overwrite
+	args := slices.Clone(it.PlanArgs)
 	q.mu.Unlock()
+	if overwrite {
+		args = overwriteArgs(args)
+	}
 	q.emit(QueueEvent{Type: QueueItemStarted, BatchID: b.ID, ItemID: it.ID})
 	_ = b.Save()
 
@@ -770,8 +827,8 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 	call := ffmpeg.Call{
 		Index:   idx,
 		Total:   len(b.Items),
-		Command: command.FormatCommand(it.PlanArgs),
-		Args:    it.PlanArgs, // Runner.Run 会通过 ExecArgs 注入进度选项
+		Command: command.FormatCommand(args),
+		Args:    args, // Runner.Run 会通过 ExecArgs 注入进度选项
 		Input:   it.Input,
 	}
 
@@ -780,6 +837,21 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 		q.failItem(b, it, now, fmt.Sprintf("创建输出目录: %v", err))
 		return true
 	}
+	// 已有输出默认失败并暂停。这里不能删文件：它是上一次的结果，不是这次的半成品。
+	if !overwrite {
+		if _, err := os.Lstat(it.Output); err == nil {
+			q.failItem(b, it, now, fmt.Sprintf("输出文件已存在: %s", it.Output))
+			return true
+		} else if err != nil && !os.IsNotExist(err) {
+			q.failItem(b, it, now, fmt.Sprintf("检查输出文件: %v", err))
+			return true
+		}
+	}
+
+	q.mu.Lock()
+	it.PartialOutput = true
+	q.mu.Unlock()
+	_ = b.Save()
 
 	err := runner.Run(ctx, call)
 	elapsed := time.Since(now)
@@ -797,8 +869,10 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 			_ = b.Save()
 			return false
 		}
-		// 失败：删除半成品，记录错误
-		_ = os.Remove(it.Output)
+		// 输出已存在时保留原文件。其余失败删除这次写出的半成品。
+		if !IsOutputExists(err.Error()) {
+			_ = os.Remove(it.Output)
+		}
 		q.failItem(b, it, now, err.Error())
 		return true
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gsxhnd/batcher/internal/command"
@@ -60,10 +61,21 @@ type Item struct {
 	// Removed 为真时子任务已从队列列表删除：执行会跳过，计数与界面不再统计。
 	Removed bool `json:"removed,omitempty"`
 	// PartialOutput 在子任务启动前置真、成功后置回假：崩溃后据此判断输出是不是半成品。
-	PartialOutput bool     `json:"partialOutput"`
-	DurationMs    int64    `json:"durationMs"`
-	Error         string   `json:"error,omitempty"`
-	StderrTail    []string `json:"stderrTail,omitempty"`
+	PartialOutput bool `json:"partialOutput"`
+	// Overwrite 为真时允许替换已有输出。只在界面两次确认后置位。
+	Overwrite  bool     `json:"overwrite,omitempty"`
+	DurationMs int64    `json:"durationMs"`
+	Error      string   `json:"error,omitempty"`
+	StderrTail []string `json:"stderrTail,omitempty"`
+}
+
+// IsOutputExists 判断错误是不是「输出文件已经存在」。
+// ffmpeg 遇到 -n 且目标已存在时会打印这条错误，但退出码仍是 0。
+func IsOutputExists(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "已存在") || strings.Contains(strings.ToLower(msg), "already exists")
 }
 
 // AddStderr 追加一行日志，只保留末尾 maxStderrTail 行。

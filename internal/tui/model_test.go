@@ -701,6 +701,50 @@ func TestIsISO639Code(t *testing.T) {
 	}
 }
 
+func TestOverwriteNeedsTwoConfirms(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 36
+	testQueue(t, &m)
+	b, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	require.NoError(t, err)
+	b.Status = task.StatusPaused
+	b.Items[0].Status = task.StatusFailed
+	b.Items[0].Error = "输出文件已存在: " + b.Items[0].Output
+	b.Items[0].Attempts = 1
+	m.pausedBatch = b.ID
+	m.running = true
+	m.syncRoster()
+	m.fileCursor = 0
+
+	press(&m, "o")
+	require.NotNil(t, m.modal)
+	assert.Equal(t, "覆盖已有文件", m.modal.title)
+	assert.Contains(t, b.Items[0].PlanArgs, "-n")
+
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	assert.False(t, b.Items[0].Overwrite)
+
+	press(&m, "o")
+	press(&m, "enter")
+	require.NotNil(t, m.modal)
+	assert.Equal(t, "再次确认覆盖", m.modal.title)
+	assert.Contains(t, b.Items[0].PlanArgs, "-n", "第一次确认后还不能覆盖")
+
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	assert.False(t, b.Items[0].Overwrite)
+
+	press(&m, "o")
+	press(&m, "enter")
+	press(&m, "enter")
+	assert.Nil(t, m.modal)
+	assert.True(t, b.Items[0].Overwrite)
+	assert.Contains(t, b.Items[0].PlanArgs, "-y")
+	assert.NotContains(t, b.Items[0].PlanArgs, "-n")
+}
+
 func TestSavedTaskRemainsAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.OpenDir(dir)

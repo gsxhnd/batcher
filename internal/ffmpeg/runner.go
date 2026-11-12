@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -98,7 +99,16 @@ func (r *Runner) Run(ctx context.Context, call Call) error {
 		},
 		func(line string) { r.logLine(call, line) })
 	stdout := newLineWriter(parser.handle)
-	stderr := newLineWriter(func(line string) { r.logLine(call, line) })
+	var (
+		stderrMu    sync.Mutex
+		stderrLines []string
+	)
+	stderr := newLineWriter(func(line string) {
+		stderrMu.Lock()
+		stderrLines = append(stderrLines, line)
+		stderrMu.Unlock()
+		r.logLine(call, line)
+	})
 
 	cmd := newCommand(ctx, ExecArgs(call.Args))
 	cmd.Stdout = stdout
@@ -106,6 +116,16 @@ func (r *Runner) Run(ctx context.Context, call Call) error {
 	err := cmd.Run()
 	stdout.Flush()
 	stderr.Flush()
+	// 输出已存在时，当前 ffmpeg 会把错误打到 stderr，进程退出码却是 0。
+	// 不改写这条结果的话，任务会被记成成功。
+	stderrMu.Lock()
+	lines := slices.Clone(stderrLines)
+	stderrMu.Unlock()
+	if ctx.Err() == nil {
+		if line := existingOutputLine(lines); line != "" {
+			err = fmt.Errorf("输出文件已存在: %s", line)
+		}
+	}
 
 	if err != nil {
 		eventType := EventCommandFailed
@@ -118,4 +138,14 @@ func (r *Runner) Run(ctx context.Context, call Call) error {
 	}
 	r.Emit(Event{Type: EventCommandDone, Index: call.Index, Total: call.Total, Command: call.Command})
 	return nil
+}
+
+// existingOutputLine 返回 stderr 里表示输出文件已存在的那一行。
+func existingOutputLine(lines []string) string {
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), "already exists") {
+			return line
+		}
+	}
+	return ""
 }

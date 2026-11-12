@@ -473,6 +473,8 @@ func (m *model) runTaskKeys(key string) bool {
 		return m.deleteFocused(row)
 	case "r":
 		return m.retryFocused(row)
+	case "o":
+		return m.confirmOverwrite(row)
 	case "s":
 		return m.pauseDecision(row, task.DecisionSkip, "已发送跳过指令")
 	case "x":
@@ -483,6 +485,60 @@ func (m *model) runTaskKeys(key string) bool {
 	default:
 		return false
 	}
+}
+
+// confirmOverwrite 对「输出已存在」的失败做两次确认，然后带覆盖重试。
+func (m *model) confirmOverwrite(row rosterRow) bool {
+	if m.queue == nil || m.pausedBatch == "" || row.batchID != m.pausedBatch {
+		return false
+	}
+	itemID := row.itemID
+	if itemID == "" {
+		itemID = m.pausedFailedItem(row.batchID)
+	}
+	snap, ok := m.batchByID(row.batchID)
+	if !ok {
+		return false
+	}
+	var target *task.Item
+	for _, it := range snap.Items {
+		if it.ID == itemID {
+			target = it
+			break
+		}
+	}
+	if target == nil || !task.IsOutputExists(target.Error) {
+		m.setStatus("当前失败不是输出文件已存在，不能覆盖")
+		return true
+	}
+	batchID, id, path := row.batchID, target.ID, target.Output
+	m.openConfirmModal("覆盖已有文件", fmt.Sprintf("输出文件已存在：\n%s\n\n覆盖会替换该文件。enter 继续，esc 取消", path), func(m *model) tea.Cmd {
+		m.openConfirmModal("再次确认覆盖", fmt.Sprintf("再次确认覆盖：\n%s\n\n已有文件将被替换，无法恢复。enter 覆盖并重试，esc 取消", path), func(m *model) tea.Cmd {
+			if err := m.queue.PrepareOverwrite(batchID, id); err != nil {
+				m.setStatus("× 覆盖失败: " + err.Error())
+				return nil
+			}
+			m.queue.Decide(task.DecisionRetry)
+			m.clearPause("已确认覆盖，正在重试")
+			return nil
+		})
+		return nil
+	})
+	return true
+}
+
+// pausedFailedItem 返回暂停批次里当前失败的子任务。
+func (m model) pausedFailedItem(batchID string) string {
+	snap, ok := m.batchByID(batchID)
+	if !ok {
+		return ""
+	}
+	for _, it := range snap.Items {
+		if it.Status == task.StatusFailed {
+			return it.ID
+		}
+	}
+	return ""
 }
 
 // retryFocused 重试光标所在任务。暂停中重试当前失败的子任务；已结束的主任务把失败项重新排队。
@@ -535,6 +591,31 @@ func (m *model) startFocused(row rosterRow) bool {
 	}
 	m.setStatus("已开始执行")
 	return true
+}
+
+// canOverwriteFocused 表示光标所在的暂停任务是因为输出文件已存在而失败。
+func (m model) canOverwriteFocused() bool {
+	if m.queue == nil || m.pausedBatch == "" || m.fileCursor < 0 || m.fileCursor >= len(m.roster) {
+		return false
+	}
+	row := m.roster[m.fileCursor]
+	if row.batchID != m.pausedBatch {
+		return false
+	}
+	id := row.itemID
+	if id == "" {
+		id = m.pausedFailedItem(row.batchID)
+	}
+	snap, ok := m.batchByID(row.batchID)
+	if !ok {
+		return false
+	}
+	for _, it := range snap.Items {
+		if it.ID == id && task.IsOutputExists(it.Error) {
+			return true
+		}
+	}
+	return false
 }
 
 // canStartFocused 表示光标在一条等待执行的主任务上，底栏把 x 显示为开始。

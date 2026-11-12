@@ -1256,6 +1256,16 @@ func (m model) footer() string {
 		hints = []string{"↑/↓ 滚动输出", "esc 返回", "y 复制"}
 	case m.running || m.queueViewActive():
 		hints = []string{"↑/↓ 切换", "r 重试", "d 删除", "c 取消", "s 跳过", "x 中止", "y 复制", "f 跟随"}
+		if m.canOverwriteFocused() {
+			withOverwrite := make([]string, 0, len(hints)+1)
+			for _, h := range hints {
+				withOverwrite = append(withOverwrite, h)
+				if h == "r 重试" {
+					withOverwrite = append(withOverwrite, "o 覆盖")
+				}
+			}
+			hints = withOverwrite
+		}
 		if m.canStartFocused() {
 			for i, h := range hints {
 				if h == "x 中止" {
