@@ -11,6 +11,7 @@ import (
 	"github.com/gsxhnd/batcher/internal/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestTasksRoundTripAndPresets(t *testing.T) {
@@ -123,6 +124,50 @@ func TestOpenSeedsWhenMarkerExistsButListMissing(t *testing.T) {
 	ps, err := db.LoadPresets()
 	require.NoError(t, err)
 	assert.Len(t, ps, len(presets.Builtins()))
+}
+
+func TestListTasksSkipsBadRecords(t *testing.T) {
+	db, err := OpenDir(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	good := &task.Batch{
+		Version:   1,
+		ID:        "good",
+		Status:    task.StatusPending,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, db.SaveTask(good))
+	require.NoError(t, db.bolt.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketTasks)
+		if err := bucket.Put([]byte("bad-json"), []byte("{")); err != nil {
+			return err
+		}
+		return bucket.Put([]byte("future"), []byte(`{"version":99,"id":"future"}`))
+	}))
+
+	list, err := db.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "good", list[0].ID)
+	assert.Len(t, db.Warnings(), 2)
+}
+
+func TestOpenSkipsCorruptLegacyPresets(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "presets")
+	require.NoError(t, os.MkdirAll(legacy, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(legacy, presets.PresetFile), []byte("{"), 0o644))
+	t.Setenv("BATCHER_DATA_DIR", root)
+	t.Setenv("BATCHER_PRESETS_DIR", legacy)
+
+	db, err := Open()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ps, err := db.LoadPresets()
+	require.NoError(t, err)
+	assert.Len(t, ps, len(presets.Builtins()))
+	assert.NotEmpty(t, db.Warnings())
 }
 
 func TestDirUsesExecutableFolder(t *testing.T) {

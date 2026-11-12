@@ -314,6 +314,25 @@ func TestPlanningCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestRejectsFontsOutsideMatroska(t *testing.T) {
+	fx := testutil.NewFixture(t)
+	opt := fixtureOption(fx)
+	opt.OutputFormat = "mp4"
+	_, err := BuildPlan(context.Background(), opt, buildSelection(false, false, true))
+	assert.ErrorContains(t, err, "mkv")
+}
+
+func TestRejectsDuplicateFontNames(t *testing.T) {
+	fx := testutil.NewFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(fx.Dir1, "a.ttf"), []byte("x"), 0o644))
+	nested := filepath.Join(fx.Dir1, "more")
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "A.TTF"), []byte("y"), 0o644))
+	opt := fixtureOption(fx)
+	_, err := BuildPlan(context.Background(), opt, buildSelection(false, false, true))
+	assert.ErrorContains(t, err, "字体文件名重复")
+}
+
 func TestRejectsInvalidSuffix(t *testing.T) {
 	fx := testutil.NewFixture(t)
 	for _, suffix := range []string{"../mkv", `..\\mkv`, ".."} {

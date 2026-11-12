@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
@@ -34,13 +35,13 @@ func badgeVersion() string {
 func Run() error {
 	db, err := store.Open()
 	if err != nil {
-		return err
+		return fmt.Errorf("打开数据库: %w", err)
 	}
 	defer db.Close()
 	task.BindStore(db)
 	presets.Bind(db)
 	if err := task.RecoverStored(); err != nil {
-		return err
+		return fmt.Errorf("恢复中断的任务: %w", err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -49,7 +50,10 @@ func Run() error {
 	m.db = db
 	m.ctx = ctx
 	m.initQueue(make(chan tea.Msg, 256))
-	m.syncRoster()
+	m.syncRosterFromStore()
+	if warns := db.Warnings(); len(warns) > 0 {
+		m.setStatus("× " + strings.Join(warns, "；"))
+	}
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	final, err := p.Run()
 	canceled := ctx.Err() != nil

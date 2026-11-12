@@ -5,19 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/progress"
-	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
-	"github.com/gsxhnd/batcher/internal/media"
 	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/gsxhnd/batcher/internal/store"
 	"github.com/gsxhnd/batcher/internal/task"
@@ -35,35 +32,6 @@ const (
 
 	panelCount
 )
-
-// feature 描述组合选择面板中的一个可勾选操作。
-type feature struct {
-	label    string
-	desc     string
-	selected func(command.Selection) bool
-	toggle   func(*command.Selection)
-}
-
-var features = []feature{
-	{
-		label:    "视频转码",
-		desc:     "按“自定义参数 + 输出后缀”转码；参数在本面板选择/保存常用预设",
-		selected: func(s command.Selection) bool { return s.Convert },
-		toggle:   func(s *command.Selection) { s.Convert = !s.Convert },
-	},
-	{
-		label:    "添加字幕",
-		desc:     "把源目录下匹配视频名的字幕文件封装进视频，支持多条字幕",
-		selected: func(s command.Selection) bool { return s.AddSubtitle },
-		toggle:   func(s *command.Selection) { s.AddSubtitle = !s.AddSubtitle },
-	},
-	{
-		label:    "添加字体",
-		desc:     "把字体文件夹中的字体文件内嵌到视频（mkv 附带流）",
-		selected: func(s command.Selection) bool { return s.AddFonts },
-		toggle:   func(s *command.Selection) { s.AddFonts = !s.AddFonts },
-	},
-}
 
 // 文件任务的执行状态（左侧列表标记用）。
 const (
@@ -109,60 +77,25 @@ type model struct {
 	width, height int
 	ctx           context.Context // 程序生命周期；退出时取消所有后台工作
 
-	focus panel // 当前聚焦的面板（1-5）
+	focus panel // 当前聚焦的面板
 
-	// 操作组合勾选
-	ops        command.Selection
-	featCursor int
-	featErr    string
-
-	// 转码参数预设：内置（只读）在前，用户自定义在后，最后是“手动输入”选项
-	builtins      []presets.Builtin
-	presets       []presets.Preset
-	presetCursor  int
-	manualAdvance string
-	statusMsg     string        // 界面上的临时提示；以 × 开头的错误显示在右上角
-	sel           textSelection // 鼠标拖选的范围，松手后写入剪贴板
-
-	// 字幕列表
-	subs      []command.SubtitleOption
-	subCursor int
-
-	// 主参数表单（进入编辑态后全局快捷键失效）
-	fields      []field
-	fieldValues map[string]string // 保留暂时隐藏字段以及显式清空的值
-	focusNo     int               // 表单内的字段下标
-	editing     bool              // 是否处于表单输入状态
-	dirSeq      int               // 文件夹文件列表的序号，用来丢掉过期结果
-	dirPending  string            // 正在读取的列表键
-	dirKey      string            // 当前 dirFiles 对应的列表键
-	dirLoading  bool              // 正在读取源视频或字体文件夹
-	dirFiles    []string          // 当前参数要处理的文件
-	dirErr      error             // 最近一次读取失败的原因
+	// 转码参数预设：内置（只读）在前，用户自定义在后。
+	builtins     []presets.Builtin
+	presets      []presets.Preset
+	presetCursor int
+	statusMsg    string        // 界面上的临时提示；以 × 开头的错误显示在右上角
+	sel          textSelection // 鼠标拖选的范围，松手后写入剪贴板
 
 	// 弹窗（创建任务、预设管理、编辑与确认），非空时按键全部交给弹窗
-	modal         *modal
-	db            *store.DB
-	savedList     []*task.Batch
-	forget        map[string]struct{} // 要从列表和数据库删掉的主任务
-	managePresets bool
-	creating      bool
-	createSeq     int
-	createSel     command.Selection
-
-	// 实时命令预览：配置变化后防抖生成，planSeq 丢弃过期结果
-	planSeq      int
-	planLoading  bool
-	previewDone  bool
-	planErr      error
-	planGenerate bool // 防抖 tick 到期后是否需要重新生成
-	planCancel   context.CancelFunc
-	plan         *command.BatchPlan
-
-	// 命令预览/执行日志共用的右侧视口
-	vp             viewport.Model
-	previewSummary string // Plan 汇总文本（全部命令列表）
-	spin           spinner.Model
+	modal        *modal
+	db           *store.DB
+	savedList    []*task.Batch
+	liveBatches  map[string]*task.Batch // syncRoster 刷新的队列快照，界面读取不再逐条加锁拷贝
+	forget       map[string]struct{}    // 要从列表和数据库删掉的主任务
+	creating     bool
+	createSeq    int
+	createCancel context.CancelFunc
+	createSel    command.Selection
 
 	// 任务面板：左侧文件列表，右侧命令/日志
 	files      []fileItem
@@ -198,12 +131,10 @@ type model struct {
 	logRefreshScheduled bool
 
 	// 任务队列
-	activeBatch    string             // 正在执行或暂停中的批次 ID
-	pausedBatch    string             // 非空时队列处于暂停等待决策（批次 ID）
-	pausedAt       time.Time          // 非零时处于暂停等待决策，计时冻结到该时刻
-	pendingPlan    *command.BatchPlan // 运行期间重新生成的计划，批次结束后应用
-	pendingPlanErr error
-	queue          *task.Queue
+	activeBatch string    // 正在执行或暂停中的批次 ID
+	pausedBatch string    // 非空时队列处于暂停等待决策（批次 ID）
+	pausedAt    time.Time // 非零时处于暂停等待决策，计时冻结到该时刻
+	queue       *task.Queue
 
 	// 队列视图：主任务 + 可展开的子任务 + 子任务下可展开的每一次。
 	roster           []rosterRow
@@ -220,12 +151,8 @@ func newModel() model {
 		ctx:   context.Background(),
 		focus: panelRun,
 		bar: progress.New(
-			progress.WithColors(lipgloss.Color("81"), lipgloss.Color("114")),
+			progress.WithColors(lipgloss.Color(cProgress), lipgloss.Color(cOk)),
 			progress.WithScaled(true),
-		),
-		spin: spinner.New(
-			spinner.WithSpinner(spinner.Dot),
-			spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("81"))),
 		),
 		builtins: presets.Builtins(),
 		runIdx:   -1,
@@ -235,9 +162,8 @@ func newModel() model {
 		m.setStatus("× 读取自定义预设失败: " + err.Error())
 	}
 	m.presets = user
-	m.bar.EmptyColor = lipgloss.Color("238")
-	m.bar.PercentageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
-	m.rebuildFields()
+	m.bar.EmptyColor = lipgloss.Color(cKeyBg)
+	m.bar.PercentageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(cText)).Bold(true)
 	return m
 }
 
@@ -271,56 +197,17 @@ func presetHintText() string {
 	return filepath.Join(dir, store.FileName)
 }
 
-// panelEnabled 判断面板当前是否可用：未勾选对应操作的面板变灰不可进入。
-// 执行期间不锁定面板：允许随时修改配置并入队后续任务。
-func (m model) panelEnabled(p panel) bool {
-	switch p {
-	case panelPresets:
-		return m.ops.Convert
-	case panelSubs:
-		return m.ops.AddSubtitle
-	default:
-		return true
-	}
-}
-
-// setFocus 切换聚焦面板；目标不可用时给出提示并保持原焦点。
+// setFocus 切换聚焦面板。离开任务面板时停止自动跟随。
 func (m *model) setFocus(p panel) {
-	if p < 0 || p >= panelCount {
+	if p < 0 || p >= panelCount || m.focus == p {
 		return
-	}
-	if !m.panelEnabled(p) {
-		switch p {
-		case panelPresets:
-			m.setStatus("未勾选「视频转码」，转码预设面板不可用")
-		case panelSubs:
-			m.setStatus("未勾选「添加字幕」，字幕面板不可用")
-		case panelRun:
-			m.setStatus("执行中请停留在任务面板")
-		}
-		return
-	}
-	if m.editing {
-		m.blurForm()
 	}
 	if m.focus == panelRun && p != panelRun {
-		// 离开任务面板时取消自动跟随，并退出输出查看。
 		m.fileFollow = false
 		m.outputFocus = false
 	}
 	m.focus = p
 	m.refreshRunHeights()
-}
-
-// nextPanel 按 tab 方向循环切换到下一个可用面板。
-func (m *model) nextPanel(delta int) {
-	for i := 1; i <= int(panelCount); i++ {
-		p := (int(m.focus) + delta*i%int(panelCount) + int(panelCount)) % int(panelCount)
-		if m.panelEnabled(panel(p)) {
-			m.setFocus(panel(p))
-			return
-		}
-	}
 }
 
 // ---------- tea.Model ----------
@@ -335,40 +222,11 @@ func (m model) Init() tea.Cmd {
 
 // ---------- 消息 ----------
 
-type planMsg struct {
-	seq  int
-	plan *command.BatchPlan
-	err  error
-}
-
 // createPlanMsg 是新建任务弹窗里一次目录扫描的结果。
 type createPlanMsg struct {
 	seq  int
 	plan *command.BatchPlan
 	err  error
-}
-
-// planDebounceMsg 是配置变化后的防抖时钟：到期且序号仍是最新时才重新生成命令。
-type planDebounceMsg struct{ seq int }
-
-// dirDebounceMsg 是文件夹路径变化后的防抖时钟。
-type dirDebounceMsg struct{ seq int }
-
-// dirListMsg 是一次文件夹扫描的结果。
-type dirListMsg struct {
-	seq   int
-	key   string
-	files []string
-	err   error
-}
-
-// dirQuery 描述当前要列出文件的参数。
-type dirQuery struct {
-	key    string
-	kind   string
-	path   string
-	format string
-	output string
 }
 
 type eventMsg struct {
@@ -393,102 +251,6 @@ type queueEventMsg struct{ evt task.QueueEvent }
 // maxLogLines 限制日志缓冲行数，避免长任务占用过多内存。
 const maxLogLines = 1000
 
-// planDebounceDelay 配置变化后等待多少毫秒再重新生成命令列表。
-const planDebounceDelay = 300 * time.Millisecond
-
-func planCmd(ctx context.Context, opt *command.VideoBatchOption, sel command.Selection, seq int) tea.Cmd {
-	return func() tea.Msg {
-		plan, err := command.BuildPlan(ctx, opt, sel)
-		return planMsg{seq: seq, plan: plan, err: err}
-	}
-}
-
-// scheduleDirList 在当前参数是源视频或字体文件夹时读取其中要处理的文件。
-// 路径没变且已经有结果时不重复读取。离开这类参数时清掉列表。
-func (m *model) scheduleDirList(delay time.Duration) tea.Cmd {
-	q, ok := m.dirQuery()
-	if !ok {
-		m.dirSeq++
-		m.dirPending = ""
-		m.dirKey = ""
-		m.dirLoading = false
-		m.dirFiles = nil
-		m.dirErr = nil
-		return nil
-	}
-	if q.key == m.dirKey && !m.dirLoading {
-		return nil
-	}
-	if q.key == m.dirPending && m.dirLoading {
-		return nil
-	}
-	if q.key != m.dirKey {
-		m.dirFiles = nil
-		m.dirErr = nil
-	}
-	m.dirPending = q.key
-	m.dirLoading = true
-	m.dirSeq++
-	seq := m.dirSeq
-	if delay <= 0 {
-		return dirListCmd(m.ctx, seq, q)
-	}
-	return tea.Tick(delay, func(time.Time) tea.Msg { return dirDebounceMsg{seq: seq} })
-}
-
-func dirListCmd(ctx context.Context, seq int, q dirQuery) tea.Cmd {
-	return func() tea.Msg {
-		var files []string
-		var err error
-		switch q.kind {
-		case "input_path":
-			files, err = media.Videos(ctx, q.path, q.output, q.format)
-		case "fonts_path":
-			files, err = media.Fonts(ctx, q.path)
-		}
-		if err == nil {
-			slices.Sort(files)
-		}
-		return dirListMsg{seq: seq, key: q.key, files: files, err: err}
-	}
-}
-
-// dirQuery 返回当前选中的文件夹参数。其他参数不列文件。
-func (m model) dirQuery() (dirQuery, bool) {
-	if m.focus != panelForm || len(m.fields) == 0 {
-		return dirQuery{}, false
-	}
-	f := m.fields[clamp(m.focusNo, 0, len(m.fields)-1)]
-	path := f.resolved()
-	if path == "" {
-		return dirQuery{}, false
-	}
-	switch f.def.key {
-	case "input_path":
-		format := m.fieldResolved("input_format")
-		output := m.fieldResolved("output_path")
-		q := dirQuery{kind: "input_path", path: path, format: format, output: output}
-		q.key = strings.Join([]string{q.kind, path, format, output}, "\n")
-		return q, true
-	case "fonts_path":
-		q := dirQuery{kind: "fonts_path", path: path}
-		q.key = q.kind + "\n" + path
-		return q, true
-	default:
-		return dirQuery{}, false
-	}
-}
-
-// fieldResolved 返回指定参数的当前值，空白时用灰色占位里的默认值。
-func (m model) fieldResolved(key string) string {
-	for i := range m.fields {
-		if m.fields[i].def.key == key {
-			return m.fields[i].resolved()
-		}
-	}
-	return ""
-}
-
 func listenEvents(ctx context.Context, ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -510,11 +272,13 @@ func tickCmd(runID int) tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case createPlanMsg:
-		if msg.seq != m.createSeq || m.modal == nil || m.modal.kind != modalTask {
-			m.creating = false
+		if msg.seq != m.createSeq {
 			return m, nil
 		}
 		m.creating = false
+		if m.modal == nil || m.modal.kind != modalTask {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.modal.err = msg.err.Error()
 			return m, nil
@@ -523,11 +287,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.modal.err = "未找到匹配的视频文件"
 			return m, nil
 		}
-		m.ops = m.createSel
-		m.managePresets = false
 		plan := msg.plan
+		sel := m.createSel
 		m.openConfirmModal("确认加入队列", enqueueInputSummary(plan), func(m *model) tea.Cmd {
-			return m.enqueue(plan)
+			return m.enqueue(plan, sel)
 		})
 		return m, nil
 
@@ -536,16 +299,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.resizePanes()
 		m.resizeModal()
-		// 尺寸变化后按新宽度重新折行刷新两侧视口。
-		m.syncPreview()
 		m.syncLogPane()
 		return m, nil
-
-	case planMsg:
-		if msg.seq != m.planSeq {
-			return m, nil // 过期的 Plan 结果直接丢弃
-		}
-		return m, m.applyPlan(msg.err, msg.plan)
 
 	case queueEventMsg:
 		// 无条件重挂监听：队列事件流不依赖执行状态（此前空闲或批次收尾时监听断链，
@@ -555,33 +310,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.handleQueueEvent(msg.evt)
 		}
 		return m, tea.Batch(m.handleQueueEvent(msg.evt), listenEvents(m.ctx, m.evCh))
-
-	case planDebounceMsg:
-		if msg.seq == m.planSeq && m.planGenerate {
-			return m, m.runPlan()
-		}
-		return m, nil
-
-	case dirDebounceMsg:
-		if msg.seq != m.dirSeq {
-			return m, nil
-		}
-		q, ok := m.dirQuery()
-		if !ok {
-			m.dirLoading = false
-			return m, nil
-		}
-		return m, dirListCmd(m.ctx, msg.seq, q)
-
-	case dirListMsg:
-		if msg.seq != m.dirSeq {
-			return m, nil
-		}
-		m.dirLoading = false
-		m.dirKey = msg.key
-		m.dirFiles = msg.files
-		m.dirErr = msg.err
-		return m, nil
 
 	case eventMsg:
 		if !m.running || msg.runID != m.runID {
@@ -611,14 +339,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case spinner.TickMsg:
-		if m.planLoading {
-			var cmd tea.Cmd
-			m.spin, cmd = m.spin.Update(msg)
-			return m, cmd
-		}
-		return m, nil
-
 	case tea.MouseClickMsg:
 		return m, m.handleMouseClick(msg)
 	case tea.MouseMotionMsg:
@@ -635,16 +355,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyPressMsg); ok {
 		m.clearSelection()
 		if key.String() == "ctrl+c" {
-			m.quitCleanup()
+			// 真正的停止放在 Run 退出之后：这里同步 Stop 会在事件通道塞满时把界面卡死。
 			return m, tea.Quit
 		}
 		return m, m.handleKey(key)
 	}
 	if m.modal != nil {
 		return m, m.updateModal(msg)
-	}
-	if m.editing {
-		return m, m.updateFormEdit(msg)
 	}
 	return m, nil
 }
@@ -655,10 +372,6 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		return m.updateModal(key)
 	}
 	s := key.String()
-
-	if m.editing {
-		return m.updateFormEdit(key)
-	}
 
 	if m.outputFocus {
 		switch s {
@@ -678,8 +391,10 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 				return nil
 			}
 			if m.pausedBatch != "" {
-				m.queue.Decide(task.DecisionAbort)
-				m.setStatus("已发送中止指令")
+				if m.queue != nil {
+					m.queue.Decide(task.DecisionAbort)
+				}
+				m.clearPause("已发送中止指令")
 				return nil
 			}
 			if m.queue != nil {
@@ -716,8 +431,6 @@ func (m *model) handleMouse(msg tea.MouseWheelMsg) tea.Cmd {
 	case m.running || m.queueViewActive():
 		m.logVp, cmd = m.logVp.Update(msg)
 		m.logFollow = m.logVp.AtBottom()
-	case m.previewDone && m.planErr == nil:
-		m.vp, cmd = m.vp.Update(msg)
 	}
 	return cmd
 }
@@ -738,9 +451,6 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 			m.refreshRunHeights()
 		}
 		return nil
-	case ffmpeg.EventBatchStart:
-		m.total = e.Total
-		m.appendLog(fmt.Sprintf("开始执行批处理，共 %d 个任务", e.Total), logLineInfoStyle)
 	case ffmpeg.EventCommandStart:
 		m.current = e.Command
 		m.runIdx = e.Index
@@ -794,8 +504,8 @@ func (m *model) handleEvent(e ffmpeg.Event) tea.Cmd {
 
 // recordLine 把一行输出同时写入全局日志与第 idx 个文件的日志；state 为空时不修改文件状态。
 func (m *model) recordLine(idx int, line, state string, s lipgloss.Style) {
-	m.appendLog(line, s)
 	if idx < 0 || idx >= len(m.files) {
+		m.appendLog(line, s)
 		return
 	}
 	it := &m.files[idx]
@@ -806,7 +516,8 @@ func (m *model) recordLine(idx int, line, state string, s lipgloss.Style) {
 		it.state = state
 	}
 	rendered := s.Render(line)
-	it.logs = appendFileLog(it.logs, line, s)
+	it.logs = appendRendered(it.logs, rendered)
+	m.logs = appendRendered(m.logs, rendered)
 	if n := len(it.attempts); n > 0 {
 		a := &it.attempts[n-1]
 		if state != "" {
@@ -835,33 +546,15 @@ func (m *model) adjustCount(state string, delta int) {
 
 // appendFileLog 向单个文件的日志缓冲追加一行（带样式），超过上限时丢弃旧行。
 func appendFileLog(logs []string, line string, s lipgloss.Style) []string {
-	logs = append(logs, s.Render(line))
+	return appendRendered(logs, s.Render(line))
+}
+
+func appendRendered(logs []string, rendered string) []string {
+	logs = append(logs, rendered)
 	if len(logs) > maxLogLines {
 		logs = logs[len(logs)-maxLogLines:]
 	}
 	return logs
-}
-
-// summaryText 生成任务面板“全部”视图的汇总文本：概要、字幕列表与全部命令。
-func (m model) summaryText(cmds [][]string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "已选择：%s，共生成 %d 条命令（%d 个视频）\n", displaySel(m.ops), len(cmds), len(cmds))
-	if m.ops.AddSubtitle {
-		suffixes := make([]string, 0, len(m.subs))
-		for _, s := range m.subs {
-			tok := "." + s.Suffix
-			if s.Default {
-				tok = "(默认)" + tok
-			}
-			suffixes = append(suffixes, tok)
-		}
-		fmt.Fprintf(&b, "字幕（%d 条）：%s\n", len(m.subs), strings.Join(suffixes, " / "))
-	}
-	b.WriteString("尚未加入队列。在任务面板确认参数后按 x 入队；↑/↓ 切换文件查看对应命令。\n\n")
-	for i, c := range cmds {
-		fmt.Fprintf(&b, "[%d/%d] %s\n\n", i+1, len(cmds), command.FormatCommand(c))
-	}
-	return b.String()
 }
 
 // buildFileItems 直接使用计划中的结构化任务，不依赖 ffmpeg 参数的位置。
@@ -876,57 +569,6 @@ func buildFileItems(jobs []command.Job) []fileItem {
 func (m *model) appendLog(line string, s lipgloss.Style) {
 	m.logs = appendFileLog(m.logs, line, s)
 }
-
-// ---------- 实时命令预览（防抖） ----------
-
-// schedulePlan 记录需要重新生成命令，并在 delay 后触发一次生成；
-// 配置密集变化时只有最后一次生效，避免反复扫描目录。
-func (m *model) schedulePlan(delay time.Duration) tea.Cmd {
-	// 运行期间也允许重新生成：结果暂存，批次结束后应用。
-	// 重新生成即回到预览态：清除队列视图。
-	m.roster = nil
-	m.rosterPinBatch, m.rosterPinItem, m.rosterPinAttempt = "", "", 0
-	m.filesBatch = ""
-	if m.planCancel != nil {
-		m.planCancel()
-		m.planCancel = nil
-	}
-	m.plan = nil
-	m.planGenerate = true
-	m.planLoading = true
-	m.planSeq++
-	seq := m.planSeq
-	return tea.Tick(delay, func(time.Time) tea.Msg { return planDebounceMsg{seq: seq} })
-}
-
-// runPlan 根据当前配置生成命令列表。配置不完整/非法时把原因展示在任务面板，不报询问弹窗。
-func (m *model) runPlan() tea.Cmd {
-	m.planGenerate = false
-	if !m.ops.Any() {
-		m.planErr = fmt.Errorf("请在面板 1 勾选至少一项操作")
-		m.planLoading = false
-		return nil
-	}
-	opt, err := m.buildOption()
-	if err != nil {
-		m.planErr = err
-		m.planLoading = false
-		return nil
-	}
-	if m.ops.AddSubtitle && len(m.subs) == 0 {
-		m.planErr = fmt.Errorf("已勾选添加字幕，但字幕列表为空（在面板 3 按 n 新增）")
-		m.planLoading = false
-		return nil
-	}
-	ctx, cancel := context.WithCancel(m.ctx)
-	m.planCancel = cancel
-	if !m.previewDone {
-		m.previewSummary = ""
-	}
-	return tea.Batch(planCmd(ctx, opt, m.ops, m.planSeq), m.spin.Tick)
-}
-
-// ---------- 左右分栏尺寸与视口同步 ----------
 
 // bodyH 返回主体区可用行数（去掉顶栏 1、底栏 2）。
 func (m model) bodyH() int {
@@ -947,34 +589,13 @@ func (m *model) resizePanes() {
 		m.leftW, m.rightW = m.width, m.width
 	}
 
-	m.vp.SetWidth(max(m.rightW-2, 10))
 	m.logVp.SetWidth(max(m.rightW-2, 10))
-	m.vp.SetHeight(max(m.bodyH()-2, 3))
 	m.logVp.SetHeight(max(m.bodyH()-2, 3))
 	m.bar.SetWidth(max(m.rightW-4, 10))
 	// 视口实际高度按视图构成重算（预览头部/置顶命令/进度条占用的行数）。
 	m.refreshRunHeights()
 }
 
-// previewHeadH 预览态命令区中位于视口之前的行数，runBody 的上方信息须与此保持一致。
-func (m model) previewHeadH() int {
-	if !m.previewDone || m.planErr != nil {
-		return 1 // 加载提示或失败说明各占 1-2 行，视口未显示
-	}
-	if m.total == 0 {
-		return 0 // 首次预览直接渲染视口
-	}
-	h := 3 // 上次执行结果行 + 提示行 + "\n\n" 空行
-	if m.runErr != nil {
-		h++
-	}
-	if m.statusMsg != "" && !isErrorNotice(m.statusMsg) {
-		h += 2 // statusSuffix 追加在视口之后的提示块
-	}
-	return h
-}
-
-// refreshRunHeights 按当前视图构成设置预览/日志视口高度。
 // 主任务把剩余高度留给子任务状态，子任务把剩余高度留给输出。
 func (m *model) refreshRunHeights() {
 	inner := max(m.bodyH()-2, 2)
@@ -983,9 +604,7 @@ func (m *model) refreshRunHeights() {
 	}
 	if m.running || m.queueViewActive() {
 		m.logVp.SetHeight(max(inner-m.taskChromeH(), 2))
-		return
 	}
-	m.vp.SetHeight(max(inner-m.previewHeadH(), 1))
 }
 
 // narrowFilePaneH 是窄终端任务列表的实际行数，须给命令与日志保留空间。
@@ -998,23 +617,6 @@ func (m model) narrowFilePaneH() int {
 		return 0
 	}
 	return min(rows+1, max(1, min(6, m.bodyH()/4)))
-}
-
-// panelHeights 返回左侧五个面板的内容行数分配（面板边框每格占 2 行）。
-// 未聚焦的面板折叠为 2 行（光标行随窗口滚动保持可见），聚焦面板占据剩余空间。
-func (m model) panelHeights() [panelCount]int {
-	content := max(m.bodyH()-int(panelCount)*2, 0)
-	hs := [panelCount]int{}
-	h := content
-	for i := range hs {
-		if panel(i) == m.focus {
-			continue // 聚焦面板取剩余全部空间，最后统一赋值
-		}
-		hs[i] = min(max(h-1, 0), 2)
-		h -= hs[i]
-	}
-	hs[m.focus] = h
-	return hs
 }
 
 // moveFilePane 移动任务面板左侧列表光标并刷新右侧内容；手动切换会停止自动跟随。
@@ -1039,8 +641,6 @@ func (m *model) moveFilePane(delta int) {
 	if m.width > 0 && (m.running || len(m.roster) > 0) {
 		m.refreshRunHeights()
 	}
-	m.syncPreview()
-	m.vp.GotoTop()
 	m.syncLogPane()
 }
 
@@ -1159,42 +759,6 @@ func (m model) queueViewActive() bool {
 	return len(m.roster) > 0
 }
 
-// previewContent 返回右侧预览视口的原始文本：选中“全部”时为汇总列表，否则为该文件命令。
-func (m model) previewContent() string {
-	if idx := m.fileCursor - 1; idx >= 0 && idx < len(m.files) {
-		it := m.files[idx]
-		var b strings.Builder
-		fmt.Fprintf(&b, "输出: %s\n\n", it.output)
-		b.WriteString(it.cmd)
-		if len(it.logs) > 0 {
-			b.WriteString("\n\n执行日志\n")
-			b.WriteString(strings.Join(it.logs, "\n"))
-		}
-		return b.String()
-	}
-	for _, item := range m.files {
-		if len(item.logs) > 0 {
-			return m.previewSummary + "\n执行日志\n" + strings.Join(m.logs, "\n")
-		}
-	}
-	return m.previewSummary
-}
-
-// syncPreview 按左侧选中项刷新右侧预览内容（长命令按内容区宽度折行）。
-// 队列视图激活时不动预览视口：右侧由日志/批次摘要接管。
-func (m *model) syncPreview() {
-	if len(m.roster) > 0 || !m.previewDone || m.planErr != nil {
-		return
-	}
-	if m.running {
-		// 执行时段的右侧视口由日志接管。
-		return
-	}
-	m.vp.SetContent(wrapText(m.previewContent(), m.rightW-2))
-}
-
-// syncLogPane 按左侧选中项刷新右侧日志视图。logFollow 为真时贴底跟随最新输出；
-// 用户向上滚动查看历史后暂停跟随，回到底部再自动恢复。
 // 队列视图激活且未运行时，批次/子任务行显示该子任务的错误尾部；批次行为摘要。
 func (m *model) syncLogPane() {
 	if len(m.roster) > 0 {
@@ -1248,8 +812,7 @@ func (m model) subtaskStatusLine() string {
 	if n := m.focusedAttemptNumber(); n > 0 {
 		text += fmt.Sprintf(" · 第 %d 次", n)
 	}
-	if m.queue != nil && len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
-		row := m.roster[m.fileCursor]
+	if row, ok := m.focusedRosterRow(); ok && m.queue != nil {
 		if snap, ok := m.batchByID(row.batchID); ok {
 			for _, it := range snap.Items {
 				if it.ID != row.itemID || it.Status != task.StatusFailed || it.Error == "" {
@@ -1269,8 +832,8 @@ func (m model) subtaskStatusLine() string {
 
 // focusedItemStateText 返回当前子任务的中文状态。
 func (m model) focusedItemStateText() string {
-	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) && m.roster[m.fileCursor].itemID != "" {
-		return fileStateText(m.roster[m.fileCursor].state)
+	if row, ok := m.focusedRosterRow(); ok && row.itemID != "" {
+		return fileStateText(row.state)
 	}
 	if m.runIdx >= 0 && m.runIdx < len(m.files) {
 		return fileStateText(m.files[m.runIdx].state)
@@ -1280,8 +843,7 @@ func (m model) focusedItemStateText() string {
 
 // focusedFileIndex 返回当前子任务在 files 中的下标。主任务行没有对应文件。
 func (m model) focusedFileIndex() int {
-	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
-		row := m.roster[m.fileCursor]
+	if row, ok := m.focusedRosterRow(); ok {
 		if row.itemID != "" && row.batchID == m.filesBatch {
 			if idx := itemIndexOf(row.itemID); idx >= 0 && idx < len(m.files) {
 				return idx
@@ -1297,18 +859,18 @@ func (m model) focusedFileIndex() int {
 
 // focusedAttemptNumber 返回光标这一次的序号；停在子任务上时返回最近一次。
 func (m model) focusedAttemptNumber() int {
-	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) && m.roster[m.fileCursor].attempt > 0 {
-		return m.roster[m.fileCursor].attempt
+	if row, ok := m.focusedRosterRow(); ok && row.attempt > 0 {
+		return row.attempt
 	}
 	if idx := m.focusedFileIndex(); idx >= 0 {
 		if n := m.attemptNumber(idx); n > 0 {
 			return n
 		}
 	}
-	if m.queue == nil || len(m.roster) == 0 || m.fileCursor < 0 || m.fileCursor >= len(m.roster) {
+	row, ok := m.focusedRosterRow()
+	if m.queue == nil || !ok {
 		return 0
 	}
-	row := m.roster[m.fileCursor]
 	snap, ok := m.batchByID(row.batchID)
 	if !ok {
 		return 0
@@ -1377,6 +939,13 @@ func (m model) oneAttemptLines(row rosterRow) []string {
 							style = logLineFailedStyle
 						}
 						out[i] = style.Render(line)
+					}
+					return out
+				}
+				if n == it.Attempts && len(it.StderrTail) > 0 {
+					out := make([]string, len(it.StderrTail))
+					for i, line := range it.StderrTail {
+						out[i] = logLineDefaultStyle.Render(line)
 					}
 					return out
 				}
@@ -1489,48 +1058,10 @@ func itemStateText(s task.Status) string {
 	}
 }
 
-// historyLines 返回历史/等待中批次的只读内容（不保留完整日志，只展示状态与错误尾部）。
-func (m *model) historyLines(row rosterRow) []string {
-	b, ok := m.batchByID(row.batchID)
-	if !ok {
-		return nil
-	}
-	var lines []string
-	if row.itemID == "" {
-		c := b.Counts()
-		lines = append(lines,
-			descStyle.Render(fmt.Sprintf("状态：%s（完成 %d / 跳过 %d / 失败 %d / 取消 %d，共 %d）",
-				batchStateText(b.Status), c.Done, c.Skipped, c.Failed, c.Canceled, c.Total)),
-			descStyle.Render("输入目录: "+b.InputDir),
-			descStyle.Render("输出目录: "+b.OutputDir),
-		)
-		return lines
-	}
-	for _, it := range b.Items {
-		if it.ID == row.itemID {
-			lines = append(lines, descStyle.Render("输出: "+it.Output))
-			if it.Error != "" {
-				lines = append(lines, logLineFailedStyle.Render("错误: "+it.Error))
-			}
-			if it.Attempts > 0 {
-				lines = append(lines, descStyle.Render(fmt.Sprintf("状态 %s · 第 %d 次", itemStateText(it.Status), it.Attempts)))
-			} else {
-				lines = append(lines, descStyle.Render("状态 "+itemStateText(it.Status)))
-			}
-			lines = append(lines, descStyle.Render("── 最后 50 行输出 ──"))
-			for _, l := range it.StderrTail {
-				lines = append(lines, l)
-			}
-			break
-		}
-	}
-	return lines
-}
-
 // quitCleanup 退出前取消仍在执行的批处理并停止队列。
 func (m model) quitCleanup() {
-	if m.planCancel != nil {
-		m.planCancel()
+	if m.createCancel != nil {
+		m.createCancel()
 	}
 	if m.cancel != nil {
 		m.cancel()
@@ -1539,42 +1070,6 @@ func (m model) quitCleanup() {
 		m.queue.Stop()
 	}
 }
-
-// ---------- 表单 ----------
-
-// rebuildFields 按当前操作组合重建主表单。保留同名字段的已填值，
-// 高级参数字段优先使用当前选中的预设参数。
-func (m *model) rebuildFields() {
-	defs := fieldsFor(m.ops)
-	if m.fieldValues == nil {
-		m.fieldValues = make(map[string]string)
-	}
-	for _, f := range m.fields {
-		m.fieldValues[f.def.key] = f.input.Value()
-	}
-
-	base := command.DefaultOption()
-	m.fields = make([]field, 0, len(defs))
-	for _, def := range defs {
-		nf := newField(def)
-		nf.applyDefaults(&base)
-		switch def.key {
-		case "advance":
-			if m.manualAdvance != "" {
-				nf.input.SetValue(m.manualAdvance)
-			}
-		case "fonts_path":
-			nf.input.Placeholder = "字体文件所在文件夹"
-		}
-		if v, ok := m.fieldValues[def.key]; ok {
-			nf.input.SetValue(v)
-		}
-		m.fields = append(m.fields, nf)
-	}
-	m.focusNo = min(m.focusNo, max(len(m.fields)-1, 0))
-}
-
-// ---------- 队列事件 ----------
 
 // itemState 把子任务状态转成文件列表标记所用的常量。
 func itemState(s task.Status) string {
@@ -1690,10 +1185,15 @@ func (m model) attemptSnapshots(batchID, itemID string) []attemptSnap {
 	return nil
 }
 
-// syncRoster 从队列和已保存的任务重建左侧列表（含展开的子任务行），
+// syncRosterFromStore 重新读取数据库后再建列表。启动、删除和任务移出队列时用它。
+func (m *model) syncRosterFromStore() {
+	m.reloadSaved()
+	m.syncRoster()
+}
+
+// syncRoster 从队列快照和已保存的任务重建左侧列表（含展开的子任务行），
 // 并尽量把光标恢复到钉住的行。队列里的状态优先于数据库里的副本。
 func (m *model) syncRoster() {
-	m.reloadSaved()
 	rows := make([]rosterRow, 0, 8)
 	for _, b := range m.rosterBatches() {
 		c := b.Counts()
@@ -1718,12 +1218,13 @@ func (m *model) syncRoster() {
 			if it.Removed {
 				continue
 			}
+			cmd := command.FormatCommand(it.PlanArgs)
 			rows = append(rows, rosterRow{
 				batchID: b.ID,
 				itemID:  it.ID,
 				title:   filepath.Base(it.Input),
 				state:   itemState(it.Status),
-				cmd:     command.FormatCommand(it.PlanArgs),
+				cmd:     cmd,
 			})
 			if !m.itemAttemptsOpen(b, it) {
 				continue
@@ -1735,7 +1236,7 @@ func (m *model) syncRoster() {
 					attempt: a.n,
 					title:   fmt.Sprintf("第 %d 次", a.n),
 					state:   a.status,
-					cmd:     command.FormatCommand(it.PlanArgs),
+					cmd:     cmd,
 				})
 			}
 		}
@@ -1774,56 +1275,6 @@ func (m *model) syncRoster() {
 	}
 }
 
-// applyPlan 保存最新生成的计划；运行期间先暂存到 pendingPlan，批次结束后再应用，
-// 避免执行中的事件与文件列表下标对不上。
-func (m *model) applyPlan(err error, plan *command.BatchPlan) tea.Cmd {
-	if m.planCancel != nil {
-		m.planCancel()
-		m.planCancel = nil
-	}
-	m.planLoading = false
-	m.previewDone = true
-	if m.running {
-		m.pendingPlan, m.pendingPlanErr = plan, err
-		if err != nil {
-			m.setStatus("× 新配置生成失败：" + err.Error())
-		} else if plan != nil {
-			m.setStatus("配置已更新，后续批次将使用新配置")
-		}
-		return nil
-	}
-	m.plan = plan
-	if err != nil {
-		m.planErr = err
-		m.files = nil
-		m.fileCursor = 0
-		m.runIdx = -1
-		m.previewSummary = ""
-		return nil
-	}
-	m.planErr = nil
-	if plan == nil {
-		return nil
-	}
-	m.files = buildFileItems(plan.Jobs)
-	m.fileCursor = 0
-	m.runIdx = -1
-	m.previewSummary = m.summaryText(plan.Commands())
-	m.refreshRunHeights()
-	m.syncPreview()
-	m.vp.GotoTop()
-	return nil
-}
-
-// applyPendingPlan 在批次结束后应用运行期间暂存的计划。
-func (m *model) applyPendingPlan() {
-	if m.pendingPlan == nil && m.pendingPlanErr == nil {
-		return
-	}
-	m.applyPlan(m.pendingPlanErr, m.pendingPlan)
-	m.pendingPlan, m.pendingPlanErr = nil, nil
-}
-
 // handleDone 收尾一次执行：更新计数与提示，应用运行期间暂存的计划。
 func (m *model) handleDone(err error) tea.Cmd {
 	m.eventing = false
@@ -1846,7 +1297,7 @@ func (m *model) handleDone(err error) tea.Cmd {
 	case err != nil:
 		m.setStatus("× 批处理已结束: " + err.Error())
 	default:
-		m.setStatus("✔ 批处理完成。按 x 进入任务列表，确认参数后再按 x 入队")
+		m.setStatus("✔ 批处理完成")
 	}
 	m.current = ""
 	m.runIdx = -1
@@ -1855,9 +1306,7 @@ func (m *model) handleDone(err error) tea.Cmd {
 	m.logDirty = false
 	m.logRefreshScheduled = false
 	m.refreshRunHeights()
-	m.syncPreview()
 	m.syncLogPane()
-	m.applyPendingPlan()
 	return nil
 }
 
@@ -1879,8 +1328,7 @@ func (m model) liveItemProgress() (ffmpeg.Progress, bool) {
 
 // progressFileIndex 定位当前要展示进度的子任务。没有队列列表时用正在执行的文件。
 func (m model) progressFileIndex() int {
-	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
-		row := m.roster[m.fileCursor]
+	if row, ok := m.focusedRosterRow(); ok {
 		if row.itemID == "" || row.batchID != m.filesBatch {
 			return -1
 		}
@@ -1919,8 +1367,8 @@ func (m model) itemProgressLabel(batchID, itemID string, status task.Status) str
 // focusedSnapshot 返回光标所在主任务；没有队列列表时返回当前正在执行的批次。
 func (m model) focusedSnapshot() (*task.Batch, bool) {
 	id := m.activeBatch
-	if len(m.roster) > 0 && m.fileCursor >= 0 && m.fileCursor < len(m.roster) {
-		id = m.roster[m.fileCursor].batchID
+	if row, ok := m.focusedRosterRow(); ok {
+		id = row.batchID
 	}
 	if id == "" {
 		return nil, false
@@ -1932,6 +1380,9 @@ func (m model) focusedSnapshot() (*task.Batch, bool) {
 func (m model) batchByID(id string) (*task.Batch, bool) {
 	if id == "" {
 		return nil, false
+	}
+	if b, ok := m.liveBatches[id]; ok && b != nil {
+		return b, true
 	}
 	if m.queue != nil {
 		if b, ok := m.queue.BatchCopy(id); ok {
@@ -1947,15 +1398,32 @@ func (m model) batchByID(id string) (*task.Batch, bool) {
 }
 
 // rosterBatches 返回左侧列表要展示的主任务：队列中的在前，仅存在于数据库的历史任务在后。
-func (m model) rosterBatches() []*task.Batch {
+func (m *model) refreshLiveBatches() {
+	if m.queue == nil {
+		m.liveBatches = nil
+		return
+	}
+	copies := m.queue.Copies()
+	m.liveBatches = make(map[string]*task.Batch, len(copies))
+	for _, b := range copies {
+		if b != nil {
+			m.liveBatches[b.ID] = b
+		}
+	}
+}
+
+func (m *model) rosterBatches() []*task.Batch {
 	var out []*task.Batch
 	seen := map[string]bool{}
+	m.liveBatches = nil
 	if m.queue != nil {
-		for _, ptr := range m.queue.Snapshot() {
-			b, ok := m.queue.BatchCopy(ptr.ID)
-			if !ok || b == nil {
+		copies := m.queue.Copies()
+		m.liveBatches = make(map[string]*task.Batch, len(copies))
+		for _, b := range copies {
+			if b == nil {
 				continue
 			}
+			m.liveBatches[b.ID] = b
 			seen[b.ID] = true
 			out = append(out, b)
 		}
@@ -2084,24 +1552,11 @@ func itemIndexOf(itemID string) int {
 func buildQueueItems(items []*task.Item) []fileItem {
 	fs := make([]fileItem, 0, len(items))
 	for _, it := range items {
-		state := filePending
-		switch it.Status {
-		case task.StatusRunning:
-			state = fileRunning
-		case task.StatusDone:
-			state = fileDone
-		case task.StatusFailed:
-			state = fileFailed
-		case task.StatusCanceled, task.StatusInterrupted:
-			state = fileCanceled
-		case task.StatusSkipped:
-			state = fileSkipped
-		}
 		fs = append(fs, fileItem{
 			input:  it.Input,
 			output: it.Output,
 			cmd:    command.FormatCommand(it.PlanArgs),
-			state:  state,
+			state:  itemState(it.Status),
 		})
 	}
 	return fs
@@ -2110,6 +1565,15 @@ func buildQueueItems(items []*task.Item) []fileItem {
 // handleQueueEvent 把队列事件映射到既有执行状态。ffmpeg 日志与进度都走 handleEvent；
 // 起停状态仍由队列子任务事件驱动，避免和进度快照重复计数。
 func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
+	m.refreshLiveBatches()
+	if e.Type == task.QueueStoreError {
+		msg := "保存任务记录失败"
+		if e.Err != nil {
+			msg += ": " + e.Err.Error()
+		}
+		m.setStatus("× " + msg)
+		return nil
+	}
 	if e.Type == task.QueueFFmpeg {
 		if !m.running || e.BatchID != m.activeBatch || e.FFmpegEvt == nil {
 			return nil
@@ -2199,9 +1663,10 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 	case task.QueueStopped:
 		// 由 quitCleanup 或程序 ctx 触发，无需界面处理。
 	}
-	m.syncRoster()
 	if e.Type == task.QueueBatchRemoved {
 		m.dropForgotten(e.BatchID)
+		m.syncRosterFromStore()
+	} else {
 		m.syncRoster()
 	}
 	m.syncLogPane()
@@ -2234,11 +1699,6 @@ func (m *model) applyBatchStart(batchID string) tea.Cmd {
 	m.activeBatch = batchID
 	m.pausedBatch = ""
 	m.pausedAt = time.Time{}
-	if m.planCancel != nil {
-		m.planCancel()
-		m.planCancel = nil
-	}
-	m.planSeq++ // 丢弃旧预览结果
 	m.runID++
 	m.running = true
 	m.eventing = true
@@ -2296,33 +1756,10 @@ func (m *model) applyBatchFinish(e task.QueueEvent) tea.Cmd {
 		if e.Err != nil {
 			err = e.Err
 		} else {
-			err = fmt.Errorf("主任务失败")
+			err = errors.New("主任务失败")
 		}
 	}
 	return m.handleDone(err)
-}
-
-// focusFormNo 聚焦 fields[focusNo] 并失焦其余字段，返回聚焦输入框的光标闪烁命令。
-func (m *model) focusFormNo(no int) tea.Cmd {
-	m.focusNo = clamp(no, 0, len(m.fields)-1)
-	return focusField(m.fields, m.focusNo)
-}
-
-// blurForm 退出表单输入状态：使所有输入框失焦（隐藏光标），保留已填内容。
-func (m *model) blurForm() {
-	if !m.editing {
-		return
-	}
-	m.editing = false
-	for i := range m.fields {
-		m.fields[i].input.Blur()
-	}
-}
-
-// beginFormEdit 进入面板 [4] 的输入状态并聚焦当前字段。
-func (m *model) beginFormEdit() tea.Cmd {
-	m.editing = true
-	return m.focusFormNo(m.focusNo)
 }
 
 func clamp(v, lo, hi int) int { return min(hi, max(lo, v)) }

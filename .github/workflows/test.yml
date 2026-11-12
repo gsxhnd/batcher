@@ -21,23 +21,31 @@ on:
 jobs:
   Test:
     name: Test
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
       - name: Install ffmpeg
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           ffmpeg -version
 
+      - name: Install ffmpeg
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y
+
       - name: Test
-        run: go test -race -v -coverprofile=coverage.out -covermode=atomic ./internal/... ./cmd/batcher/...
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./internal/... ./cmd/batcher/...
 
       - name: Build and vet
         run: |
@@ -45,7 +53,22 @@ jobs:
           go vet ./...
 
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: test -z "$(gofmt -l internal cmd)"
+
+      - name: Check module tidy
+        if: runner.os == 'Linux'
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Staticcheck
+        if: runner.os == 'Linux'
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+
+      - name: Vulnerability check
+        if: runner.os == 'Linux'
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       # - name: Upload coverage reports to Codecov
       #   uses: codecov/codecov-action@v4

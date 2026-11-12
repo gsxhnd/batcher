@@ -1,7 +1,7 @@
 package task
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -36,7 +36,7 @@ func currentStore() BatchStore {
 func (b *Batch) Save() error {
 	s := currentStore()
 	if s == nil {
-		return fmt.Errorf("任务存储未初始化")
+		return errors.New("任务存储未初始化")
 	}
 	if err := s.SaveTask(b); err != nil {
 		return fmt.Errorf("保存任务: %w", err)
@@ -48,7 +48,7 @@ func (b *Batch) Save() error {
 func LoadTask(id string) (*Batch, error) {
 	s := currentStore()
 	if s == nil {
-		return nil, fmt.Errorf("任务存储未初始化")
+		return nil, errors.New("任务存储未初始化")
 	}
 	b, err := s.LoadTask(id)
 	if err != nil {
@@ -61,7 +61,7 @@ func LoadTask(id string) (*Batch, error) {
 func ListTasks() ([]*Batch, error) {
 	s := currentStore()
 	if s == nil {
-		return nil, fmt.Errorf("任务存储未初始化")
+		return nil, errors.New("任务存储未初始化")
 	}
 	list, err := s.ListTasks()
 	if err != nil {
@@ -102,20 +102,4 @@ func (b *Batch) MarkInterrupted() bool {
 		changed = true
 	}
 	return changed
-}
-
-// CloneBatch 复制主任务及其子任务，避免队列与界面共享同一份切片。
-func CloneBatch(src *Batch) (*Batch, error) {
-	if src == nil {
-		return nil, fmt.Errorf("任务不能为空")
-	}
-	data, err := json.Marshal(src)
-	if err != nil {
-		return nil, fmt.Errorf("复制任务: %w", err)
-	}
-	var b Batch
-	if err := json.Unmarshal(data, &b); err != nil {
-		return nil, fmt.Errorf("复制任务: %w", err)
-	}
-	return &b, nil
 }

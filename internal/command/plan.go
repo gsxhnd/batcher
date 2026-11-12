@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -84,10 +85,10 @@ func jobPaths(jobs []Job) (inputs, outputs []string) {
 // newPlanner 校验并复制配置，不创建目录，也不修改调用方的配置。
 func newPlanner(opt *VideoBatchOption) (*planner, error) {
 	if opt == nil {
-		return nil, fmt.Errorf("批处理配置不能为空")
+		return nil, errors.New("批处理配置不能为空")
 	}
 	if opt.OutputPath == "" {
-		return nil, fmt.Errorf("输出目录不能为空")
+		return nil, errors.New("输出目录不能为空")
 	}
 	if info, err := os.Stat(opt.OutputPath); err == nil && !info.IsDir() {
 		return nil, fmt.Errorf("输出路径不是目录: %s", opt.OutputPath)
@@ -98,6 +99,16 @@ func newPlanner(opt *VideoBatchOption) (*planner, error) {
 	option.Subtitles = slices.Clone(opt.Subtitles)
 	option.InputFormat = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(opt.InputFormat), "."))
 	option.OutputFormat = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(opt.OutputFormat), "."))
+	for _, item := range []*string{&option.InputPath, &option.OutputPath, &option.FontsPath} {
+		if *item == "" {
+			continue
+		}
+		abs, err := filepath.Abs(*item)
+		if err != nil {
+			return nil, fmt.Errorf("解析路径 %s: %w", *item, err)
+		}
+		*item = abs
+	}
 	return &planner{option: &option}, nil
 }
 
@@ -113,11 +124,17 @@ func (p *planner) fontsParams(ctx context.Context) ([]string, error) {
 	}
 
 	fontsCmdList := make([]string, 0, len(fontsList)*4)
+	seenName := make(map[string]string, len(fontsList))
 	for _, fontPath := range fontsList {
 		// ffmpeg 只按 "/" 拆分 -attach 的路径来生成附件 filename 元数据：Windows 的
 		// 反斜杠会让 filename 变成整条路径（如 fonts\黑体.ttf），按文件名匹配的
 		// -metadata:s:t:m:filename: 就会落空，mimetype 不会被写入，封装因此失败。
 		attachPath := filepath.ToSlash(fontPath)
+		base := strings.ToLower(path.Base(attachPath))
+		if prev, ok := seenName[base]; ok {
+			return nil, fmt.Errorf("字体文件名重复：%s 与 %s", prev, fontPath)
+		}
+		seenName[base] = fontPath
 		fontsCmdList = append(fontsCmdList,
 			"-attach", attachPath,
 			"-metadata:s:t:m:filename:"+path.Base(attachPath),
@@ -169,19 +186,8 @@ func (p *planner) subtitleEntries() []SubtitleOption {
 // 添加字幕支持多条：每条字幕是一个独立输入（-i <字幕> -map <n>），流序号从
 // InputSubNo 开始递增。字幕文件按 <视频名>.<后缀> 或 <视频名>.<标记>.<后缀> 匹配。
 func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
-	if !sel.Any() {
-		return nil, fmt.Errorf("至少需要选择一个操作（转码/添加字幕/添加字体）")
-	}
-	if p.option.InputPath == "" || p.option.InputFormat == "" || p.option.OutputFormat == "" {
-		return nil, fmt.Errorf("输入路径、输入后缀和输出后缀不能为空")
-	}
-	for _, suffix := range []string{p.option.InputFormat, p.option.OutputFormat} {
-		if strings.ContainsAny(suffix, "/\\\x00") || strings.Trim(suffix, ".") == "" {
-			return nil, fmt.Errorf("视频后缀不能包含路径或仅由点组成: %q", suffix)
-		}
-	}
-	if p.option.InputSubNo < 0 {
-		return nil, fmt.Errorf("字幕流起始序号不能为负数")
+	if err := p.checkPlanInputs(sel); err != nil {
+		return nil, err
 	}
 	videos, err := media.Videos(ctx, p.option.InputPath, p.option.OutputPath, p.option.InputFormat)
 	if err != nil {
@@ -190,38 +196,76 @@ func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
 	if len(videos) == 0 {
 		return nil, nil
 	}
+	fontsParams, advance, subs, err := p.planExtras(ctx, sel)
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := p.buildJobs(ctx, sel, videos, fontsParams, advance, subs)
+	if err != nil {
+		return nil, err
+	}
+	inputPaths, outputPaths := jobPaths(jobs)
+	if err := media.CheckPaths(ctx, inputPaths, outputPaths, false); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
 
-	var fontsParams, advance []string
+func (p *planner) checkPlanInputs(sel Selection) error {
+	if !sel.Any() {
+		return errors.New("至少需要选择一个操作（转码/添加字幕/添加字体）")
+	}
+	if p.option.InputPath == "" || p.option.InputFormat == "" || p.option.OutputFormat == "" {
+		return errors.New("输入路径、输入后缀和输出后缀不能为空")
+	}
+	for _, suffix := range []string{p.option.InputFormat, p.option.OutputFormat} {
+		if strings.ContainsAny(suffix, "/\\\x00") || strings.Trim(suffix, ".") == "" {
+			return fmt.Errorf("视频后缀不能包含路径或仅由点组成: %q", suffix)
+		}
+	}
+	if p.option.InputSubNo < 0 {
+		return errors.New("字幕流起始序号不能为负数")
+	}
+	return nil
+}
+
+func (p *planner) planExtras(ctx context.Context, sel Selection) (fontsParams, advance []string, subs []subtitleInput, err error) {
 	if sel.AddFonts {
+		switch p.option.OutputFormat {
+		case "mkv", "mka":
+		default:
+			return nil, nil, nil, fmt.Errorf("内嵌字体只支持 mkv 或 mka 输出，当前是 %s", p.option.OutputFormat)
+		}
 		if p.option.FontsPath == "" {
-			return nil, fmt.Errorf("添加字体时必须填写字体目录")
+			return nil, nil, nil, errors.New("添加字体时必须填写字体目录")
 		}
 		fontsParams, err = p.fontsParams(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		if len(fontsParams) == 0 {
-			return nil, fmt.Errorf("字体目录中未找到 ttf、otf 或 ttc 文件")
+			return nil, nil, nil, errors.New("字体目录中未找到 ttf、otf 或 ttc 文件")
 		}
 	}
 	if sel.Convert {
 		advance, err = p.advanceArgs()
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 	}
-
-	var subs []subtitleInput
 	if sel.AddSubtitle {
 		subs, err = p.subtitleInputs()
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		if len(subs) == 0 {
-			return nil, fmt.Errorf("添加字幕时至少需要一条有效字幕配置")
+			return nil, nil, nil, errors.New("添加字幕时至少需要一条有效字幕配置")
 		}
 	}
+	return fontsParams, advance, subs, nil
+}
 
+func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsParams, advance []string, subs []subtitleInput) ([]Job, error) {
 	outputs := media.OutputPaths(videos, p.option.OutputPath, p.option.OutputFormat)
 	jobs := make([]Job, 0, len(videos))
 	// 每个视频目录只读取一次，避免多视频、多字幕反复扫描同一目录。
@@ -236,14 +280,16 @@ func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
 			dir := filepath.Dir(videoPath)
 			names, ok := directories[dir]
 			if !ok {
+				var err error
 				names, err = media.ListFiles(dir)
 				if err != nil {
 					return nil, err
 				}
 				directories[dir] = names
 			}
+			stems := videoStems(videos, dir)
 			for _, sub := range subs {
-				name, err := resolveSubtitle(names, media.Stem(videoPath), sub.Suffix)
+				name, err := resolveSubtitle(names, media.Stem(videoPath), sub.Suffix, stems)
 				if err != nil {
 					return nil, fmt.Errorf("匹配视频 %s 的字幕: %w", videoPath, err)
 				}
@@ -265,24 +311,41 @@ func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
 		cmd = append(cmd, outputs[videoPath])
 		jobs = append(jobs, Job{Input: videoPath, Output: outputs[videoPath], Args: cmd})
 	}
-	inputPaths, outputPaths := jobPaths(jobs)
-	if err := media.CheckPaths(ctx, inputPaths, outputPaths, false); err != nil {
-		return nil, err
-	}
 	return jobs, nil
 }
 
+func videoStems(videos []string, dir string) []string {
+	stems := make([]string, 0, len(videos))
+	for _, video := range videos {
+		if filepath.Dir(video) == dir {
+			stems = append(stems, media.Stem(video))
+		}
+	}
+	return stems
+}
+
 // resolveSubtitle 对缺失或歧义给出明确错误，不把问题留到 ffmpeg 执行时才发现。
-func resolveSubtitle(names []string, base, suffix string) (string, error) {
+// stems 是同一目录里的视频主文件名。更长的视频名（Movie 与 Movie.Extended）不会抢走对方的字幕。
+func resolveSubtitle(names []string, base, suffix string, stems []string) (string, error) {
+	suffix = strings.TrimLeft(strings.TrimSpace(suffix), ".")
 	exact := base + "." + suffix
+	owned := make(map[string]struct{}, len(stems))
+	for _, stem := range stems {
+		owned[strings.ToLower(stem)] = struct{}{}
+	}
 	var matches []string
 	for _, name := range names {
-		if name == exact {
+		if strings.EqualFold(name, exact) {
 			return name, nil
 		}
-		if strings.HasPrefix(name, base+".") && strings.HasSuffix(name, "."+suffix) {
-			matches = append(matches, name)
+		if !hasFoldPrefix(name, base+".") || !hasFoldSuffix(name, "."+suffix) {
+			continue
 		}
+		middle := name[len(base)+1 : len(name)-len(suffix)-1]
+		if _, ok := owned[strings.ToLower(base+"."+middle)]; ok {
+			continue
+		}
+		matches = append(matches, name)
 	}
 	switch len(matches) {
 	case 0:
@@ -292,6 +355,14 @@ func resolveSubtitle(names []string, base, suffix string) (string, error) {
 	default:
 		return "", fmt.Errorf("后缀 %s 匹配到多个字幕（%s），请指定 chi.ass 等完整后缀", suffix, strings.Join(matches, "、"))
 	}
+}
+
+func hasFoldPrefix(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+func hasFoldSuffix(s, suffix string) bool {
+	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
 }
 
 // subtitleInput 是一条有效字幕（Suffix 非空）及其在输出中的流序号。
@@ -315,7 +386,7 @@ func (p *planner) subtitleInputs() ([]subtitleInput, error) {
 		}
 	}
 	if defaults > 1 {
-		return nil, fmt.Errorf("只能指定一条默认字幕轨道")
+		return nil, errors.New("只能指定一条默认字幕轨道")
 	}
 	return inputs, nil
 }

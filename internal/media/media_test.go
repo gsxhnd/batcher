@@ -97,11 +97,25 @@ func TestListFiles(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(tmp, "1.chi.ass"), "sub1")
 	testutil.WriteFile(t, filepath.Join(tmp, "1.eng.ass"), "sub2")
 	testutil.WriteFile(t, filepath.Join(tmp, "2.srt"), "sub3")
+	testutil.WriteFile(t, filepath.Join(tmp, "._1.mp4"), "junk")
 	require.NoError(t, os.Mkdir(filepath.Join(tmp, "子目录"), 0o755))
 
 	names, err := ListFiles(tmp)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"1.mp4", "1.chi.ass", "1.eng.ass", "2.srt"}, names)
+}
+
+func TestWalkSkipsAppleDoubleAndFollowsFileSymlink(t *testing.T) {
+	root := t.TempDir()
+	video := filepath.Join(root, "a.mp4")
+	testutil.WriteFile(t, video, "v")
+	testutil.WriteFile(t, filepath.Join(root, "._a.mp4"), "junk")
+	link := filepath.Join(root, "b.mp4")
+	require.NoError(t, os.Symlink(video, link))
+
+	got, err := Videos(context.Background(), root, "", "mp4")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{video, link}, got)
 }
 
 func TestCheckPaths(t *testing.T) {

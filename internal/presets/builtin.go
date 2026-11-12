@@ -8,7 +8,7 @@ type Builtin struct {
 	Args string
 }
 
-// builtinPresets 是代码内置的常用转码参数，只读、出现在所有预设列表的最前面。
+// builtinPresets 是代码内置的常用转码参数。第一次打开且库里还没有预设时写入数据库，之后与其他记录一样可以改、可以删。
 // 参数均假设 ffmpeg 已正确安装；视频流重编码时音频轨保持 copy 以减少耗损。
 var builtinPresets = []Builtin{
 	{Name: "无损封装（仅换容器）", Args: "-c copy"},

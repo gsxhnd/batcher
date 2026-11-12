@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,14 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrOutputExists 表示 ffmpeg 因输出文件已存在而停止。
+var ErrOutputExists = errors.New("输出文件已存在")
+
+// IsOutputExists 报告错误是否为输出文件已存在。
+func IsOutputExists(err error) bool {
+	return errors.Is(err, ErrOutputExists)
+}
 
 // cancelGrace 是取消时等待 ffmpeg 响应中断信号并正常收尾的时间，超时后强制结束。
 const cancelGrace = 5 * time.Second
@@ -44,8 +53,8 @@ type Runner struct {
 	mu sync.Mutex
 }
 
-// Emit 串行化事件回调：stdout 与 stderr 各有一个拷贝 goroutine，会并发触发事件。
-func (r *Runner) Emit(e Event) {
+// emit 串行化事件回调：stdout 与 stderr 各有一个拷贝 goroutine，会并发触发事件。
+func (r *Runner) emit(e Event) {
 	if r.OnEvent == nil {
 		return
 	}
@@ -55,7 +64,7 @@ func (r *Runner) Emit(e Event) {
 }
 
 func (r *Runner) logLine(call Call, line string) {
-	r.Emit(Event{Type: EventLog, Index: call.Index, Total: call.Total, Message: line})
+	r.emit(Event{Type: EventLog, Index: call.Index, Total: call.Total, Message: line})
 }
 
 func newCommand(ctx context.Context, args []string) *exec.Cmd {
@@ -86,7 +95,7 @@ func (r *Runner) Run(ctx context.Context, call Call) error {
 		return nil
 	}
 
-	r.Emit(Event{Type: EventCommandStart, Index: call.Index, Total: call.Total, Command: call.Command})
+	r.emit(Event{Type: EventCommandStart, Index: call.Index, Total: call.Total, Command: call.Command})
 
 	// 读不到总时长（没装 ffprobe、文件没有时长）时降级为只报告已处理时长。
 	var duration time.Duration
@@ -95,18 +104,13 @@ func (r *Runner) Run(ctx context.Context, call Call) error {
 	}
 	parser := newProgressParser(duration,
 		func(p Progress) {
-			r.Emit(Event{Type: EventProgress, Index: call.Index, Total: call.Total, Progress: &p})
+			r.emit(Event{Type: EventProgress, Index: call.Index, Total: call.Total, Progress: &p})
 		},
 		func(line string) { r.logLine(call, line) })
 	stdout := newLineWriter(parser.handle)
-	var (
-		stderrMu    sync.Mutex
-		stderrLines []string
-	)
+	tail := &stderrTail{}
 	stderr := newLineWriter(func(line string) {
-		stderrMu.Lock()
-		stderrLines = append(stderrLines, line)
-		stderrMu.Unlock()
+		tail.add(line)
 		r.logLine(call, line)
 	})
 
@@ -118,12 +122,9 @@ func (r *Runner) Run(ctx context.Context, call Call) error {
 	stderr.Flush()
 	// 输出已存在时，当前 ffmpeg 会把错误打到 stderr，进程退出码却是 0。
 	// 不改写这条结果的话，任务会被记成成功。
-	stderrMu.Lock()
-	lines := slices.Clone(stderrLines)
-	stderrMu.Unlock()
 	if ctx.Err() == nil {
-		if line := existingOutputLine(lines); line != "" {
-			err = fmt.Errorf("输出文件已存在: %s", line)
+		if line := tail.existsLine(); line != "" {
+			err = fmt.Errorf("%w: %s", ErrOutputExists, line)
 		}
 	}
 
@@ -132,20 +133,70 @@ func (r *Runner) Run(ctx context.Context, call Call) error {
 		if ctx.Err() != nil {
 			err = fmt.Errorf("任务已取消: %w", ctx.Err())
 			eventType = EventCommandCanceled
+		} else if !IsOutputExists(err) {
+			err = wrapFFmpegExit(err, tail.last())
 		}
-		r.Emit(Event{Type: eventType, Index: call.Index, Total: call.Total, Command: call.Command, Message: err.Error()})
+		r.emit(Event{Type: eventType, Index: call.Index, Total: call.Total, Command: call.Command, Message: err.Error()})
 		return err
 	}
-	r.Emit(Event{Type: EventCommandDone, Index: call.Index, Total: call.Total, Command: call.Command})
+	r.emit(Event{Type: EventCommandDone, Index: call.Index, Total: call.Total, Command: call.Command})
 	return nil
 }
 
-// existingOutputLine 返回 stderr 里表示输出文件已存在的那一行。
-func existingOutputLine(lines []string) string {
-	for _, line := range lines {
-		if strings.Contains(strings.ToLower(line), "already exists") {
-			return line
-		}
+const stderrTailKeep = 8
+
+// stderrTail 只保留「输出已存在」的那一行和最近几行，避免长时间转码把 stderr 全部堆在内存里。
+type stderrTail struct {
+	mu     sync.Mutex
+	exists string
+	lines  []string
+}
+
+func (s *stderrTail) add(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.exists == "" && outputExistsLine(line) {
+		s.exists = line
 	}
-	return ""
+	s.lines = append(s.lines, line)
+	if len(s.lines) > stderrTailKeep {
+		s.lines = s.lines[len(s.lines)-stderrTailKeep:]
+	}
+}
+
+func (s *stderrTail) existsLine() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exists
+}
+
+func (s *stderrTail) last() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.lines) == 0 {
+		return ""
+	}
+	return s.lines[len(s.lines)-1]
+}
+
+// outputExistsLine 只认 ffmpeg 的原文「File '...' already exists」，
+// 避免输入路径里碰巧带有 already exists 时被当成输出冲突。
+func outputExistsLine(line string) bool {
+	lower := strings.ToLower(line)
+	if !strings.Contains(lower, "already exists") {
+		return false
+	}
+	return strings.Contains(lower, "file '") || strings.Contains(lower, "file \"")
+}
+
+func wrapFFmpegExit(err error, hint string) error {
+	code := -1
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	}
+	if hint != "" {
+		return fmt.Errorf("ffmpeg 退出（%d）: %s: %w", code, hint, err)
+	}
+	return fmt.Errorf("ffmpeg 退出（%d）: %w", code, err)
 }

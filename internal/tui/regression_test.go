@@ -2,8 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -47,21 +47,17 @@ type failPresetStore struct{}
 
 func (failPresetStore) LoadPresets() ([]presets.Preset, error) { return nil, nil }
 func (failPresetStore) SavePresets([]presets.Preset) error {
-	return fmt.Errorf("写入失败")
+	return errors.New("写入失败")
 }
 
 func TestPresetPersistenceFailureDoesNotCommit(t *testing.T) {
-	for _, action := range []string{"新增", "编辑", "删除", "排序", "另存"} {
+	for _, action := range []string{"新增", "编辑", "删除", "排序"} {
 		t.Run(action, func(t *testing.T) {
 			isolatePresets(t)
 			m := newModel()
-			m.ops.Convert = true
-			m.rebuildFields()
 			m.presets = []presets.Preset{{Args: "-c copy"}, {Args: "-c:v libx264"}}
 			before := append([]presets.Preset(nil), m.presets...)
-			m.presetCursor = m.presetUserOffset()
-			m.manualAdvance = "-c copy"
-			m.applyAdvanceToForm()
+			m.presetCursor = 0
 			presets.Bind(failPresetStore{})
 			switch action {
 			case "新增", "编辑":
@@ -77,49 +73,23 @@ func TestPresetPersistenceFailureDoesNotCommit(t *testing.T) {
 				m.deletePreset(0)
 			case "排序":
 				m.movePreset(1)
-			case "另存":
-				field, ok := findField(&m.fields, "advance")
-				require.True(t, ok)
-				field.input.SetValue("-c:v mpeg4")
-				m.saveAdvancePreset()
 			}
 			assert.Equal(t, before, m.presets)
-			assert.Equal(t, "-c copy", m.manualAdvance)
 			assert.Contains(t, m.statusMsg, "失败")
 		})
 	}
 }
 
 func TestPasteReachesOnlyActiveInput(t *testing.T) {
-	for _, target := range []string{"主表单", "预设弹窗", "字幕弹窗"} {
-		t.Run(target, func(t *testing.T) {
-			isolatePresets(t)
-			m := newModel()
-			m.ops.Convert, m.focus = true, panelForm
-			m.rebuildFields()
-			switch target {
-			case "主表单":
-				m.beginFormEdit()
-				m.fields[0].input.SetValue("")
-			case "预设弹窗":
-				m.openPresetModal(-1, presets.Preset{})
-			case "字幕弹窗":
-				m.openSubModal(-1)
-			}
-			text := "1xqjk 中文 路径"
-			next, _ := m.Update(tea.PasteMsg{Content: text})
-			m = next.(model)
-			assert.False(t, m.running)
-			assert.Equal(t, panelForm, m.focus)
-			if m.modal != nil {
-				assert.Equal(t, text, m.modal.fields[0].input.Value())
-				assert.False(t, m.planLoading, "弹窗草稿不影响主配置")
-			} else {
-				assert.Equal(t, text, m.fields[0].input.Value())
-				assert.True(t, m.planLoading)
-			}
-		})
-	}
+	isolatePresets(t)
+	m := newModel()
+	m.openPresetModal(-1, presets.Preset{})
+	text := "1xqjk 中文 路径"
+	next, _ := m.Update(tea.PasteMsg{Content: text})
+	m = next.(model)
+	require.NotNil(t, m.modal)
+	assert.Equal(t, text, m.modal.fields[0].input.Value())
+	assert.False(t, m.running)
 }
 
 // testQueue 为模型接上一个真实队列并注册清理；事件由测试自行从 m.evCh 读取。
@@ -147,7 +117,7 @@ func waitBatchEvent(t *testing.T, m *model, typ task.QueueEventType) queueEventM
 			if e, ok := msg.(queueEventMsg); ok && e.evt.Type == typ {
 				return e
 			}
-		case <-time.After(deadline.Sub(time.Now()) / 2):
+		case <-time.After(time.Until(deadline) / 2):
 			t.Fatalf("等待队列事件 %s 超时", typ)
 		}
 	}
@@ -158,10 +128,7 @@ func waitBatchEvent(t *testing.T, m *model, typ task.QueueEventType) queueEventM
 func TestExecutionRequiresLatestPreview(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops.Convert = true
-	m.rebuildFields()
 	testQueue(t, &m)
-	m.plan, m.previewDone, m.planLoading = testPlan("a.mkv"), true, true
 	press(&m, "x")
 	assert.Empty(t, m.queue.Snapshot(), "按 x 不入队")
 	press(&m, "enter")
@@ -175,10 +142,6 @@ func TestExecutionRequiresLatestPreview(t *testing.T) {
 	absIn, err := filepath.Abs("a.mkv")
 	require.NoError(t, err)
 	assert.Equal(t, absIn, batch.Items[0].Input, "入队时输入改为绝对路径")
-	seq := m.planSeq
-	next, _ := m.Update(planMsg{seq: seq, plan: testPlanOut(t, "不应替换.mkv")})
-	m = next.(model)
-	assert.Equal(t, absIn, batch.Items[0].Input, "入队复制的快照不受后续计划影响")
 }
 
 // TestRosterShowsBatchesAndItemStates 验证任务面板的队列视图：
@@ -186,8 +149,6 @@ func TestExecutionRequiresLatestPreview(t *testing.T) {
 func TestRosterShowsBatchesAndItemStates(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.rebuildFields()
 	testQueue(t, &m)
 	batch, err := m.queue.Enqueue(testPlanOut(t, "a", "b"), command.Selection{Convert: true})
 	require.NoError(t, err)
@@ -244,9 +205,6 @@ func TestRosterShowsBatchesAndItemStates(t *testing.T) {
 	cmd := m.copyShownCommand()
 	require.NotNil(t, cmd)
 	assert.Contains(t, fmt.Sprint(cmd()), cmds[0])
-
-	title := m.panelTitle(panelRun)
-	assert.Contains(t, title, "任务（1 批次）")
 }
 
 // TestPausedTimerFreezesElapsed 验证暂停等待决策期间计时冻结，恢复后扣除暂停时长。
@@ -331,8 +289,6 @@ func attemptRows(m *model) int {
 func TestQueueEventsFlowWhenIdle(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.rebuildFields()
 	testQueue(t, &m)
 	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
 	require.NoError(t, err)
@@ -364,29 +320,6 @@ func TestQueueEventsFlowWhenIdle(t *testing.T) {
 	t.Fatal("等待 QueueBatchStarted 超时：入队后事件未送达")
 }
 
-func TestStalesPlanMessagesDuringRun(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops.Convert = true
-	m.rebuildFields()
-	testQueue(t, &m)
-	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
-	require.NoError(t, err)
-	require.NoError(t, m.queue.Start(batch.ID))
-	waitBatchEvent(t, &m, task.QueueBatchStarted)
-	require.True(t, m.running)
-	require.Len(t, m.files, 1)
-	m.statusMsg = ""
-
-	// 执行中生成的新计划先暂存：批次结束后再应用，避免与执行中文件列表下标冲突。
-	next, _ := m.Update(planMsg{seq: m.planSeq, plan: testPlan("新配置.mkv")})
-	m = next.(model)
-	require.NotNil(t, m.pendingPlan, "运行期间的新计划应暂存")
-	assert.Equal(t, "新配置.mkv", m.pendingPlan.Jobs[0].Input)
-	assert.Contains(t, m.statusMsg, "配置已更新")
-	_ = batch
-}
-
 func TestOldRunMessagesAreIgnored(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -416,7 +349,7 @@ func TestBatchMessagesDrainBeforeCompletion(t *testing.T) {
 	plan.Jobs[0].Args = []string{"-batcher-invalid"}
 	m := newModel()
 	m.ctx = ctx
-	m.plan, m.previewDone, m.startAt = plan, true, time.Now()
+	m.startAt = time.Now()
 	m.files = buildFileItems(plan.Jobs)
 	testQueue(t, &m)
 	batch, err := m.queue.Enqueue(plan, queueSelection())
@@ -524,28 +457,6 @@ func TestProgressAndCoalescedLogRefresh(t *testing.T) {
 	assert.Contains(t, m.logVp.View(), "更多日志")
 }
 
-func TestHiddenAndEmptyFieldValuesSurviveRebuild(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = command.Selection{Convert: true, AddFonts: true}
-	m.rebuildFields()
-	values := map[string]string{"advance": "-c:v mpeg4", "fonts_path": "字体 路径", "input_path": ""}
-	for key, value := range values {
-		field, ok := findField(&m.fields, key)
-		require.True(t, ok)
-		field.input.SetValue(value)
-	}
-	m.ops = command.Selection{}
-	m.rebuildFields()
-	m.ops = command.Selection{Convert: true, AddFonts: true}
-	m.rebuildFields()
-	for key, value := range values {
-		field, ok := findField(&m.fields, key)
-		require.True(t, ok)
-		assert.Equal(t, value, field.input.Value())
-	}
-}
-
 func TestOnlyOneDefaultSubtitle(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -578,26 +489,6 @@ func TestOnlyOneDefaultSubtitle(t *testing.T) {
 	assert.True(t, m.creating, "只保留一条默认字幕时应开始创建")
 }
 
-func TestCopyIncludesOnlyCommandsAndResultsKeepLogs(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.plan, m.previewDone = testPlan("a.mkv", "b.mkv"), true
-	m.files = buildFileItems(m.plan.Jobs)
-	m.previewSummary = "预览说明，不得复制"
-	m.files[0].logs = []string{"执行输出，不得复制"}
-	m.logs = []string{"汇总日志，不得复制"}
-	m.fileCursor = 1
-	cmd := m.copyShownCommand()
-	require.NotNil(t, cmd)
-	assert.Equal(t, m.files[0].cmd, fmt.Sprint(cmd()))
-	assert.Contains(t, m.previewContent(), "执行输出，不得复制")
-	m.fileCursor = 0
-	cmd = m.copyShownCommand()
-	require.NotNil(t, cmd)
-	assert.Equal(t, m.files[0].cmd+"\n"+m.files[1].cmd, fmt.Sprint(cmd()))
-	assert.Contains(t, m.previewContent(), "汇总日志，不得复制")
-}
-
 func TestHelpShowsInjectedBuildInformation(t *testing.T) {
 	previousVersion, previousDate, previousCommit := version, buildDate, gitCommit
 	t.Cleanup(func() { version, buildDate, gitCommit = previousVersion, previousDate, previousCommit })
@@ -613,8 +504,8 @@ func TestNarrowRunLayoutKeepsLatestLogVisible(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.width, m.height, m.focus = 70, 24, panelRun
-	m.plan = testPlan("a.mkv", "b.mkv", "c.mkv")
-	m.files = buildFileItems(m.plan.Jobs)
+	plan := testPlan("a.mkv", "b.mkv", "c.mkv")
+	m.files = buildFileItems(plan.Jobs)
 	m.running, m.total, m.current, m.logFollow = true, 3, m.files[0].cmd, true
 	m.startAt = time.Now()
 	m.resizePanes()
@@ -633,73 +524,9 @@ func TestNarrowRunLayoutKeepsLatestLogVisible(t *testing.T) {
 	}
 }
 
-func TestShortSidebarAllocatesOnlyAvailableRows(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	for _, height := range []int{13, 16, 20} {
-		m.height = height
-		for focus := panel(0); focus < panelCount; focus++ {
-			m.focus = focus
-			sum := 0
-			for _, rows := range m.panelHeights() {
-				assert.GreaterOrEqual(t, rows, 0)
-				sum += rows
-			}
-			assert.Equal(t, m.bodyH()-int(panelCount)*2, sum)
-		}
-	}
+func TestDrawBoxZeroContentKeepsBorders(t *testing.T) {
 	box := drawBox(20, "折叠", false, true, "不应显示", 0)
 	assert.Equal(t, 2, lipgloss.Height(box), "零行内容只保留上下边框")
-}
-
-func TestInvalidOrEmptyPreviewNeverExecutes(t *testing.T) {
-	for _, invalid := range []bool{true, false} {
-		t.Run(fmt.Sprint(invalid), func(t *testing.T) {
-			isolatePresets(t)
-			m := newModel()
-			m.ops.Convert, m.previewDone = true, true
-			m.rebuildFields()
-			m.plan = testPlan()
-			testQueue(t, &m)
-			if invalid {
-				m.planErr = fmt.Errorf("参数无效")
-			}
-			press(&m, "x")
-			assert.False(t, m.running)
-			assert.Nil(t, m.modal, "按 x 不打开入队确认")
-			assert.Empty(t, m.queue.Snapshot())
-		})
-	}
-}
-
-func TestReschedulingCancelsPreviousPlan(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	m.planCancel, m.plan = cancel, testPlan("旧计划")
-	cmd := m.schedulePlan(0)
-	require.NotNil(t, cmd)
-	assert.ErrorIs(t, ctx.Err(), context.Canceled)
-	assert.Nil(t, m.planCancel)
-	assert.Nil(t, m.plan)
-	assert.True(t, m.planLoading)
-}
-
-func TestPlanCommandReturnsReadOnlySnapshot(t *testing.T) {
-	isolatePresets(t)
-	opt := command.DefaultOption()
-	opt.InputPath = t.TempDir()
-	opt.OutputPath = filepath.Join(t.TempDir(), "尚未创建")
-	input := filepath.Join(opt.InputPath, "a.mp4")
-	require.NoError(t, os.WriteFile(input, nil, 0o644))
-	msg := planCmd(context.Background(), &opt, command.Selection{Convert: true}, 7)().(planMsg)
-	require.NoError(t, msg.err)
-	assert.Equal(t, 7, msg.seq)
-	require.NotNil(t, msg.plan)
-	require.Len(t, msg.plan.Jobs, 1)
-	assert.Equal(t, input, msg.plan.Jobs[0].Input)
-	assert.NoDirExists(t, opt.OutputPath)
 }
 
 func TestRunningFooterShowsTaskKeys(t *testing.T) {
@@ -958,10 +785,7 @@ func TestRetryAttemptsAreNumberedAndFoldable(t *testing.T) {
 func TestTaskPanelXDoesNotEnqueue(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops.Convert = true
-	m.rebuildFields()
 	testQueue(t, &m)
-	m.plan, m.previewDone = testPlan("a.mkv"), true
 	m.focus = panelRun
 	m.roster = []rosterRow{{batchID: "existing", title: "已有任务"}}
 

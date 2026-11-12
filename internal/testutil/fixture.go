@@ -23,13 +23,13 @@ type Fixture struct {
 
 	MP4s  []string // 1/1.mp4, 1/2.mp4, 2/1.mp4, 2/2.mp4
 	MKVs  []string // 1/1.mkv, 1/2.mkv, 2/1.mkv, 2/2.mkv
-	Fonts []string // 1/1.ttf, 1/2.ttf, 2/1.ttf, 2/2.ttf
+	Fonts []string // 1/a.ttf, 1/b.ttf, 2/c.ttf, 2/d.ttf
 }
 
 // NewFixture 在临时目录生成占位测试文件：
 //
-//	root/1/{1,2}.{mkv,mp4,ass,ttf}
-//	root/2/{1,2}.{mkv,mp4,ass,ttf}
+//	root/1/{1,2}.{mkv,mp4,ass} 以及 a.ttf、b.ttf
+//	root/2/{1,2}.{mkv,mp4,ass} 以及 c.ttf、d.ttf
 func NewFixture(t *testing.T) Fixture {
 	t.Helper()
 	root := t.TempDir()
@@ -39,10 +39,17 @@ func NewFixture(t *testing.T) Fixture {
 		Dir2: filepath.Join(root, "2"),
 		Out:  filepath.Join(root, "output"),
 	}
-	names := []string{"1.mkv", "1.mp4", "1.ass", "1.ttf", "2.mkv", "2.mp4", "2.ass", "2.ttf"}
+	names := []string{"1.mkv", "1.mp4", "1.ass", "2.mkv", "2.mp4", "2.ass"}
+	fonts := map[string][]string{
+		fx.Dir1: {"a.ttf", "b.ttf"},
+		fx.Dir2: {"c.ttf", "d.ttf"},
+	}
 	for _, dir := range []string{fx.Dir1, fx.Dir2} {
 		require.NoError(t, os.MkdirAll(dir, 0o755), "create fixture dir")
 		for _, n := range names {
+			WriteFile(t, filepath.Join(dir, n), "")
+		}
+		for _, n := range fonts[dir] {
 			WriteFile(t, filepath.Join(dir, n), "")
 		}
 	}
@@ -55,8 +62,8 @@ func NewFixture(t *testing.T) Fixture {
 		filepath.Join(fx.Dir2, "1.mkv"), filepath.Join(fx.Dir2, "2.mkv"),
 	}
 	fx.Fonts = []string{
-		filepath.Join(fx.Dir1, "1.ttf"), filepath.Join(fx.Dir1, "2.ttf"),
-		filepath.Join(fx.Dir2, "1.ttf"), filepath.Join(fx.Dir2, "2.ttf"),
+		filepath.Join(fx.Dir1, "a.ttf"), filepath.Join(fx.Dir1, "b.ttf"),
+		filepath.Join(fx.Dir2, "c.ttf"), filepath.Join(fx.Dir2, "d.ttf"),
 	}
 	return fx
 }

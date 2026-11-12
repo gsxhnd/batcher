@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -81,6 +82,28 @@ func TestRunnerReportsCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	require.NotEmpty(t, events)
 	assert.Equal(t, EventCommandCanceled, events[len(events)-1].Type)
+}
+
+func TestOutputExistsLineIgnoresInputPath(t *testing.T) {
+	assert.False(t, outputExistsLine("Input #0, mov, from 'already exists.mp4'"))
+	assert.True(t, outputExistsLine("File '/tmp/1.mkv' already exists. Exiting."))
+	assert.ErrorIs(t, ErrOutputExists, ErrOutputExists)
+	assert.True(t, IsOutputExists(ErrOutputExists))
+}
+
+func TestLineWriterCapsLongLine(t *testing.T) {
+	var lines []string
+	w := newLineWriter(func(line string) { lines = append(lines, line) })
+	payload := bytes.Repeat([]byte("a"), maxLineBytes+10)
+	_, err := w.Write(payload)
+	require.NoError(t, err)
+	w.Flush()
+	var total int
+	for _, line := range lines {
+		assert.LessOrEqual(t, len(line), maxLineBytes)
+		total += len(line)
+	}
+	assert.Equal(t, maxLineBytes+10, total)
 }
 
 func TestRunnerWithoutListenerReportsCancellation(t *testing.T) {

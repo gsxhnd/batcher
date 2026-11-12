@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"fmt"
-	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -25,24 +23,6 @@ type fieldDef struct {
 	key   string
 	label string
 	kind  fieldKind
-}
-
-// fieldsFor 根据勾选的操作组合返回主参数表单的字段。
-// 多条字幕与转码参数预设分别在独立的界面管理，不出现在本表单。
-func fieldsFor(sel command.Selection) []fieldDef {
-	defs := []fieldDef{
-		{key: "input_path", label: "源视频路径"},
-		{key: "input_format", label: "源视频后缀"},
-		{key: "output_path", label: "输出目录"},
-		{key: "output_format", label: "输出后缀"},
-	}
-	if sel.Convert {
-		defs = append(defs, fieldDef{key: "advance", label: "高级自定义参数"})
-	}
-	if sel.AddFonts {
-		defs = append(defs, fieldDef{key: "fonts_path", label: "字体文件夹"})
-	}
-	return defs
 }
 
 // subFieldDefs 是单条字幕的编辑字段。
@@ -69,6 +49,15 @@ type field struct {
 	options    []string
 	choiceArgs []string // 与 options 对齐；空字符串表示不改写高级参数
 	choice     int
+	laidW      int // 已经设置过的输入框宽度，避免每次绘制都改宽度
+}
+
+func (f *field) useWidth(w int) {
+	if f.laidW == w {
+		return
+	}
+	f.laidW = w
+	f.input.SetWidth(w)
 }
 
 // newField 构建一个可编辑的表单项，默认提示文字为字段标签。
@@ -85,11 +74,11 @@ func newField(def fieldDef) field {
 func fieldInputStyles() textinput.Styles {
 	s := textinput.DefaultDarkStyles()
 	accent := lipgloss.Color(cAccent)
-	s.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
-	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	s.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(cInput))
+	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(cPlaceholder))
 	s.Focused.Prompt = lipgloss.NewStyle().Foreground(accent).Bold(true)
 	s.Blurred.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(cText))
-	s.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	s.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(cBorder))
 	s.Blurred.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(cTextDim))
 	s.Cursor.Color = accent
 	s.Cursor.Shape = tea.CursorBar
@@ -184,40 +173,14 @@ func isISO639Code(s string) bool {
 // Value 返回文本项的当前值（常规空格符用于参数分隔）。
 func (f *field) Value() string { return strings.TrimSpace(f.input.Value()) }
 
-// buildOption 将主表单当前值写回 command.VideoBatchOption 并校验。
-// 每个字段的校验错误记录在字段自身上，便于界面逐项提示。
-func (m *model) buildOption() (*command.VideoBatchOption, error) {
-	opt := command.DefaultOption()
-	for i := range m.fields {
-		f := &m.fields[i]
-		f.err = ""
-		setStringOption(&opt, f.def.key, f.resolved())
-	}
-
-	// 添加字体时必须提供目录，避免执行时才发现未配置。
-	if m.ops.AddFonts && opt.FontsPath == "" {
-		m.setFieldErr("fonts_path", "必填（已勾选添加字体）")
-		return nil, fmt.Errorf("勾选了添加字体，必须填写字体文件夹")
-	}
-
-	for i := range m.fields {
-		if m.fields[i].err != "" {
-			return nil, fmt.Errorf("%s: %s", m.fields[i].def.label, m.fields[i].err)
+// fieldByKey 按字段键查找表单项。找不到时下标为 -1。
+func fieldByKey(fields []field, key string) (*field, int) {
+	for i := range fields {
+		if fields[i].def.key == key {
+			return &fields[i], i
 		}
 	}
-
-	// 多条字幕列表由字幕管理界面维护。
-	opt.Subtitles = slices.Clone(m.subs)
-	return &opt, nil
-}
-
-// setFieldErr 为主表单中指定 key 的字段设置校验错误。
-func (m *model) setFieldErr(key, msg string) {
-	for i := range m.fields {
-		if m.fields[i].def.key == key {
-			m.fields[i].err = msg
-		}
-	}
+	return nil, -1
 }
 
 func setStringOption(opt *command.VideoBatchOption, key, val string) {
@@ -235,22 +198,4 @@ func setStringOption(opt *command.VideoBatchOption, key, val string) {
 	case "fonts_path":
 		opt.FontsPath = val
 	}
-}
-
-// displaySel 把操作组合转成中文描述，未勾选任何操作时返回“无”。
-func displaySel(sel command.Selection) string {
-	var labels []string
-	if sel.Convert {
-		labels = append(labels, "视频转码")
-	}
-	if sel.AddSubtitle {
-		labels = append(labels, "添加字幕")
-	}
-	if sel.AddFonts {
-		labels = append(labels, "添加字体")
-	}
-	if len(labels) == 0 {
-		return "无"
-	}
-	return strings.Join(labels, " + ")
 }

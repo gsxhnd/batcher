@@ -52,9 +52,6 @@ func TestNewBatchFromPlan(t *testing.T) {
 		assert.Zero(t, it.Attempts)
 		assert.False(t, it.PartialOutput)
 		assert.Equal(t, job.Args, it.PlanArgs)
-		require.Greater(t, len(it.Args), 3)
-		assert.Equal(t, []string{"-progress", "pipe:1", "-nostats"}, it.Args[:3], "记录实际执行的参数，含注入的进度选项")
-		assert.Equal(t, job.Args, it.Args[3:])
 	}
 }
 

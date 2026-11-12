@@ -2,7 +2,7 @@
 package commandline
 
 import (
-	"fmt"
+	"errors"
 	"strings"
 	"unicode"
 )
@@ -59,7 +59,7 @@ func Parse(s string) ([]string, error) {
 		}
 	}
 	if quote != 0 {
-		return nil, fmt.Errorf("参数中的引号未闭合")
+		return nil, errors.New("参数中的引号未闭合")
 	}
 	if active {
 		args = append(args, value.String())
@@ -76,7 +76,9 @@ func JoinPowerShell(args []string) string { return join(args, true) }
 func join(args []string, powershell bool) string {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
-		if isBare(arg) && (!powershell || !strings.ContainsAny(arg, "@%,")) {
+		if powershell && strings.HasPrefix(arg, "-") && strings.ContainsAny(arg, ".:") {
+			// 继续走下面的引号，避免 PowerShell 把 -metadata:s:t:m:filename:1.ttf 从点号处拆开。
+		} else if isBare(arg) && (!powershell || !strings.ContainsAny(arg, "@%,")) {
 			quoted[i] = arg
 			continue
 		}

@@ -102,10 +102,12 @@ func TestSubtitleResolutionErrors(t *testing.T) {
 		{"完整后缀", []string{"a.chi.ass", "a.eng.ass"}, "eng.ass", "a.eng.ass", ""},
 		{"缺失", nil, "ass", "", "未找到"},
 		{"歧义", []string{"a.chi.ass", "a.eng.ass"}, "ass", "", "多个字幕"},
+		{"大小写", []string{"A.ASS"}, "ass", "A.ASS", ""},
+		{"前导点", []string{"a.ass"}, ".ass", "a.ass", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveSubtitle(tc.names, "a", tc.suffix)
+			got, err := resolveSubtitle(tc.names, "a", tc.suffix, nil)
 			if tc.err != "" {
 				require.ErrorContains(t, err, tc.err)
 			} else {
@@ -114,6 +116,16 @@ func TestSubtitleResolutionErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveSubtitleSkipsLongerVideoName(t *testing.T) {
+	got, err := resolveSubtitle([]string{"Movie.Extended.ass"}, "Movie", "ass", []string{"Movie", "Movie.Extended"})
+	require.ErrorContains(t, err, "未找到")
+	assert.Empty(t, got)
+
+	got, err = resolveSubtitle([]string{"Movie.Extended.ass"}, "Movie.Extended", "ass", []string{"Movie", "Movie.Extended"})
+	require.NoError(t, err)
+	assert.Equal(t, "Movie.Extended.ass", got)
 }
 
 func TestRejectsMultipleDefaultSubtitles(t *testing.T) {

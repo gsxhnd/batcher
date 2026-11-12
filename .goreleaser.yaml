@@ -10,10 +10,6 @@ git:
   tag_sort: -version:refname
 report_sizes: true
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: batcher
     main: ./cmd/batcher

@@ -91,7 +91,7 @@ func waitBatchTerminal(t *testing.T, q *Queue, batchID string, timeout time.Dura
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		b, ok := q.BatchCopy(batchID)
-		if ok && b.Status.Terminal() {
+		if ok && b.Status.Terminal() && q.persisted(batchID) {
 			return b
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -158,6 +158,7 @@ func TestQueueSerialExecution(t *testing.T) {
 
 	var mu sync.Mutex
 	var peak, active int
+	q.mu.Lock()
 	original := q.onEvent
 	q.onEvent = func(e QueueEvent) {
 		mu.Lock()
@@ -173,6 +174,7 @@ func TestQueueSerialExecution(t *testing.T) {
 		mu.Unlock()
 		original(e)
 	}
+	q.mu.Unlock()
 
 	plan1 := mediaFixturePlan(t, fx)
 	opt2 := command.DefaultOption()
@@ -487,6 +489,11 @@ func TestDiscardPausesBatchMarksCanceledAndRemoves(t *testing.T) {
 	for _, s := range snapshot {
 		assert.NotEqual(t, batchID, s.ID)
 	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !q.persisted(batchID) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.True(t, q.persisted(batchID), "删除后的记录应已落盘")
 	onDisk, err := LoadTask(batchID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCanceled, onDisk.Status)
@@ -518,7 +525,7 @@ func TestDiscardPendingAndTerminalBatches(t *testing.T) {
 		require.NoError(t, q.Discard(b2.ID))
 		_, ok := q.BatchCopy(b2.ID)
 		assert.False(t, ok, "pending 批次删除后应直接移除")
-		assert.True(t, col.has(QueueBatchRemoved))
+		col.waitFor(t, QueueBatchRemoved, 2*time.Second)
 	}
 
 	// 删除不存在/未知的批次报错
@@ -556,34 +563,6 @@ func TestQueueCancelStopsExecution(t *testing.T) {
 	assert.Equal(t, StatusCanceled, done.Status)
 	assert.True(t, col.has(QueueItemCanceled))
 	assert.NoFileExists(t, done.Items[0].Output, "取消时必须删除半成品")
-}
-
-func TestQueueRemovePending(t *testing.T) {
-	plan1, _ := fixturePlan(t)
-	plan2, _ := fixturePlan(t)
-	ctx := context.Background()
-	q, _ := newTestQueue(ctx)
-	defer q.Stop()
-
-	b1, err := q.Enqueue(plan1, command.Selection{Convert: true})
-	require.NoError(t, err)
-	b2, err := q.Enqueue(plan2, command.Selection{Convert: true})
-	require.NoError(t, err)
-
-	time.Sleep(50 * time.Millisecond)
-
-	s2, _ := q.BatchStatus(b2.ID)
-	if s2 == StatusPending {
-		require.NoError(t, q.RemovePending(b2.ID))
-		snap := q.Snapshot()
-		for _, b := range snap {
-			assert.NotEqual(t, b2.ID, b.ID, "移除后不应再出现在快照里")
-		}
-	}
-
-	err = q.RemovePending("不存在的ID")
-	assert.Error(t, err)
-	_ = b1
 }
 
 func TestQueueEnqueueAfterStop(t *testing.T) {
@@ -888,4 +867,155 @@ func TestQueueCanceledBeforeStart(t *testing.T) {
 		assert.NotEqual(t, StatusRunning, s)
 	}
 	_, _ = q.BatchCopy(batchID)
+}
+
+func (q *Queue) setItemStatus(batchID, itemID string, s Status) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, b := range q.batches {
+		if b.ID == batchID {
+			for _, it := range b.Items {
+				if it.ID == itemID {
+					it.Status = s
+				}
+			}
+		}
+	}
+}
+
+func TestEnqueueReturnsWhileHandlerBlocked(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	q := NewQueue(context.Background(), func(e QueueEvent) {
+		if e.Type != QueueBatchAdded {
+			return
+		}
+		once.Do(func() { close(entered) })
+		<-release
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		q.Stop()
+	})
+
+	out := filepath.Join(t.TempDir(), "a.mkv")
+	done := make(chan error, 1)
+	go func() {
+		_, err := q.Enqueue(&command.BatchPlan{Jobs: []command.Job{{
+			Input: "a.mp4", Output: out, Args: []string{"-i", "a.mp4"},
+		}}}, command.Selection{Convert: true})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("事件回调阻塞时 Enqueue 没有返回")
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("入队事件没有送到回调")
+	}
+}
+
+func TestEmitCoalescesConsecutiveProgress(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	var progress []time.Duration
+	q := NewQueue(context.Background(), func(e QueueEvent) {
+		if e.Type != QueueFFmpeg || e.FFmpegEvt == nil || e.FFmpegEvt.Type != ffmpeg.EventProgress || e.FFmpegEvt.Progress == nil {
+			return
+		}
+		once.Do(func() { close(started) })
+		<-release
+		mu.Lock()
+		progress = append(progress, e.FFmpegEvt.Progress.OutTime)
+		mu.Unlock()
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		q.Stop()
+	})
+
+	ev := func(d time.Duration) QueueEvent {
+		p := ffmpeg.Progress{OutTime: d}
+		return QueueEvent{Type: QueueFFmpeg, BatchID: "b", ItemID: "001", FFmpegEvt: &ffmpeg.Event{Type: ffmpeg.EventProgress, Progress: &p}}
+	}
+	q.emit(ev(time.Second))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("第一条进度没有送达")
+	}
+	q.emit(ev(2 * time.Second))
+	q.emit(ev(3 * time.Second))
+	close(release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(progress)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []time.Duration{time.Second, 3 * time.Second}, progress)
+}
+
+func TestStaleDiscardDoesNotSkipFailure(t *testing.T) {
+	plan := singlePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	q.discardCh <- "过期批次"
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
+	waitPaused(t, col)
+	time.Sleep(200 * time.Millisecond)
+	status, ok := q.BatchStatus(b.ID)
+	require.True(t, ok)
+	assert.Equal(t, StatusPaused, status)
+	q.Decide(DecisionAbort)
+}
+
+func TestEmptyDecisionKeepsWaiting(t *testing.T) {
+	plan := singlePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+	require.NoError(t, q.Start(b.ID))
+	waitPaused(t, col)
+	q.Decide("")
+	time.Sleep(200 * time.Millisecond)
+	status, ok := q.BatchStatus(b.ID)
+	require.True(t, ok)
+	assert.Equal(t, StatusPaused, status)
+	q.Decide(DecisionSkip)
+	done := waitBatchTerminal(t, q, b.ID, 10*time.Second)
+	require.NotNil(t, done)
+	assert.Equal(t, StatusDone, done.Status)
+	assert.Equal(t, StatusSkipped, done.Items[0].Status)
 }

@@ -25,21 +25,6 @@ func TestBuildFileItemsExtractsInputAndOutput(t *testing.T) {
 	assert.Equal(t, filePending, items[0].state)
 }
 
-func TestPlanMsgBuildsFileList(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.planSeq = 1
-
-	next, _ := m.Update(planMsg{seq: 1, plan: testPlan("a.mkv", "b.mkv")})
-	m = next.(model)
-
-	assert.True(t, m.previewDone)
-	require.Len(t, m.files, 2)
-	assert.Equal(t, 0, m.fileCursor, "进入任务面板应选中“全部”")
-	assert.Contains(t, m.previewSummary, "共生成 2 条命令")
-}
-
-// testPlan 提供显式输入/输出的计划，避免测试依赖命令参数位置。
 func testPlan(inputs ...string) *command.BatchPlan {
 	plan := &command.BatchPlan{}
 	for _, input := range inputs {
@@ -61,18 +46,6 @@ func testPlanOut(t *testing.T, inputs ...string) *command.BatchPlan {
 	return plan
 }
 
-func TestPlanMsgWithErrorKeepsEmptyFiles(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.planSeq = 1
-	next, _ := m.Update(planMsg{seq: 1, err: assert.AnError})
-	m = next.(model)
-
-	assert.True(t, m.previewDone)
-	assert.Error(t, m.planErr)
-	assert.Empty(t, m.files)
-}
-
 func TestHandleEventRoutesByFile(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -83,7 +56,6 @@ func TestHandleEventRoutesByFile(t *testing.T) {
 	m.fileFollow = true
 	m.running = true
 
-	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventBatchStart, Total: 2})
 	m.handleEvent(ffmpeg.Event{Type: ffmpeg.EventCommandStart, Index: 0, Total: 2, Command: "ffmpeg -i a.mkv"})
 	assert.Equal(t, fileRunning, m.files[0].state)
 	assert.Equal(t, 1, m.fileCursor, "自动跟随应切到正在执行的文件")
@@ -131,32 +103,12 @@ func TestMoveFilePaneBoundsAndFollow(t *testing.T) {
 	assert.True(t, m.fileFollow)
 }
 
-// TestSchedulePlanDebounce 验证防抖序号；执行期间同样允许重新生成（新配置暂存）。
-func TestSchedulePlanDebounce(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.planSeq = 0
-
-	cmd := m.schedulePlan(planDebounceDelay)
-	require.NotNil(t, cmd, "配置变化应安排重新生成")
-	assert.Equal(t, 1, m.planSeq)
-	assert.True(t, m.planLoading)
-
-	// 执行中也能安排：applyPlan 把结果暂存到 pendingPlan。
-	m.running = true
-	cmd = m.schedulePlan(planDebounceDelay)
-	assert.NotNil(t, cmd, "执行中允许重新生成计划")
-	assert.Equal(t, 2, m.planSeq, "执行中序号同样递增")
-}
-
-// TestDoneMsgUnlocks 验证执行结束时解锁并保留配置以便重跑。
 func TestDoneMsgUnlocks(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.running = true
 	m.total = 2
 	m.done = 2
-	m.ops = command.Selection{Convert: true}
 	m.startAt = time.Now().Add(-time.Second)
 
 	next, _ := m.Update(doneMsg{err: nil})

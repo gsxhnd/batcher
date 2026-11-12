@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,8 +43,9 @@ const (
 	QueueItemFailed    QueueEventType = "item_failed"
 	QueueItemSkipped   QueueEventType = "item_skipped"
 	QueueItemCanceled  QueueEventType = "item_canceled"
-	QueueFFmpeg        QueueEventType = "ffmpeg"  // 透传 ffmpeg.Event（日志/进度）
-	QueueStopped       QueueEventType = "stopped" // 队列已停止，不再消费新任务
+	QueueFFmpeg        QueueEventType = "ffmpeg"      // 透传 ffmpeg.Event（日志/进度）
+	QueueStopped       QueueEventType = "stopped"     // 队列已停止，不再消费新任务
+	QueueStoreError    QueueEventType = "store_error" // 任务记录写入失败
 )
 
 // PauseDecision 是子任务失败后的处理决策。
@@ -70,27 +72,64 @@ type Queue struct {
 	done        chan struct{}       // 消费者退出时关闭
 	onEvent     func(QueueEvent)
 	stopped     bool
+
+	events       []QueueEvent // 待分发事件；emit 只追加，不调用回调
+	eventSig     chan struct{}
+	dispatchStop bool
+	dispatchDone chan struct{}
+
+	savePending map[string]saveSnap // 每个主任务只保留最新一份待写入快照
+	saveSeq     map[string]uint64
+	saveAck     map[string]uint64
+	saveSig     chan struct{}
+	saveStop    bool
+	saveDone    chan struct{}
+}
+
+// saveSnap 是一次待落盘的主任务快照及其序号。
+type saveSnap struct {
+	gen uint64
+	b   *Batch
 }
 
 // NewQueue 创建并启动队列消费者；ctx 取消时队列停止。
 func NewQueue(ctx context.Context, onEvent func(QueueEvent)) *Queue {
 	qctx, cancel := context.WithCancel(ctx)
 	q := &Queue{
-		notify:    make(chan struct{}, 1),
-		decision:  make(chan PauseDecision, 1),
-		cancel:    cancel,
-		discardCh: make(chan string, 1),
-		done:      make(chan struct{}),
-		onEvent:   onEvent,
+		notify:       make(chan struct{}, 1),
+		decision:     make(chan PauseDecision, 1),
+		cancel:       cancel,
+		discardCh:    make(chan string, 1),
+		done:         make(chan struct{}),
+		onEvent:      onEvent,
+		eventSig:     make(chan struct{}, 1),
+		dispatchDone: make(chan struct{}),
+		savePending:  map[string]saveSnap{},
+		saveSeq:      map[string]uint64{},
+		saveAck:      map[string]uint64{},
+		saveSig:      make(chan struct{}, 1),
+		saveDone:     make(chan struct{}),
 	}
+	go q.dispatch()
+	go q.saveLoop()
 	go q.run(qctx)
 	return q
 }
 
-// Stop 停止队列，取消当前正在执行的子任务并等待消费者完全退出（包括最后一次记录落盘）。
+// Stop 停止队列，取消当前正在执行的子任务，并等待消费者、落盘和事件分发都退出。
 func (q *Queue) Stop() {
 	q.cancel()
 	<-q.done
+	q.mu.Lock()
+	q.saveStop = true
+	q.mu.Unlock()
+	q.signalSave()
+	<-q.saveDone
+	q.mu.Lock()
+	q.dispatchStop = true
+	q.mu.Unlock()
+	q.signalDispatch()
+	<-q.dispatchDone
 }
 
 // CancelCurrent 取消当前正在执行的主任务；主任务标为 canceled。
@@ -110,13 +149,13 @@ func (q *Queue) Enqueue(plan *command.BatchPlan, sel command.Selection) (*Batch,
 	q.mu.Lock()
 	if q.stopped {
 		q.mu.Unlock()
-		return nil, fmt.Errorf("队列已停止，无法入队")
+		return nil, errors.New("队列已停止，无法入队")
 	}
 	id := NewID(time.Now())
 	b := NewBatch(id, plan, sel, time.Now())
 	q.batches = append(q.batches, b)
 	q.mu.Unlock()
-	_ = b.Save()
+	q.persist(b)
 	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
 	return b, nil
 }
@@ -126,7 +165,7 @@ func (q *Queue) Start(batchID string) error {
 	q.mu.Lock()
 	if q.stopped {
 		q.mu.Unlock()
-		return fmt.Errorf("队列已停止，无法开始")
+		return errors.New("队列已停止，无法开始")
 	}
 	var target *Batch
 	for _, b := range q.batches {
@@ -141,7 +180,7 @@ func (q *Queue) Start(batchID string) error {
 	}
 	if target.Status != StatusPending {
 		q.mu.Unlock()
-		return fmt.Errorf("任务不在等待执行")
+		return errors.New("任务不在等待执行")
 	}
 	q.armLocked(batchID)
 	q.mu.Unlock()
@@ -153,12 +192,12 @@ func (q *Queue) Start(batchID string) error {
 // 已完成的子任务保持原样，失败、取消或中断的子任务重置为 pending。
 func (q *Queue) Requeue(src *Batch) error {
 	if src == nil || src.ID == "" {
-		return fmt.Errorf("任务无效")
+		return errors.New("任务无效")
 	}
 	q.mu.Lock()
 	if q.stopped {
 		q.mu.Unlock()
-		return fmt.Errorf("队列已停止，无法入队")
+		return errors.New("队列已停止，无法入队")
 	}
 	for _, exist := range q.batches {
 		if exist.ID == src.ID {
@@ -166,27 +205,14 @@ func (q *Queue) Requeue(src *Batch) error {
 			return q.RetryBatch(src.ID)
 		}
 	}
-	b, err := CloneBatch(src)
-	if err != nil {
-		q.mu.Unlock()
-		return err
-	}
+	b := copyBatch(src)
 	switch b.Status {
 	case StatusFailed, StatusCanceled, StatusInterrupted, StatusPaused, StatusRunning:
-		for _, it := range b.Items {
-			if it.Removed || it.Status == StatusDone || it.Status == StatusSkipped {
-				continue
-			}
-			it.Status = StatusPending
-			it.PartialOutput = false
-			it.Error = ""
-		}
-		b.Status = StatusPending
-		b.FinishedAt = time.Time{}
+		resetForRetry(b)
 	case StatusPending:
 	case StatusDone:
 		q.mu.Unlock()
-		return fmt.Errorf("任务已完成，无需重试")
+		return errors.New("任务已完成，无需重试")
 	default:
 		q.mu.Unlock()
 		return fmt.Errorf("任务状态 %s 不可重试", b.Status)
@@ -194,7 +220,7 @@ func (q *Queue) Requeue(src *Batch) error {
 	q.batches = append(q.batches, b)
 	q.armLocked(b.ID)
 	q.mu.Unlock()
-	_ = b.Save()
+	q.persist(b)
 	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
 	q.wake()
 	return nil
@@ -204,43 +230,23 @@ func (q *Queue) Requeue(src *Batch) error {
 func (q *Queue) BatchStatus(batchID string) (Status, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for _, b := range q.batches {
-		if b.ID == batchID {
-			return b.Status, true
-		}
+	b, _ := q.findLocked(batchID)
+	if b == nil {
+		return "", false
 	}
-	return "", false
+	return b.Status, true
 }
 
 // ItemStatus 加锁读取子任务的当前状态。
 func (q *Queue) ItemStatus(batchID, itemID string) (Status, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for _, b := range q.batches {
-		if b.ID == batchID {
-			for _, it := range b.Items {
-				if it.ID == itemID {
-					return it.Status, true
-				}
-			}
-		}
+	b, _ := q.findLocked(batchID)
+	it := q.findItemLocked(b, itemID)
+	if it == nil {
+		return "", false
 	}
-	return "", false
-}
-
-// setItemStatusLocked 仅供测试用：在持锁的情况下预设某个子任务的状态。
-func (q *Queue) setItemStatus(batchID, itemID string, s Status) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for _, b := range q.batches {
-		if b.ID == batchID {
-			for _, it := range b.Items {
-				if it.ID == itemID {
-					it.Status = s
-				}
-			}
-		}
-	}
+	return it.Status, true
 }
 
 // BatchCopy 返回指定主任务的安全只读副本（深拷贝），用于测试和 TUI 读取状态。
@@ -260,18 +266,12 @@ func (q *Queue) BatchCopy(batchID string) (*Batch, bool) {
 // （done 与跳过的保持不变）并重新排队执行。
 func (q *Queue) RetryBatch(batchID string) error {
 	q.mu.Lock()
-	idx := -1
-	for i, b := range q.batches {
-		if b.ID == batchID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
+	b, _ := q.findLocked(batchID)
+	if b == nil {
 		q.mu.Unlock()
 		return fmt.Errorf("未找到任务 %s", batchID)
 	}
-	status := q.batches[idx].Status
+	status := b.Status
 	q.mu.Unlock()
 
 	if status == StatusPaused {
@@ -281,36 +281,52 @@ func (q *Queue) RetryBatch(batchID string) error {
 	}
 
 	q.mu.Lock()
-	b := q.batches[idx]
-	switch status {
+	b, _ = q.findLocked(batchID)
+	if b == nil {
+		q.mu.Unlock()
+		return fmt.Errorf("未找到任务 %s", batchID)
+	}
+	switch b.Status {
+	case StatusPaused:
+		q.mu.Unlock()
+		q.Decide(DecisionRetry)
+		return nil
 	case StatusFailed, StatusCanceled, StatusInterrupted:
-		for _, it := range b.Items {
-			if it.Status == StatusFailed || it.Status == StatusCanceled || it.Status == StatusInterrupted {
-				it.Status = StatusPending
-				it.PartialOutput = false
-			}
-		}
-		b.Status = StatusPending
-		b.FinishedAt = time.Time{}
+		resetForRetry(b)
 	default:
+		status = b.Status
 		q.mu.Unlock()
 		if status == StatusRunning {
-			return fmt.Errorf("任务正在执行，无法重试")
+			return errors.New("任务正在执行，无法重试")
 		}
 		if status == StatusDone {
-			return fmt.Errorf("任务已完成，无需重试")
+			return errors.New("任务已完成，无需重试")
 		}
 		if status == StatusPending {
-			return fmt.Errorf("任务已在队列等待执行")
+			return errors.New("任务已在队列等待执行")
 		}
 		return fmt.Errorf("任务状态 %s 不可重试", status)
 	}
 	q.armLocked(b.ID)
 	q.mu.Unlock()
-	_ = b.Save()
+	q.persist(b)
 	q.emit(QueueEvent{Type: QueueBatchAdded, BatchID: b.ID})
 	q.wake()
 	return nil
+}
+
+// resetForRetry 把未完成且未删除的子任务重置为等待执行。调用方需持有队列锁。
+func resetForRetry(b *Batch) {
+	for _, it := range b.Items {
+		if it.Removed || it.Status == StatusDone || it.Status == StatusSkipped {
+			continue
+		}
+		it.Status = StatusPending
+		it.PartialOutput = false
+		it.Error = ""
+	}
+	b.Status = StatusPending
+	b.FinishedAt = time.Time{}
 }
 
 // Discard 从队列删除主任务：pending 与终态批次直接移除（列表消失），
@@ -332,7 +348,7 @@ func (q *Queue) Discard(batchID string) error {
 	b := q.batches[idx]
 	if b.Status == StatusRunning {
 		q.mu.Unlock()
-		return fmt.Errorf("任务正在执行，无法删除")
+		return errors.New("任务正在执行，无法删除")
 	}
 	if b.Status == StatusPaused {
 		// 交给消费者收尾：waitDecision 会收到删除信号，completeDiscard 统一收尾并移除。
@@ -379,7 +395,7 @@ func (q *Queue) completeDiscard(b *Batch) bool {
 	}
 	delete(q.discard, b.ID)
 	q.mu.Unlock()
-	_ = b.Save()
+	q.persist(b)
 	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: b.ID})
 	return true
 }
@@ -402,8 +418,10 @@ func copyBatch(src *Batch) *Batch {
 				item.AttemptLogs[i] = slices.Clone(lines)
 			}
 		}
+		item.PlanArgs = slices.Clone(it.PlanArgs)
 		cp.Items[i] = &item
 	}
+	cp.Option.Subtitles = slices.Clone(src.Option.Subtitles)
 	return &cp
 }
 
@@ -466,12 +484,12 @@ func (q *Queue) CancelBatch(batchID string) error {
 		b.FinishedAt = time.Now()
 		q.mu.Unlock()
 		q.emit(QueueEvent{Type: QueueBatchCanceled, BatchID: b.ID})
-		_ = b.Save()
+		q.persist(b)
 		q.wake()
 		return nil
 	default:
 		q.mu.Unlock()
-		return fmt.Errorf("任务已结束，无法取消")
+		return errors.New("任务已结束，无法取消")
 	}
 }
 
@@ -500,11 +518,11 @@ func (q *Queue) DiscardItem(batchID, itemID string) error {
 	}
 	if it.Removed {
 		q.mu.Unlock()
-		return fmt.Errorf("子任务已删除")
+		return errors.New("子任务已删除")
 	}
 	if it.Status == StatusRunning {
 		q.mu.Unlock()
-		return fmt.Errorf("子任务正在执行，无法删除")
+		return errors.New("子任务正在执行，无法删除")
 	}
 	if b.Status == StatusPaused && it.Status == StatusFailed {
 		q.mu.Unlock()
@@ -516,25 +534,9 @@ func (q *Queue) DiscardItem(batchID, itemID string) error {
 		it.Status = StatusCanceled
 	}
 	q.mu.Unlock()
-	_ = b.Save()
+	q.persist(b)
 	q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: batchID, ItemID: itemID})
 	return nil
-}
-
-// RemovePending 从队列中移除一个仍处于 pending 状态的主任务；已启动的任务不可移除。
-func (q *Queue) RemovePending(batchID string) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for i, b := range q.batches {
-		if b.ID == batchID {
-			if b.Status != StatusPending {
-				return fmt.Errorf("任务 %s 已开始执行，无法移除", batchID)
-			}
-			q.batches = append(q.batches[:i], q.batches[i+1:]...)
-			return nil
-		}
-	}
-	return fmt.Errorf("未找到任务 %s", batchID)
 }
 
 // Snapshot 返回当前队列内容的只读快照（切片副本，元素指针共享）。
@@ -543,6 +545,17 @@ func (q *Queue) Snapshot() []*Batch {
 	defer q.mu.Unlock()
 	out := make([]*Batch, len(q.batches))
 	copy(out, q.batches)
+	return out
+}
+
+// Copies 在一次加锁里返回每个主任务的深拷贝。
+func (q *Queue) Copies() []*Batch {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]*Batch, len(q.batches))
+	for i, b := range q.batches {
+		out[i] = copyBatch(b)
+	}
 	return out
 }
 
@@ -561,9 +574,143 @@ func (q *Queue) wake() {
 	}
 }
 
+// findLocked 按 ID 查找主任务。调用方需持有 q.mu。
+func (q *Queue) findLocked(id string) (*Batch, int) {
+	for i, b := range q.batches {
+		if b.ID == id {
+			return b, i
+		}
+	}
+	return nil, -1
+}
+
+// findItemLocked 按 ID 查找子任务。调用方需持有 q.mu。
+func (q *Queue) findItemLocked(b *Batch, itemID string) *Item {
+	if b == nil {
+		return nil
+	}
+	for _, it := range b.Items {
+		if it.ID == itemID {
+			return it
+		}
+	}
+	return nil
+}
+
+// emit 把事件放进内部队列后立即返回。回调由分发协程调用，避免堵住界面协程。
 func (q *Queue) emit(e QueueEvent) {
-	if q.onEvent != nil {
-		q.onEvent(e)
+	q.mu.Lock()
+	q.events = coalesceEvent(q.events, e)
+	q.mu.Unlock()
+	q.signalDispatch()
+}
+
+func (q *Queue) signalDispatch() {
+	select {
+	case q.eventSig <- struct{}{}:
+	default:
+	}
+}
+
+// coalesceEvent 把同一子任务连续的进度事件收成最新一条，日志行全部保留。
+func coalesceEvent(events []QueueEvent, e QueueEvent) []QueueEvent {
+	if e.Type == QueueFFmpeg && e.FFmpegEvt != nil && e.FFmpegEvt.Type == ffmpeg.EventProgress {
+		if n := len(events); n > 0 {
+			last := events[n-1]
+			if last.Type == QueueFFmpeg && last.BatchID == e.BatchID && last.ItemID == e.ItemID &&
+				last.FFmpegEvt != nil && last.FFmpegEvt.Type == ffmpeg.EventProgress {
+				events[n-1] = e
+				return events
+			}
+		}
+	}
+	return append(events, e)
+}
+
+func (q *Queue) dispatch() {
+	defer close(q.dispatchDone)
+	for {
+		q.mu.Lock()
+		batch := q.events
+		q.events = nil
+		cb := q.onEvent
+		stop := q.dispatchStop && len(batch) == 0
+		q.mu.Unlock()
+		if stop {
+			return
+		}
+		if len(batch) == 0 {
+			<-q.eventSig
+			continue
+		}
+		for _, e := range batch {
+			if cb != nil {
+				cb(e)
+			}
+		}
+	}
+}
+
+// persist 在锁内拍一份快照，交给单独的写入协程。同一主任务只保留最新快照。
+func (q *Queue) persist(b *Batch) {
+	q.mu.Lock()
+	q.persistLocked(b)
+	q.mu.Unlock()
+	q.signalSave()
+}
+
+// persistLocked 把快照放进待写队列。调用方需持有 q.mu。
+func (q *Queue) persistLocked(b *Batch) {
+	if b == nil || b.ID == "" {
+		return
+	}
+	q.saveSeq[b.ID]++
+	q.savePending[b.ID] = saveSnap{gen: q.saveSeq[b.ID], b: copyBatch(b)}
+}
+
+func (q *Queue) signalSave() {
+	select {
+	case q.saveSig <- struct{}{}:
+	default:
+	}
+}
+
+// persisted 报告该主任务已排队的快照是否都已写入。
+func (q *Queue) persisted(id string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_, waiting := q.savePending[id]
+	return !waiting && q.saveAck[id] >= q.saveSeq[id]
+}
+
+func (q *Queue) saveLoop() {
+	defer close(q.saveDone)
+	for {
+		q.mu.Lock()
+		var id string
+		var snap saveSnap
+		for key, job := range q.savePending {
+			id, snap = key, job
+			delete(q.savePending, key)
+			break
+		}
+		stop := q.saveStop && id == ""
+		q.mu.Unlock()
+		if stop {
+			return
+		}
+		if id == "" {
+			<-q.saveSig
+			continue
+		}
+		if err := snap.b.Save(); err != nil {
+			q.emit(QueueEvent{Type: QueueStoreError, BatchID: id, Err: err})
+		}
+		q.mu.Lock()
+		if snap.gen >= q.saveAck[id] {
+			q.saveAck[id] = snap.gen
+		}
+		q.mu.Unlock()
 	}
 }
 
@@ -632,7 +779,7 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 		q.mu.Unlock()
 	}()
 	q.emit(QueueEvent{Type: QueueBatchStarted, BatchID: b.ID})
-	_ = b.Save()
+	q.persist(b)
 
 	finish := func(status Status) {
 		if bctx.Err() != nil && status == StatusFailed {
@@ -651,34 +798,6 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 		q.cancelRemainingItems(b)
 		finish(StatusCanceled)
 		return false
-	}
-
-	// pauseFor 宣布暂停并等待本次决策。调用前先丢掉执行期间多按的 r，
-	// 那些按键不属于这次暂停。返回 false 表示批次已经收尾，调用方应立刻返回。
-	pauseFor := func(it *Item) (PauseDecision, bool) {
-		q.drainDecision()
-		q.mu.Lock()
-		b.Status = StatusPaused
-		itemErr := it.Error
-		q.mu.Unlock()
-		var err error
-		if itemErr != "" {
-			err = fmt.Errorf("%s", itemErr)
-		}
-		q.emit(QueueEvent{Type: QueueBatchPaused, BatchID: b.ID, ItemID: it.ID, Err: err})
-		_ = b.Save()
-		decision := q.waitDecision(bctx)
-		if q.completeDiscard(b) {
-			q.wake()
-			return "", false
-		}
-		if bctx.Err() != nil {
-			// 等待期间批次被取消，剩余子任务标 canceled，主任务不应记为失败。
-			q.cancelRemainingItems(b)
-			finish(StatusCanceled)
-			return "", false
-		}
-		return decision, true
 	}
 
 	for _, it := range b.Items {
@@ -703,42 +822,20 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 			if !failed {
 				break
 			}
-			decision, cont := pauseFor(it)
+			decision, cont := q.pauseForItem(bctx, b, it, finish)
 			if !cont {
 				return true
 			}
-			switch decision {
-			case DecisionRetry:
-				q.mu.Lock()
-				it.Status = StatusPending
-				it.PartialOutput = false
-				it.Error = ""
-				b.Status = StatusRunning
-				q.mu.Unlock()
-				q.emit(QueueEvent{Type: QueueItemRetry, BatchID: b.ID, ItemID: it.ID})
-				continue
-			case DecisionSkip:
-				q.mu.Lock()
-				it.Status = StatusSkipped
-				b.Status = StatusRunning
-				q.mu.Unlock()
-				q.emit(QueueEvent{Type: QueueItemSkipped, BatchID: b.ID, ItemID: it.ID})
-			case DecisionDrop:
-				q.mu.Lock()
-				it.Status = StatusCanceled
-				it.Removed = true
-				it.PartialOutput = false
-				b.Status = StatusRunning
-				q.mu.Unlock()
-				q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID})
-			case DecisionAbort:
+			again, stop := q.takePauseDecision(b, it, decision)
+			if stop {
 				q.cancelRemainingItems(b)
 				finish(StatusFailed)
 				return true
-			default:
-				// 未识别的决策：保留失败状态，继续后面的子任务。
 			}
-			_ = b.Save()
+			if again {
+				continue
+			}
+			q.persist(b)
 			break
 		}
 	}
@@ -753,6 +850,74 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 	// 主任务结束后继续已经手动开始的下一个主任务。
 	q.wake()
 	return true
+}
+
+// pauseForItem 宣布暂停并等待本次决策。调用前先丢掉执行期间多按的 r，
+// 那些按键不属于这次暂停。返回 false 表示批次已经收尾，调用方应立刻返回。
+func (q *Queue) pauseForItem(bctx context.Context, b *Batch, it *Item, finish func(Status)) (PauseDecision, bool) {
+	q.drainDecision()
+	q.drainDiscard()
+	if q.completeDiscard(b) {
+		q.wake()
+		return "", false
+	}
+	q.mu.Lock()
+	b.Status = StatusPaused
+	itemErr := it.Error
+	q.mu.Unlock()
+	var err error
+	if itemErr != "" {
+		err = errors.New(itemErr)
+	}
+	q.emit(QueueEvent{Type: QueueBatchPaused, BatchID: b.ID, ItemID: it.ID, Err: err})
+	q.persist(b)
+	decision := q.waitDecision(bctx)
+	if q.completeDiscard(b) {
+		q.wake()
+		return "", false
+	}
+	if bctx.Err() != nil {
+		// 等待期间批次被取消，剩余子任务标 canceled，主任务不应记为失败。
+		q.cancelRemainingItems(b)
+		finish(StatusCanceled)
+		return "", false
+	}
+	return decision, true
+}
+
+// takePauseDecision 应用一次暂停决策。again 表示还要再跑这个子任务，stop 表示整批结束。
+func (q *Queue) takePauseDecision(b *Batch, it *Item, decision PauseDecision) (again, stop bool) {
+	switch decision {
+	case DecisionRetry:
+		q.mu.Lock()
+		it.Status = StatusPending
+		it.PartialOutput = false
+		it.Error = ""
+		b.Status = StatusRunning
+		q.mu.Unlock()
+		q.emit(QueueEvent{Type: QueueItemRetry, BatchID: b.ID, ItemID: it.ID})
+		return true, false
+	case DecisionSkip:
+		q.mu.Lock()
+		it.Status = StatusSkipped
+		b.Status = StatusRunning
+		q.mu.Unlock()
+		q.emit(QueueEvent{Type: QueueItemSkipped, BatchID: b.ID, ItemID: it.ID})
+	case DecisionDrop:
+		q.mu.Lock()
+		it.Status = StatusCanceled
+		it.Removed = true
+		it.PartialOutput = false
+		b.Status = StatusRunning
+		q.mu.Unlock()
+		q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID})
+	case DecisionAbort:
+		return false, true
+	default:
+		// 空决策或无法识别的决策继续等待，不能擅自跳过失败的子任务。
+		return true, false
+	}
+	return false, false
 }
 
 // PrepareOverwrite 在确认之后，允许这个失败的子任务替换已有输出。
@@ -771,7 +936,7 @@ func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
 		return fmt.Errorf("未找到任务 %s", batchID)
 	}
 	if b.Status != StatusPaused {
-		return fmt.Errorf("任务不在暂停，无法覆盖")
+		return errors.New("任务不在暂停，无法覆盖")
 	}
 	var it *Item
 	for _, item := range b.Items {
@@ -784,11 +949,10 @@ func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
 		}
 	}
 	if it == nil {
-		return fmt.Errorf("当前失败不是输出文件已存在")
+		return errors.New("当前失败不是输出文件已存在")
 	}
 	it.Overwrite = true
 	it.PlanArgs = overwriteArgs(it.PlanArgs)
-	it.Args = ffmpeg.ExecArgs(it.PlanArgs)
 	return nil
 }
 
@@ -821,7 +985,6 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 		args = overwriteArgs(args)
 	}
 	q.emit(QueueEvent{Type: QueueItemStarted, BatchID: b.ID, ItemID: it.ID})
-	_ = b.Save()
 
 	runner := &ffmpeg.Runner{OnEvent: func(e ffmpeg.Event) {
 		evt := e
@@ -844,30 +1007,39 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 		Input:   it.Input,
 	}
 
-	// 确保输出目录存在
-	if err := media.MakeDir(filepath.Dir(it.Output)); err != nil {
-		q.failItem(b, it, now, fmt.Sprintf("创建输出目录: %v", err))
+	if err := q.prepareOutput(it.Output, overwrite); err != nil {
+		q.failItem(b, it, now, err)
 		return true
-	}
-	// 已有输出默认失败并暂停。这里不能删文件：它是上一次的结果，不是这次的半成品。
-	if !overwrite {
-		if _, err := os.Lstat(it.Output); err == nil {
-			q.failItem(b, it, now, fmt.Sprintf("输出文件已存在: %s", it.Output))
-			return true
-		} else if err != nil && !os.IsNotExist(err) {
-			q.failItem(b, it, now, fmt.Sprintf("检查输出文件: %v", err))
-			return true
-		}
 	}
 
 	q.mu.Lock()
 	it.PartialOutput = true
 	q.mu.Unlock()
-	_ = b.Save()
+	q.persist(b)
 
-	err := runner.Run(ctx, call)
-	elapsed := time.Since(now)
+	return q.finishItem(ctx, b, it, now, runner.Run(ctx, call))
+}
 
+// prepareOutput 创建输出目录，并在不允许覆盖时拒绝已有文件。
+// 已有文件不能删：它是上一次的结果，不是这次的半成品。
+func (q *Queue) prepareOutput(output string, overwrite bool) error {
+	if err := media.MakeDir(filepath.Dir(output)); err != nil {
+		return fmt.Errorf("创建输出目录: %w", err)
+	}
+	if overwrite {
+		return nil
+	}
+	if _, err := os.Lstat(output); err == nil {
+		return fmt.Errorf("输出文件已存在: %s", output)
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("检查输出文件: %w", err)
+	}
+	return nil
+}
+
+// finishItem 记录一条命令的结果。取消时返回 false，调用方应停止本批剩余子任务。
+func (q *Queue) finishItem(ctx context.Context, b *Batch, it *Item, start time.Time, err error) bool {
+	elapsed := time.Since(start)
 	if err != nil {
 		if ctx.Err() != nil {
 			// 取消：删除半成品
@@ -878,14 +1050,14 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 			it.DurationMs = elapsed.Milliseconds()
 			q.mu.Unlock()
 			q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID})
-			_ = b.Save()
+			q.persist(b)
 			return false
 		}
 		// 输出已存在时保留原文件。其余失败删除这次写出的半成品。
-		if !IsOutputExists(err.Error()) {
+		if !ffmpeg.IsOutputExists(err) && !IsOutputExists(err.Error()) {
 			_ = os.Remove(it.Output)
 		}
-		q.failItem(b, it, now, err.Error())
+		q.failItem(b, it, start, err)
 		return true
 	}
 
@@ -896,11 +1068,15 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 	it.DurationMs = elapsed.Milliseconds()
 	q.mu.Unlock()
 	q.emit(QueueEvent{Type: QueueItemDone, BatchID: b.ID, ItemID: it.ID})
-	_ = b.Save()
+	q.persist(b)
 	return true
 }
 
-func (q *Queue) failItem(b *Batch, it *Item, start time.Time, msg string) {
+func (q *Queue) failItem(b *Batch, it *Item, start time.Time, err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
 	q.mu.Lock()
 	it.Status = StatusFailed
 	it.PartialOutput = false
@@ -908,8 +1084,7 @@ func (q *Queue) failItem(b *Batch, it *Item, start time.Time, msg string) {
 	it.AppendAttemptLog(msg)
 	it.DurationMs = time.Since(start).Milliseconds()
 	q.mu.Unlock()
-	q.emit(QueueEvent{Type: QueueItemFailed, BatchID: b.ID, ItemID: it.ID, Err: fmt.Errorf("%s", msg)})
-	_ = b.Save()
+	q.emit(QueueEvent{Type: QueueItemFailed, BatchID: b.ID, ItemID: it.ID, Err: err})
 }
 
 func (q *Queue) cancelRemainingItems(b *Batch) {
@@ -926,7 +1101,10 @@ func (q *Queue) finishBatch(b *Batch, status Status) {
 	q.mu.Lock()
 	b.Status = status
 	b.FinishedAt = time.Now()
+	delete(q.discard, b.ID)
+	q.persistLocked(b)
 	q.mu.Unlock()
+	q.signalSave()
 	var evtType QueueEventType
 	switch status {
 	case StatusDone:
@@ -937,18 +1115,35 @@ func (q *Queue) finishBatch(b *Batch, status Status) {
 		evtType = QueueBatchCanceled
 	}
 	q.emit(QueueEvent{Type: evtType, BatchID: b.ID})
-	_ = b.Save()
 }
 
-// waitDecision 阻塞直到收到决策指令、删除信号、或 ctx 取消；取消时返回空字符串。
+// drainDiscard 丢掉不属于这次暂停的删除信号。是否删除仍以 discard 表为准。
+func (q *Queue) drainDiscard() {
+	for {
+		select {
+		case <-q.discardCh:
+		default:
+			return
+		}
+	}
+}
+
+// waitDecision 阻塞直到收到决策、对得上的删除信号，或 ctx 取消。
+// 空决策和过期的删除信号会继续等待，避免跳过用户还没处理的失败。
 func (q *Queue) waitDecision(ctx context.Context) PauseDecision {
-	select {
-	case <-ctx.Done():
-		return ""
-	case d := <-q.decision:
-		return d
-	case batchID := <-q.discardCh:
-		_ = batchID // 调用方通过 completeDiscard 收尾
-		return ""
+	for {
+		select {
+		case <-ctx.Done():
+			return ""
+		case d := <-q.decision:
+			if d == "" {
+				continue
+			}
+			return d
+		case batchID := <-q.discardCh:
+			if q.discardRequested(batchID) {
+				return ""
+			}
+		}
 	}
 }

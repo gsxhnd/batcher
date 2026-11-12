@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gsxhnd/batcher/internal/command"
-	"github.com/gsxhnd/batcher/internal/ffmpeg"
 )
 
 // recordVersion 是任务记录 JSON 的 schema 版本，字段有不兼容变化时递增。
@@ -52,8 +51,7 @@ type Item struct {
 	ID     string `json:"id"`
 	Input  string `json:"input"`
 	Output string `json:"output"`
-	// Args 是实际交给 ffmpeg 的参数（含注入的进度选项）；PlanArgs 是计划与预览里的原始参数。
-	Args     []string `json:"args"`
+	// PlanArgs 是计划里的原始参数。执行时再注入进度选项，不另存一份。
 	PlanArgs []string `json:"planArgs"`
 	Status   Status   `json:"status"`
 	// Attempts 是这个子任务已经开始执行的次数，含正在进行的这一次。
@@ -207,7 +205,6 @@ func NewBatch(id string, plan *command.BatchPlan, sel command.Selection, now tim
 			ID:       fmt.Sprintf("%03d", i+1),
 			Input:    input,
 			Output:   output,
-			Args:     ffmpeg.ExecArgs(planArgs),
 			PlanArgs: planArgs,
 			Status:   StatusPending,
 		})

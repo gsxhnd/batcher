@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +25,6 @@ func TestRefreshRunVpHeights(t *testing.T) {
 	m := newModel()
 	m.width, m.height = 100, 34
 	m.resizePanes()
-	assert.Positive(t, m.vp.Height(), "预览视口应有高度")
 	assert.Positive(t, m.logVp.Height(), "日志视口应有高度")
 
 	// 执行中的子任务：日志高度 = 主体内容 - 固定区（命令、进度、分隔线）。
@@ -100,12 +98,12 @@ func TestCopyShownCommand(t *testing.T) {
 	m.focus = panelRun
 	m.fileCursor = 1
 
-	// 未生成预览时应提示
+	// 队列为空时没有可复制的命令。
 	m2 := newModel()
 	m2.focus = panelRun
 	cmd := m2.updateRunPanel(keyPress("y"))
 	assert.Nil(t, cmd)
-	assert.Contains(t, m2.statusMsg, "无法复制")
+	assert.Contains(t, m2.statusMsg, "尚无命令")
 
 	// 执行中复制置顶命令
 	m.running = true
@@ -114,12 +112,12 @@ func TestCopyShownCommand(t *testing.T) {
 	require.NotNil(t, cmd, "应返回写入剪贴板的命令")
 	assert.Contains(t, m.statusMsg, "完整命令")
 
-	// 预览态复制所选文件命令
+	// 没有队列行时不从预览文件列表复制。
 	m.running = false
 	m.current = ""
 	cmd = m.updateRunPanel(keyPress("y"))
-	require.NotNil(t, cmd)
-	assert.Contains(t, m.statusMsg, "剪贴板")
+	assert.Nil(t, cmd)
+	assert.Contains(t, m.statusMsg, "尚无命令")
 }
 
 // TestMouseWheelPausesFollow 滚轮向上滚动后应暂停日志跟随，回到底部恢复。
@@ -192,18 +190,4 @@ func TestSubtaskDetailFitsTheBox(t *testing.T) {
 	m.roster = []rosterRow{{batchID: "b", title: "主任务"}}
 	m.fileCursor = 0
 	check("主任务")
-}
-
-// TestSummaryMarksDefaultSub 汇总文本应标注默认字幕轨道。
-func TestSummaryMarksDefaultSub(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = command.Selection{AddSubtitle: true}
-	m.subs = []command.SubtitleOption{
-		{Suffix: "ass", Lang: "chi", Title: "中文", Default: true},
-		{Suffix: "srt", Lang: "eng", Title: "English"},
-	}
-	out := m.summaryText([][]string{{"-i", "a.mkv", "o.mkv"}})
-	assert.Contains(t, out, "(默认).ass")
-	assert.Contains(t, out, ".srt")
 }

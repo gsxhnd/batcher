@@ -1,7 +1,8 @@
-// Package presets 管理转码高级参数预设：内置预设（只读）+ 用户自定义预设。
+// Package presets 管理转码高级参数预设。
 //
-// 用户预设保存为 <CLI 所在目录>/presets/advance_presets.json，目录在保存时自动创建；
-// 可通过环境变量 BATCHER_PRESETS_DIR 覆盖存放目录（便于开发与测试）。
+// 正在使用的预设存在可执行文件旁的 batcher.db 里，由 Bind 接上存储。
+// advance_presets.json 只用于第一次打开时导入旧文件，以及文件层测试；
+// 目录可用 BATCHER_PRESETS_DIR 覆盖。
 package presets
 
 import (
@@ -69,15 +70,6 @@ func dirFromExe() (string, error) {
 	return filepath.Join(filepath.Dir(exe), "presets"), nil
 }
 
-// FilePath 返回用户预设文件完整路径（目录未必已创建）。
-func FilePath() (string, error) {
-	dir, err := Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, PresetFile), nil
-}
-
 // Store 持久化自定义预设。由 bbolt 实现，界面启动时 Bind。
 type Store interface {
 	LoadPresets() ([]Preset, error)
@@ -119,7 +111,7 @@ func Load() ([]Preset, error) {
 func Save(list []Preset) error {
 	s := currentStore()
 	if s == nil {
-		return fmt.Errorf("预设存储未初始化")
+		return errors.New("预设存储未初始化")
 	}
 	if err := s.SavePresets(normalizePresets(list)); err != nil {
 		return fmt.Errorf("保存预设: %w", err)
@@ -130,7 +122,7 @@ func Save(list []Preset) error {
 // LoadFrom 从指定目录读取用户预设列表；文件不存在时返回空列表（非错误）。
 func LoadFrom(dir string) ([]Preset, error) {
 	if dir == "" {
-		return nil, fmt.Errorf("预设目录不能为空")
+		return nil, errors.New("预设目录不能为空")
 	}
 	path := filepath.Join(dir, PresetFile)
 	data, err := os.ReadFile(path)
@@ -151,7 +143,7 @@ func LoadFrom(dir string) ([]Preset, error) {
 // 参数为空的条目会被丢弃；参数相同的条目只保留第一条，名称与参数均去除首尾空白。
 func SaveTo(dir string, presets []Preset) (saveErr error) {
 	if dir == "" {
-		return fmt.Errorf("预设目录不能为空")
+		return errors.New("预设目录不能为空")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("创建预设目录 %s: %w", dir, err)

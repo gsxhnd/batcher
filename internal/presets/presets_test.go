@@ -174,7 +174,6 @@ func TestExecutablePathErrorsPropagate(t *testing.T) {
 		call func() error
 	}{
 		{"目录", func() error { _, err := Dir(); return err }},
-		{"文件路径", func() error { _, err := FilePath(); return err }},
 	} {
 		t.Run(tc.name, func(t *testing.T) { assert.ErrorIs(t, tc.call(), want) })
 	}

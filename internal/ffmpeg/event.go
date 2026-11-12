@@ -1,14 +1,17 @@
 package ffmpeg
 
 import (
+	"bytes"
 	"strings"
 	"sync"
 )
 
+// maxLineBytes 是一行输出的上限。超过后先交出已有内容，避免没有换行的流把缓冲撑大。
+const maxLineBytes = 64 << 10
+
 type EventType string
 
 const (
-	EventBatchStart      EventType = "batch_start"
 	EventCommandStart    EventType = "command_start"
 	EventCommandDone     EventType = "command_done"
 	EventCommandFailed   EventType = "command_failed"
@@ -40,17 +43,38 @@ func newLineWriter(emit func(line string)) *lineWriter {
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
+	n := len(p)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	for _, b := range p {
-		if b == '\n' || b == '\r' {
-			w.flushLocked()
+	for len(p) > 0 {
+		i := bytes.IndexAny(p, "\r\n")
+		if i < 0 {
+			w.appendLocked(p)
+			break
+		}
+		w.appendLocked(p[:i])
+		w.flushLocked()
+		if p[i] == '\r' && i+1 < len(p) && p[i+1] == '\n' {
+			p = p[i+2:]
 			continue
 		}
-		w.buf.WriteByte(b)
+		p = p[i+1:]
 	}
-	return len(p), nil
+	return n, nil
+}
+
+func (w *lineWriter) appendLocked(p []byte) {
+	for len(p) > 0 {
+		room := maxLineBytes - w.buf.Len()
+		if room <= 0 {
+			w.flushLocked()
+			room = maxLineBytes
+		}
+		n := min(room, len(p))
+		w.buf.Write(p[:n])
+		p = p[n:]
+	}
 }
 
 func (w *lineWriter) Flush() {

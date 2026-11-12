@@ -50,7 +50,7 @@ func TestMouseDragCopiesSelection(t *testing.T) {
 		assert.Equal(t, m.width, lipgloss.Width(ln), "选中后第 %d 行宽度不一致", i+1)
 	}
 
-	next, cmd = m.Update(tea.MouseClickMsg{X: 2, Y: 2, Button: tea.MouseLeft})
+	next, _ = m.Update(tea.MouseClickMsg{X: 2, Y: 2, Button: tea.MouseLeft})
 	m = next.(model)
 	next, cmd = m.Update(tea.MouseReleaseMsg{X: 2, Y: 2, Button: tea.MouseLeft})
 	m = next.(model)

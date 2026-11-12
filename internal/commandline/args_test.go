@@ -43,6 +43,7 @@ func TestNormalizeAndPowerShell(t *testing.T) {
 	assert.Equal(t, `-vf "未闭合`, Normalize(`  -vf "未闭合  `))
 	assert.Equal(t, `-i 'C:\视频 文件\a''b.mkv'`, JoinPowerShell([]string{"-i", `C:\视频 文件\a'b.mkv`}))
 	assert.Equal(t, `'@args' 'a,b'`, JoinPowerShell([]string{"@args", "a,b"}))
+	assert.Equal(t, `'-metadata:s:t:m:filename:1.ttf'`, JoinPowerShell([]string{"-metadata:s:t:m:filename:1.ttf"}))
 }
 
 func FuzzArgumentRoundTrip(f *testing.F) {

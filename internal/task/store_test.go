@@ -2,7 +2,7 @@ package task
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -21,12 +21,9 @@ type memStore struct {
 
 func (s *memStore) SaveTask(b *Batch) error {
 	if b == nil || b.ID == "" {
-		return fmt.Errorf("任务 ID 不能为空")
+		return errors.New("任务 ID 不能为空")
 	}
-	cp, err := CloneBatch(b)
-	if err != nil {
-		return err
-	}
+	cp := copyBatch(b)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.tasks == nil {
@@ -43,7 +40,7 @@ func (s *memStore) LoadTask(id string) (*Batch, error) {
 	if !ok {
 		return nil, errNotFound(id)
 	}
-	return CloneBatch(b)
+	return copyBatch(b), nil
 }
 
 func (s *memStore) ListTasks() ([]*Batch, error) {
@@ -51,11 +48,7 @@ func (s *memStore) ListTasks() ([]*Batch, error) {
 	defer s.mu.Unlock()
 	out := make([]*Batch, 0, len(s.tasks))
 	for _, b := range s.tasks {
-		cp, err := CloneBatch(b)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, cp)
+		out = append(out, copyBatch(b))
 	}
 	return out, nil
 }
@@ -120,7 +113,7 @@ func TestRecordJSONShape(t *testing.T) {
 	require.NotEmpty(t, items)
 	first, ok := items[0].(map[string]any)
 	require.True(t, ok)
-	for _, key := range []string{"id", "input", "output", "args", "planArgs", "status", "attempts", "partialOutput", "durationMs"} {
+	for _, key := range []string{"id", "input", "output", "planArgs", "status", "attempts", "partialOutput", "durationMs"} {
 		assert.Contains(t, first, key)
 	}
 	option, ok := raw["option"].(map[string]any)

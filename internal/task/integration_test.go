@@ -3,6 +3,8 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,13 +113,8 @@ func TestBatchPlanRealMediaCombinations(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, plan.Jobs, 1)
 			assert.NoDirExists(t, opt.OutputPath)
-			var logs string
-			err = Execute(ctx, plan, func(e ffmpeg.Event) {
-				if e.Type == ffmpeg.EventLog {
-					logs += e.Message + "\n"
-				}
-			})
-			require.NoError(t, err, logs)
+			_, err = runViaQueue(ctx, plan, tc.sel)
+			require.NoError(t, err)
 			streams := probeStreams(t, plan.Jobs[0].Output)
 			counts := map[string]int{}
 			var subtitles []probedStream
@@ -154,7 +151,8 @@ func TestBatchPlanRealMediaCombinations(t *testing.T) {
 			}
 			before, err := os.ReadFile(plan.Jobs[0].Output)
 			require.NoError(t, err)
-			assert.ErrorIs(t, Execute(ctx, plan, nil), os.ErrExist, "重跑不得静默覆盖已有文件")
+			_, err = runViaQueue(ctx, plan, tc.sel)
+			assert.Error(t, err, "重跑不得静默覆盖已有文件")
 			after, err := os.ReadFile(plan.Jobs[0].Output)
 			require.NoError(t, err)
 			assert.Equal(t, before, after)
@@ -174,14 +172,8 @@ func TestBatchPlanExecutesSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(fx.input, "新增.mkv"), data, 0o644))
 	opt.InputPath, opt.OutputPath, opt.Advance = "不存在的输入", "不能使用的新输出", "-y"
-	var total int
-	err = Execute(context.Background(), plan, func(e ffmpeg.Event) {
-		if e.Type == ffmpeg.EventBatchStart {
-			total = e.Total
-		}
-	})
+	_, err = runViaQueue(context.Background(), plan, command.Selection{Convert: true})
 	require.NoError(t, err)
-	assert.Equal(t, 1, total)
 	assert.FileExists(t, plan.Jobs[0].Output)
 	assert.NoFileExists(t, filepath.Join(filepath.Dir(plan.Jobs[0].Output), "新增.mkv"))
 }
@@ -202,9 +194,8 @@ func TestAddingFontsPreservesExistingAttachmentMetadata(t *testing.T) {
 	opt.OutputPath = t.TempDir()
 	plan, err := command.BuildPlan(context.Background(), &opt, command.Selection{AddFonts: true})
 	require.NoError(t, err)
-	var logs string
-	err = Execute(context.Background(), plan, func(e ffmpeg.Event) { logs += e.Message + "\n" })
-	require.NoError(t, err, logs)
+	_, err = runViaQueue(context.Background(), plan, command.Selection{AddFonts: true})
+	require.NoError(t, err)
 	attachments := make(map[string]string)
 	for _, stream := range probeStreams(t, plan.Jobs[0].Output) {
 		if stream.Type == "attachment" {
@@ -215,4 +206,42 @@ func TestAddingFontsPreservesExistingAttachmentMetadata(t *testing.T) {
 		"原附件.bin": "application/octet-stream",
 		"测试.ttf":  "application/x-truetype-font",
 	}, attachments)
+}
+
+// runViaQueue 用正式队列执行计划快照，直到完成、暂停或超时。
+func runViaQueue(ctx context.Context, plan *command.BatchPlan, sel command.Selection) (*Batch, error) {
+	q := NewQueue(ctx, nil)
+	defer q.Stop()
+	b, err := q.Enqueue(plan, sel)
+	if err != nil {
+		return nil, err
+	}
+	if err := q.Start(b.ID); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(18 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	for time.Now().Before(deadline) {
+		snap, ok := q.BatchCopy(b.ID)
+		if !ok {
+			return nil, errors.New("任务已不在队列")
+		}
+		if snap.Status.Terminal() || snap.Status == StatusPaused {
+			if snap.Status == StatusDone {
+				return snap, nil
+			}
+			msg := string(snap.Status)
+			for _, it := range snap.Items {
+				if it.Error != "" {
+					msg = it.Error
+					break
+				}
+			}
+			return snap, fmt.Errorf("%s", msg)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil, errors.New("等待任务结束超时")
 }

@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/gsxhnd/batcher/internal/command"
@@ -335,11 +336,6 @@ func TestPresetDeleteUsesConfirmModal(t *testing.T) {
 	isolatePresets(t)
 	require.NoError(t, presets.Save([]presets.Preset{{Args: "a"}, {Args: "b"}}))
 	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.focus = panelPresets
-	m.presetCursor = m.presetUserOffset()
-	m.manualAdvance = "a" // 删除当前选中预设时应同步清空主表单
-
 	press(&m, "p")
 	m.presetCursor = 0
 	m.modal.focus = 0
@@ -357,7 +353,6 @@ func TestPresetDeleteUsesConfirmModal(t *testing.T) {
 	press(&m, "d")
 	press(&m, "enter")
 	assert.Equal(t, []presets.Preset{{Args: "b"}}, m.presets, "enter 确认后删除")
-	assert.Equal(t, "", m.manualAdvance, "删除当前选中预设后应清空已选参数")
 	require.Equal(t, modalPresetList, m.modal.kind)
 
 	m.presetCursor = 0
@@ -438,122 +433,6 @@ func TestModalSwallowsGlobalKeys(t *testing.T) {
 	assert.False(t, m.running)
 }
 
-// TestSublistModalCRUD 验证字幕面板的增删改在弹窗内完成。
-func TestSublistModalCRUD(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.openSubModal(-1)
-	require.NotNil(t, m.modal)
-	m.modal.fields[0].input.SetValue("ass")
-	m.modal.fields[1].input.SetValue("zh") // 非法语言码
-	m.modal.fields[2].input.SetValue("中文")
-	press(&m, "ctrl+s")
-	require.NotNil(t, m.modal, "非法语言码应留在弹窗")
-	assert.NotEmpty(t, m.modal.fields[1].err)
-	assert.Nil(t, findSub(m.subs, "ass"), "不应保存非法条目")
-
-	m.modal.fields[1].input.SetValue("chi")
-	press(&m, "ctrl+s")
-	assert.Nil(t, m.modal)
-	require.Len(t, m.subs, 1)
-	assert.Equal(t, command.SubtitleOption{Suffix: "ass", Lang: "chi", Title: "中文"}, m.subs[0])
-
-	m.openSubModal(0)
-	require.NotNil(t, m.modal, "编辑弹窗应回填")
-	assert.Equal(t, "ass", m.modal.fields[0].input.Value())
-	press(&m, "esc")
-
-	m.updateSubsPanel(tea.KeyPressMsg{Text: "d", Code: 'd'})
-	require.NotNil(t, m.modal, "删除应弹确认窗")
-	press(&m, "enter")
-	assert.Empty(t, m.subs, "确认后删除")
-}
-
-// TestSubModalDefaultTrack 验证弹窗内默认字幕流可勾选，且面板 3 按 t 可切换。
-func TestSubModalDefaultTrack(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.openSubModal(-1)
-	require.NotNil(t, m.modal)
-	require.Len(t, m.modal.fields, 4, "弹窗应包含后缀/语言/标题/默认轨道四个字段")
-	m.modal.fields[0].input.SetValue("chi.ass")
-	m.modal.fields[1].input.SetValue("chi")
-	m.modal.fields[2].input.SetValue("简体中文")
-	m.modal.focus = 3
-	require.False(t, m.modal.fields[3].Checked(), "默认轨道初始未勾选")
-
-	press(&m, "space")
-	require.True(t, m.modal.fields[3].Checked(), "space 应勾选默认轨道")
-	press(&m, "space")
-	require.False(t, m.modal.fields[3].Checked(), "再按 space 应取消勾选")
-	press(&m, "space")
-	press(&m, "ctrl+s") // 保存
-
-	assert.Nil(t, m.modal)
-	require.Len(t, m.subs, 1)
-	assert.True(t, m.subs[0].Default, "保存后应写入默认轨道标记")
-
-	m.updateSubsPanel(tea.KeyPressMsg{Text: "t", Code: 't'})
-	assert.False(t, m.subs[0].Default, "切换应取消默认标记")
-	m.updateSubsPanel(tea.KeyPressMsg{Text: "t", Code: 't'})
-	assert.True(t, m.subs[0].Default, "再切换应重新标记默认")
-
-	m.openSubModal(0)
-	require.NotNil(t, m.modal)
-	assert.True(t, m.modal.fields[3].Checked(), "编辑弹窗应回填默认标记")
-	press(&m, "esc")
-}
-
-func TestFormDefaultsStayAsPlaceholder(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.rebuildFields()
-	d := command.DefaultOption()
-	checks := map[string]string{
-		"input_path":    d.InputPath,
-		"input_format":  d.InputFormat,
-		"output_path":   d.OutputPath,
-		"output_format": d.OutputFormat,
-	}
-	for key, want := range checks {
-		f, ok := findField(&m.fields, key)
-		require.True(t, ok, key)
-		assert.Empty(t, f.input.Value(), "%s 默认值不应写成白色正文", key)
-		assert.Equal(t, want, f.input.Placeholder, key)
-		assert.Equal(t, want, f.resolved(), key)
-	}
-	opt, err := m.buildOption()
-	require.NoError(t, err)
-	assert.Equal(t, d.InputPath, opt.InputPath)
-	assert.Equal(t, d.InputFormat, opt.InputFormat)
-	assert.Equal(t, d.OutputPath, opt.OutputPath)
-	assert.Equal(t, d.OutputFormat, opt.OutputFormat)
-
-	path, _ := findField(&m.fields, "input_path")
-	path.input.SetValue("/videos")
-	opt, err = m.buildOption()
-	require.NoError(t, err)
-	assert.Equal(t, "/videos", opt.InputPath, "用户输入应覆盖默认值")
-}
-
-func TestFormEditingSwallowsGlobalKeys(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.ops = command.Selection{Convert: true}
-	m.rebuildFields()
-	m.beginFormEdit()
-	require.True(t, m.editing)
-
-	m.fields[0].input.SetValue("")
-	press(&m, "1")
-	assert.True(t, m.editing, "编辑态下数字键应输入")
-	assert.Equal(t, "1", m.fields[0].input.Value(), "字符应输入到字段里")
-
-	press(&m, "esc")
-	assert.False(t, m.editing, "esc 应退出编辑态")
-}
-
 func TestTryStartRunValidation(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
@@ -583,31 +462,10 @@ func TestTryStartRunValidation(t *testing.T) {
 	assert.False(t, m.running)
 }
 
-// TestPlanMsgStaleDiscard 验证过期 Plan 结果被丢弃。
-func TestPlanMsgStaleDiscard(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.planSeq = 3
-	m.planLoading = true
-
-	next, _ := m.Update(planMsg{seq: 2, plan: testPlan("a.mkv")})
-	m = next.(model)
-	assert.False(t, m.previewDone, "过期结果不应生效")
-	assert.Nil(t, m.files)
-
-	next, _ = m.Update(planMsg{seq: 3, plan: testPlan("a.mkv")})
-	m = next.(model)
-	assert.True(t, m.previewDone)
-	require.Len(t, m.files, 1)
-}
-
 func TestEnterTaskListDoesNotEnqueue(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops.Convert = true
-	m.rebuildFields()
 	testQueue(t, &m)
-	m.plan, m.previewDone = testPlan("a.mkv"), true
 
 	press(&m, "enter")
 	assert.Nil(t, m.modal, "任务列表里按回车不入队")
@@ -645,8 +503,6 @@ func TestSetFocusLeavesRunStopsFollow(t *testing.T) {
 func TestRunLockedFocusDuringExecution(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.ops.Convert = true
-	m.rebuildFields()
 	testQueue(t, &m)
 	plan := testPlanOut(t, "a.mkv")
 	batch, err := m.queue.Enqueue(plan, command.Selection{Convert: true})
@@ -660,7 +516,7 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	assert.Equal(t, before, len(m.queue.Snapshot()), "打开弹窗还不入队")
 	press(&m, "esc")
 	assert.Nil(t, m.modal)
-	m.enqueue(testPlanOut(t, "b.mkv"))
+	m.enqueue(testPlanOut(t, "b.mkv"), command.Selection{Convert: true})
 	assert.Len(t, m.queue.Snapshot(), before+1, "执行中创建的主任务排在后面")
 	assert.Contains(t, m.statusMsg, "按 x 开始")
 	press(&m, "enter")
@@ -790,7 +646,14 @@ func TestSavedTaskRemainsAfterRestart(t *testing.T) {
 	again.db = db
 	again.initQueue(make(chan tea.Msg, 8))
 	t.Cleanup(again.queue.Stop)
-	again.syncRoster()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		again.syncRosterFromStore()
+		if len(again.roster) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	require.NotEmpty(t, again.roster)
 	assert.Contains(t, again.roster[0].title, "等待执行")
@@ -806,15 +669,6 @@ func taskModalText(m *model) string {
 	return b.String()
 }
 
-func slicesAny(fields []field, key string) bool {
-	for _, f := range fields {
-		if f.def.key == key {
-			return true
-		}
-	}
-	return false
-}
-
 func findField(fields *[]field, key string) (*field, bool) {
 	for i := range *fields {
 		if (*fields)[i].def.key == key {
@@ -822,13 +676,4 @@ func findField(fields *[]field, key string) (*field, bool) {
 		}
 	}
 	return nil, false
-}
-
-func findSub(subs []command.SubtitleOption, suffix string) *command.SubtitleOption {
-	for i := range subs {
-		if subs[i].Suffix == suffix {
-			return &subs[i]
-		}
-	}
-	return nil
 }

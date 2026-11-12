@@ -3,6 +3,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -43,7 +44,11 @@ func Fonts(ctx context.Context, dir string) ([]string, error) {
 }
 
 // WalkFiles 递归遍历 root，返回文件名满足 match 的文件路径（跳过目录）。
+// 根目录本身是符号链接时会跟着走。名为 ._ 或其它点开头的文件和目录会被跳过。
 func WalkFiles(ctx context.Context, root, exclude string, match func(name string) bool) ([]string, error) {
+	if target, ok := symlinkDir(root); ok {
+		root = target
+	}
 	files := make([]string, 0)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
@@ -51,6 +56,13 @@ func WalkFiles(ctx context.Context, root, exclude string, match func(name string
 		}
 		if err != nil {
 			return fmt.Errorf("遍历路径 %s: %w", path, err)
+		}
+		name := entry.Name()
+		if path != root && strings.HasPrefix(name, ".") {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.IsDir() {
 			abs, err := filepath.Abs(path)
@@ -60,7 +72,9 @@ func WalkFiles(ctx context.Context, root, exclude string, match func(name string
 			if abs == exclude {
 				return filepath.SkipDir
 			}
-		} else if entry.Type().IsRegular() && match(entry.Name()) {
+			return nil
+		}
+		if match(name) && regularFile(path, entry) {
 			files = append(files, path)
 		}
 		return nil
@@ -79,11 +93,39 @@ func ListFiles(dir string) ([]string, error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
-			names = append(names, e.Name())
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
 		}
+		names = append(names, e.Name())
 	}
 	return names, nil
+}
+
+func symlinkDir(path string) (string, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return "", false
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	stat, err := os.Stat(target)
+	if err != nil || !stat.IsDir() {
+		return "", false
+	}
+	return target, true
+}
+
+func regularFile(path string, entry fs.DirEntry) bool {
+	if entry.Type().IsRegular() {
+		return true
+	}
+	if entry.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // Stem 返回去掉目录与扩展名后的文件名。
@@ -170,7 +212,7 @@ func pathKey(path string) (string, error) {
 // MakeDir 创建目录；路径已存在且为目录时直接成功。
 func MakeDir(fullPath string) error {
 	if fullPath == "" {
-		return fmt.Errorf("目录路径不能为空")
+		return errors.New("目录路径不能为空")
 	}
 
 	info, err := os.Stat(fullPath)

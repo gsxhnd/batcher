@@ -6,24 +6,32 @@ import "charm.land/lipgloss/v2"
 
 // 配色按深色终端设计：冷色强调、低饱和状态色，避免高亮把正文冲掉。
 const (
-	cAccent    = "73"  // 焦点边框、链接
-	cAccentHi  = "159" // 选中文字
-	cText      = "252"
-	cTextDim   = "246"
-	cMuted     = "243"
-	cBorder    = "240"
-	cBorderDim = "237"
-	cOk        = "114"
-	cErr       = "210"
-	cWarn      = "222"
-	cInfo      = "110"
-	cHeaderBg  = "236"
-	cSelectBg  = "24"
-	cKeyBg     = "238"
-	cBadgeBg   = "31"
-	cOkBg      = "22"
-	cErrBg     = "52"
-	cRunBg     = "23"
+	cAccent      = "73"  // 焦点边框、链接
+	cAccentHi    = "159" // 选中文字
+	cProgress    = "81"  // 进度条已完成段
+	cText        = "252"
+	cTextDim     = "246"
+	cMuted       = "243"
+	cBorder      = "240"
+	cBorderDim   = "237"
+	cDimBg       = "234" // 弹窗打开时压暗主界面
+	cInput       = "255"
+	cOnColor     = "231"
+	cPlaceholder = "241"
+	cLabel       = "152"
+	cStepOk      = "157"
+	cStepErr     = "224"
+	cOk          = "114"
+	cErr         = "210"
+	cWarn        = "222"
+	cInfo        = "110"
+	cHeaderBg    = "236"
+	cSelectBg    = "24"
+	cKeyBg       = "238"
+	cBadgeBg     = "31"
+	cOkBg        = "22"
+	cErrBg       = "52"
+	cRunBg       = "23"
 )
 
 var (
@@ -49,7 +57,7 @@ var (
 
 	// selectedRowStyle 铺满侧栏一行的选中底色。只用于整行渲染，避免套在已有颜色上被重置。
 	selectedRowStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("231")).
+				Foreground(lipgloss.Color(cInput)).
 				Background(lipgloss.Color(cSelectBg)).
 				Bold(true)
 
@@ -63,7 +71,7 @@ var (
 			Foreground(lipgloss.Color(cWarn))
 
 	labelStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("152")).
+			Foreground(lipgloss.Color(cLabel)).
 			Width(16)
 
 	labelFocusedStyle = lipgloss.NewStyle().
@@ -89,19 +97,15 @@ var (
 
 	// dragSelectStyle 鼠标拖选时盖住被选中的格子。
 	dragSelectStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("231")).
+			Foreground(lipgloss.Color(cOnColor)).
 			Background(lipgloss.Color(cSelectBg))
-
-	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(cOk)).
-			Bold(true)
 
 	statusStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(cInfo))
 
 	appBadgeStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("231")).
+			Foreground(lipgloss.Color(cOnColor)).
 			Background(lipgloss.Color(cBadgeBg)).
 			Padding(0, 1)
 
@@ -119,12 +123,12 @@ var (
 
 	stepOkStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("157")).
+			Foreground(lipgloss.Color(cStepOk)).
 			Background(lipgloss.Color(cOkBg))
 
 	stepErrStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("224")).
+			Foreground(lipgloss.Color(cStepErr)).
 			Background(lipgloss.Color(cErrBg))
 
 	dividerStyle = lipgloss.NewStyle().
@@ -135,7 +139,7 @@ var (
 
 	helpKeyStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("231")).
+			Foreground(lipgloss.Color(cOnColor)).
 			Background(lipgloss.Color(cKeyBg)).
 			Padding(0, 1)
 

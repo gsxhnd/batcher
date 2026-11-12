@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -27,7 +28,7 @@ func (m *model) openTaskModal() tea.Cmd {
 		{key: "advance", label: "高级参数"},
 		{key: "fonts_path", label: "字体文件夹"},
 	}
-	fields := make([]field, 0, len(defs)+4)
+	fields := make([]field, 0, len(defs)+len(subFieldDefs))
 	for _, def := range defs {
 		nf := newField(def)
 		nf.applyDefaults(&d)
@@ -140,7 +141,7 @@ func (m *model) updatePresetPick(key string) tea.Cmd {
 		md.picking = false
 		m.checkTaskOp("op_subtitle")
 		m.appendSubtitleFields(subtitleDefaults())
-		md.focus = len(md.fields) - 4
+		md.focus = len(md.fields) - len(subFieldDefs)
 		return focusField(md.fields, md.focus)
 	case "ctrl+d":
 		md.picking = false
@@ -220,11 +221,12 @@ func (m *model) removeSubtitleFields() {
 			break
 		}
 	}
-	if start < 0 || start+4 > len(md.fields) {
+	n := len(subFieldDefs)
+	if start < 0 || start+n > len(md.fields) {
 		md.err = "把光标移到字幕上再按 ctrl+d"
 		return
 	}
-	md.fields = slices.Delete(md.fields, start, start+4)
+	md.fields = slices.Delete(md.fields, start, start+n)
 	if md.focus >= len(md.fields) {
 		md.focus = max(len(md.fields)-1, 0)
 	}
@@ -233,16 +235,56 @@ func (m *model) removeSubtitleFields() {
 
 // saveTaskModal 校验弹窗里的全部字段，扫描目录并创建任务。失败时弹窗保持打开。
 func (m *model) saveTaskModal() tea.Cmd {
-	if m.creating {
+	if m.creating || m.modal == nil {
 		return nil
 	}
-	md := m.modal
-	if md == nil {
-		return nil
+	sel, opt, cmd, ok := m.collectTaskForm(m.modal)
+	if !ok {
+		return cmd
 	}
+	return m.startTaskScan(sel, opt)
+}
+
+// collectTaskForm 读取并校验新建任务表单。校验失败时 ok 为 false，cmd 用来把光标移回出错字段。
+func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatchOption, tea.Cmd, bool) {
 	md.err = ""
 	sel := command.Selection{}
 	opt := command.DefaultOption()
+	subs := readSubtitleGroups(md.fields, &sel, &opt)
+	if !sel.Any() {
+		md.err = "请至少勾选一项操作"
+		return sel, opt, focusField(md.fields, 0), false
+	}
+	if sel.AddFonts && strings.TrimSpace(opt.FontsPath) == "" {
+		md.err = "勾选了添加字体，必须填写字体文件夹"
+		return sel, opt, focusTaskField(md, "fonts_path"), false
+	}
+	if sel.Convert && strings.TrimSpace(opt.Advance) != "" {
+		if _, err := commandline.Parse(opt.Advance); err != nil {
+			md.err = err.Error()
+			return sel, opt, focusTaskField(md, "advance"), false
+		}
+	}
+	if !sel.Convert {
+		opt.Advance = ""
+	}
+	if !sel.AddFonts {
+		opt.FontsPath = ""
+	}
+	if !sel.AddSubtitle {
+		opt.Subtitles = nil
+		return sel, opt, nil, true
+	}
+	if err := validateSubtitles(subs); err != "" {
+		md.err = err
+		return sel, opt, nil, false
+	}
+	opt.Subtitles = subs
+	return sel, opt, nil, true
+}
+
+// readSubtitleGroups 从字段里收集操作勾选、路径和字幕组。空白字幕组会被丢掉。
+func readSubtitleGroups(fields []field, sel *command.Selection, opt *command.VideoBatchOption) []command.SubtitleOption {
 	var subs []command.SubtitleOption
 	var cur *command.SubtitleOption
 	flush := func() {
@@ -256,8 +298,8 @@ func (m *model) saveTaskModal() tea.Cmd {
 		}
 		cur = nil
 	}
-	for i := range md.fields {
-		f := &md.fields[i]
+	for i := range fields {
+		f := &fields[i]
 		f.err = ""
 		switch f.def.key {
 		case "op_convert":
@@ -267,7 +309,7 @@ func (m *model) saveTaskModal() tea.Cmd {
 		case "op_fonts":
 			sel.AddFonts = f.checked
 		case "input_path", "input_format", "output_path", "output_format", "advance", "fonts_path":
-			setStringOption(&opt, f.def.key, f.resolved())
+			setStringOption(opt, f.def.key, f.resolved())
 		case "sub_suffix":
 			flush()
 			cur = &command.SubtitleOption{Suffix: f.resolved()}
@@ -289,63 +331,48 @@ func (m *model) saveTaskModal() tea.Cmd {
 		}
 	}
 	flush()
-	if !sel.Any() {
-		md.err = "请至少勾选一项操作"
-		return focusField(md.fields, 0)
-	}
-	if sel.AddFonts && strings.TrimSpace(opt.FontsPath) == "" {
-		md.err = "勾选了添加字体，必须填写字体文件夹"
-		return focusTaskField(md, "fonts_path")
-	}
-	if sel.Convert && strings.TrimSpace(opt.Advance) != "" {
-		if _, err := commandline.Parse(opt.Advance); err != nil {
-			md.err = err.Error()
-			return focusTaskField(md, "advance")
-		}
-	}
-	if !sel.Convert {
-		opt.Advance = ""
-	}
-	if !sel.AddFonts {
-		opt.FontsPath = ""
-	}
-	if sel.AddSubtitle {
-		if len(subs) == 0 {
-			md.err = "已勾选添加字幕，请至少填写一条"
-			return nil
-		}
-		defaults := 0
-		for i, sub := range subs {
-			if strings.TrimSpace(sub.Suffix) == "" {
-				md.err = fmt.Sprintf("字幕 %d 的后缀不能为空", i+1)
-				return nil
-			}
-			if !isISO639Code(sub.Lang) {
-				md.err = fmt.Sprintf("字幕 %d 的语言需为三字母码，如 chi", i+1)
-				return nil
-			}
-			if sub.Default {
-				defaults++
-			}
-		}
-		if defaults > 1 {
-			md.err = "最多只能有一条默认字幕"
-			return nil
-		}
-		opt.Subtitles = subs
-	} else {
-		opt.Subtitles = nil
-	}
+	return subs
+}
 
+func validateSubtitles(subs []command.SubtitleOption) string {
+	if len(subs) == 0 {
+		return "已勾选添加字幕，请至少填写一条"
+	}
+	defaults := 0
+	for i, sub := range subs {
+		if strings.TrimSpace(sub.Suffix) == "" {
+			return fmt.Sprintf("字幕 %d 的后缀不能为空", i+1)
+		}
+		if !isISO639Code(sub.Lang) {
+			return fmt.Sprintf("字幕 %d 的语言需为三字母码，如 chi", i+1)
+		}
+		if sub.Default {
+			defaults++
+		}
+	}
+	if defaults > 1 {
+		return "最多只能有一条默认字幕"
+	}
+	return ""
+}
+
+func (m *model) startTaskScan(sel command.Selection, opt command.VideoBatchOption) tea.Cmd {
 	m.createSel = sel
 	m.creating = true
 	m.createSeq++
 	seq := m.createSeq
-	ctx := m.ctx
-	optCopy := opt
-	md.err = "正在扫描并生成任务…"
+	if m.createCancel != nil {
+		m.createCancel()
+	}
+	parent := m.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	m.createCancel = cancel
+	m.modal.err = "正在扫描并生成任务…"
 	return func() tea.Msg {
-		plan, err := command.BuildPlan(ctx, &optCopy, sel)
+		plan, err := command.BuildPlan(ctx, &opt, sel)
 		return createPlanMsg{seq: seq, plan: plan, err: err}
 	}
 }
@@ -393,13 +420,12 @@ func enqueueInputSummary(plan *command.BatchPlan) string {
 }
 
 func focusTaskField(md *modal, key string) tea.Cmd {
-	for i := range md.fields {
-		if md.fields[i].def.key == key {
-			md.focus = i
-			return focusField(md.fields, i)
-		}
+	_, i := fieldByKey(md.fields, key)
+	if i < 0 {
+		return nil
 	}
-	return nil
+	md.focus = i
+	return focusField(md.fields, i)
 }
 
 func (m model) presetManageCount() int {
@@ -423,7 +449,6 @@ func (m *model) notePresetList(msg string) {
 
 // openPresetList 打开转码预设管理。列表来自数据库，每一条都可以编辑和删除。
 func (m *model) openPresetList() {
-	m.managePresets = true
 	n := m.presetManageCount()
 	if n == 0 {
 		m.presetCursor = 0
@@ -440,7 +465,6 @@ func (m *model) updatePresetList(key string) tea.Cmd {
 	}
 	switch key {
 	case "esc":
-		m.managePresets = false
 		m.modal = nil
 		return nil
 	case "up", "k":
@@ -499,25 +523,13 @@ func (m *model) updatePresetList(key string) tea.Cmd {
 
 // copyPresetModal 把当前选中的内置或自定义预设复制成一条新的自定义预设。
 func (m *model) copyPresetModal() tea.Cmd {
-	if m.managePresets {
-		idx, ok := m.listedPreset()
-		if !ok {
-			m.notePresetList("还没有预设，按 a 从空白新建")
-			return nil
-		}
-		p := m.presets[idx]
-		return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
+	idx, ok := m.listedPreset()
+	if !ok {
+		m.notePresetList("还没有预设，按 a 从空白新建")
+		return nil
 	}
-	if m.presetCursor >= 0 && m.presetCursor < len(m.builtins) {
-		b := m.builtins[m.presetCursor]
-		return m.openPresetModal(-1, presets.Preset{Name: b.Name, Args: b.Args})
-	}
-	if idx, ok := m.selectedUserPreset(); ok {
-		p := m.presets[idx]
-		return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
-	}
-	m.setStatus("先选中一条预设，再按 c 复制")
-	return nil
+	p := m.presets[idx]
+	return m.openPresetModal(-1, presets.Preset{Name: p.Name, Args: p.Args})
 }
 
 func (m model) presetListContent() string {
@@ -751,18 +763,22 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		fieldsOf(fonts, nil)
 	}
 
-	if subOn {
-		rule()
-		head("字幕", "语言用三字母码，例如 chi / eng；最多一条默认字幕")
-		if len(subs) == 0 {
-			add(-1, "  "+descStyle.Render("还没有字幕组，按 ctrl+n 添加"))
-		}
+	appendTaskSubtitles(md, subs, subOn, boxW, add, head, rule)
+	return lines
+}
+
+func appendTaskSubtitles(md *modal, subs []int, subOn bool, boxW int, add func(int, string), head func(string, string), rule func()) {
+	if !subOn {
+		return
+	}
+	rule()
+	head("字幕", "语言用三字母码，例如 chi / eng；最多一条默认字幕")
+	if len(subs) == 0 {
+		add(-1, "  "+descStyle.Render("还没有字幕组，按 ctrl+n 添加"))
+		return
 	}
 	group := 0
 	openGroup := 0
-	if !subOn {
-		return lines
-	}
 	for _, idx := range subs {
 		f := &md.fields[idx]
 		if f.def.key == "sub_suffix" {
@@ -785,7 +801,6 @@ func (m model) taskModalLines(boxW int) []taskLine {
 			add(idx, ln)
 		}
 	}
-	return lines
 }
 
 // nextTaskFocus 在新建任务表单里移动光标，跳过折叠字幕组里的字段。
@@ -929,7 +944,7 @@ func taskFieldLines(f *field, focused, picking bool, boxW int, extra string) []s
 		}
 		body = lbl + " " + codeStyle.Render(label) + "  " + descStyle.Render(hint)
 	default:
-		f.input.SetWidth(inputWidth(boxW))
+		f.useWidth(inputWidth(boxW))
 		body = lbl + " " + f.input.View()
 	}
 	lines := []string{lead + body + "\n"}

@@ -8,7 +8,6 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/commandline"
 	"github.com/gsxhnd/batcher/internal/presets"
 )
@@ -18,11 +17,19 @@ type modalKind int
 
 const (
 	modalPreset     modalKind = iota // 转码参数预设的新增/编辑（名称 + 参数）
-	modalSub                         // 单条字幕的新增/编辑（后缀/语言/标题）
 	modalConfirm                     // 通用确认（删除等），enter 确认 esc 取消
 	modalHelp                        // 快捷键帮助（? 键开关）
 	modalTask                        // 新建任务：全部字段在同一个弹窗里
 	modalPresetList                  // 转码预设管理列表
+)
+
+// modalReturn 是这个弹窗关闭后要回到的界面。只记在当前弹窗上，
+// 离开预设管理之后，别的确认框按 esc 不会再把列表打开。
+type modalReturn int
+
+const (
+	returnNone modalReturn = iota
+	returnPresetList
 )
 
 // modal 是覆盖在主界面上的浮层。非空时全部按键由弹窗处理，
@@ -39,6 +46,7 @@ type modal struct {
 	vp        viewport.Model // 帮助弹窗的滚动视口
 	// onConfirm 确认回调：由打开处捕获需要的下标等上下文，内部完成变更并清理弹窗。
 	onConfirm func(*model) tea.Cmd
+	returnTo  modalReturn
 }
 
 // openPresetModal 打开转码参数编辑弹窗。index=-1 表示新增，p 为表单初始值。
@@ -56,44 +64,22 @@ func (m *model) openPresetModal(index int, p presets.Preset) tea.Cmd {
 	if index >= 0 {
 		title = fmt.Sprintf("编辑自定义预设 %d", index+1)
 	}
-	m.modal = &modal{kind: modalPreset, title: title, fields: fields, editIndex: index}
-	return m.modal.fields[0].input.Focus()
-}
-
-// openSubModal 打开单条字幕编辑弹窗。index=-1 表示新增，默认沿用上一条的扩展名。
-func (m *model) openSubModal(index int) tea.Cmd {
-	var entry command.SubtitleOption
-	if index >= 0 && index < len(m.subs) {
-		entry = m.subs[index]
-	} else if len(m.subs) > 0 {
-		entry.Suffix = m.subs[len(m.subs)-1].Suffix
+	back := returnNone
+	if m.modal != nil && m.modal.kind == modalPresetList {
+		back = returnPresetList
 	}
-
-	values := map[string]string{
-		"sub_suffix": entry.Suffix,
-		"sub_lang":   entry.Lang,
-		"sub_title":  entry.Title,
-	}
-	fields := make([]field, 0, len(subFieldDefs))
-	for _, def := range subFieldDefs {
-		nf := newField(def)
-		nf.applySubDefaults()
-		nf.input.SetValue(values[def.key])
-		nf.checked = entry.Default // bool 字段从条目读取勾选状态
-		fields = append(fields, nf)
-	}
-	title := "新增字幕轨道"
-	if index >= 0 {
-		title = fmt.Sprintf("编辑字幕轨道 %d", index+1)
-	}
-	m.modal = &modal{kind: modalSub, title: title, fields: fields, editIndex: index}
+	m.modal = &modal{kind: modalPreset, title: title, fields: fields, editIndex: index, returnTo: back}
 	return m.modal.fields[0].input.Focus()
 }
 
 // openConfirmModal 打开通用确认弹窗，onConfirm 里完成实际变更并负责关闭弹窗。
 // 内容超过一屏时可以上下滚动，enter 仍然确认。
 func (m *model) openConfirmModal(title, prompt string, onConfirm func(*model) tea.Cmd) {
-	m.modal = &modal{kind: modalConfirm, title: title, prompt: prompt, onConfirm: onConfirm}
+	back := returnNone
+	if m.modal != nil && m.modal.kind == modalPresetList {
+		back = returnPresetList
+	}
+	m.modal = &modal{kind: modalConfirm, title: title, prompt: prompt, onConfirm: onConfirm, returnTo: back}
 	m.layoutConfirm()
 }
 
@@ -106,6 +92,12 @@ func (m *model) openHelpModal() {
 
 // helpModalSize 返回帮助弹窗的宽度与视口内容宽度。
 func (m model) helpModalSize() (w, inner int) {
+	w = min(84, max(m.width-4, 12))
+	return w, max(w-4, 8)
+}
+
+// confirmModalSize 返回确认弹窗的宽度。折行和边框用同一宽度，避免长路径被截断。
+func (m model) confirmModalSize() (w, inner int) {
 	w = min(84, max(m.width-4, 12))
 	return w, max(w-4, 8)
 }
@@ -133,9 +125,9 @@ func (m *model) layoutConfirm() {
 	if md == nil || md.kind != modalConfirm {
 		return
 	}
-	_, inner := m.helpModalSize()
+	_, inner := m.confirmModalSize()
 	maxH := max(m.bodyH()-6, 4)
-	wrapped := wrapText(md.prompt, inner)
+	wrapped := wrapText(md.prompt, max(inner-2, 4))
 	n := 1
 	if wrapped != "" {
 		n = len(strings.Split(strings.TrimSuffix(wrapped, "\n"), "\n"))
@@ -213,7 +205,11 @@ func helpText() string {
 func (m model) modalView() string {
 	md := m.modal
 	w, _ := m.helpModalSize()
-	if md.kind != modalHelp && md.kind != modalTask {
+	switch md.kind {
+	case modalHelp, modalTask:
+	case modalConfirm:
+		w, _ = m.confirmModalSize()
+	default:
 		w = min(64, max(m.width-4, 12))
 	}
 	var content string
@@ -229,11 +225,13 @@ func (m model) modalView() string {
 			content = md.vp.View()
 			break
 		}
+		_, inner := m.confirmModalSize()
+		wrapped := wrapText(md.prompt, max(inner-2, 4))
 		var b strings.Builder
-		for _, line := range strings.Split(md.prompt, "\n") {
+		for _, line := range strings.Split(wrapped, "\n") {
 			b.WriteString("  " + line + "\n")
 		}
-		content = b.String()
+		content = strings.TrimSuffix(b.String(), "\n")
 	default:
 		var b strings.Builder
 		for i := range md.fields {
@@ -263,7 +261,7 @@ func (m model) modalView() string {
 				b.WriteString("  " + lbl + " " + codeStyle.Render(label) + " " + descStyle.Render("←/→ 切换") + "\n")
 				continue
 			}
-			f.input.SetWidth(inputWidth(w))
+			f.useWidth(inputWidth(w))
 			b.WriteString("  " + lbl + " " + f.input.View() + "\n")
 			if f.err != "" {
 				b.WriteString("  " + errorStyle.Render("× "+f.err) + "\n")
@@ -271,9 +269,6 @@ func (m model) modalView() string {
 		}
 		if md.err != "" {
 			b.WriteString("  " + errorStyle.Render("× "+md.err) + "\n")
-		}
-		if md.kind == modalSub {
-			b.WriteString("  " + descStyle.Render("灰色为默认值，留空即使用；多语言文件可填 chi.ass") + "\n")
 		}
 		b.WriteString("  " + descStyle.Render("enter 下一项（末项保存）· ctrl+s 保存 · esc 取消") + "\n")
 		content = b.String()
@@ -285,79 +280,97 @@ func (m model) modalView() string {
 func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
-		md := m.modal
-		if md.kind == modalPreset || md.kind == modalSub || md.kind == modalTask {
-			if len(md.fields) == 0 {
-				return nil
-			}
-			f := &md.fields[md.focus]
-			if f.def.kind != fieldBool && f.def.kind != fieldChoice {
-				var cmd tea.Cmd
-				f.input, cmd = f.input.Update(msg)
-				if md.kind == modalTask {
-					m.syncTaskOutputPlaceholder()
-				}
-				return cmd
-			}
-		}
-		return nil
+		return m.updateModalInput(msg)
 	}
 	md := m.modal
-	if md.kind == modalHelp {
-		switch key.String() {
-		case "esc", "q", "?", "enter", "space", "y":
-			m.modal = nil
-			return nil
-		case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
-			var cmd tea.Cmd
-			m.modal.vp, cmd = m.modal.vp.Update(msg)
-			return cmd
-		}
-		return nil
-	}
-	if md.kind == modalConfirm {
-		switch key.String() {
-		case "enter", "y":
-			m.modal = nil
-			if md.onConfirm != nil {
-				return md.onConfirm(m)
-			}
-			return nil
-		case "esc", "n", "q":
-			m.modal = nil
-			if m.managePresets {
-				m.openPresetList()
-			}
-			return nil
-		case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
-			if md.vp.Height() > 0 {
-				var cmd tea.Cmd
-				m.modal.vp, cmd = m.modal.vp.Update(msg)
-				return cmd
-			}
-			return nil
-		}
-		return nil
-	}
-	if md.kind == modalPresetList {
+	switch md.kind {
+	case modalHelp:
+		return m.updateHelpModal(key, msg)
+	case modalConfirm:
+		return m.updateConfirmModal(key, msg)
+	case modalPresetList:
 		return m.updatePresetList(key.String())
 	}
 	if md.kind == modalTask && md.picking {
 		return m.updatePresetPick(key.String())
 	}
+	return m.updateFormModal(key, msg)
+}
 
+// updateModalInput 把粘贴和输入框内部消息交给当前文本字段。
+func (m *model) updateModalInput(msg tea.Msg) tea.Cmd {
+	md := m.modal
+	if (md.kind != modalPreset && md.kind != modalTask) || len(md.fields) == 0 {
+		return nil
+	}
+	f := &md.fields[md.focus]
+	if f.def.kind == fieldBool || f.def.kind == fieldChoice {
+		return nil
+	}
+	var cmd tea.Cmd
+	f.input, cmd = f.input.Update(msg)
+	if md.kind == modalTask {
+		m.syncTaskOutputPlaceholder()
+	}
+	return cmd
+}
+
+func (m *model) updateHelpModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
+	switch key.String() {
+	case "esc", "q", "?", "enter", "space", "y":
+		m.modal = nil
+		return nil
+	case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+		var cmd tea.Cmd
+		m.modal.vp, cmd = m.modal.vp.Update(msg)
+		return cmd
+	}
+	return nil
+}
+
+func (m *model) updateConfirmModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
+	md := m.modal
+	switch key.String() {
+	case "enter", "y":
+		m.modal = nil
+		if md.onConfirm != nil {
+			return md.onConfirm(m)
+		}
+		return nil
+	case "esc", "n", "q":
+		back := md.returnTo
+		m.modal = nil
+		if back == returnPresetList {
+			m.openPresetList()
+		}
+		return nil
+	case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+		if md.vp.Height() > 0 {
+			var cmd tea.Cmd
+			m.modal.vp, cmd = m.modal.vp.Update(msg)
+			return cmd
+		}
+	}
+	return nil
+}
+
+func (m *model) updateFormModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
+	md := m.modal
 	switch key.String() {
 	case "esc":
-		if md.kind == modalPreset && m.managePresets {
-			m.openPresetList()
-			return nil
-		}
+		back := md.returnTo
 		if md.kind == modalTask {
 			m.createSeq++
 			m.creating = false
+			if m.createCancel != nil {
+				m.createCancel()
+				m.createCancel = nil
+			}
 		}
 		m.modal = nil
-		m.managePresets = false
+		if back == returnPresetList {
+			m.openPresetList()
+		}
 		return nil
 	case "tab", "down":
 		if md.kind == modalTask {
@@ -399,7 +412,7 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 		if md.kind == modalTask {
 			m.checkTaskOp("op_subtitle")
 			m.appendSubtitleFields(subtitleDefaults())
-			md.focus = len(md.fields) - 4
+			md.focus = len(md.fields) - len(subFieldDefs)
 			return focusField(md.fields, md.focus)
 		}
 		return nil
@@ -450,8 +463,6 @@ func (m *model) saveModal() tea.Cmd {
 	switch m.modal.kind {
 	case modalPreset:
 		return m.savePresetModal()
-	case modalSub:
-		return m.saveSubModal()
 	case modalTask:
 		return m.saveTaskModal()
 	}
@@ -481,19 +492,16 @@ func (m *model) savePresetModal() tea.Cmd {
 	}
 	next := slices.Clone(m.presets)
 	if md.editIndex >= 0 && md.editIndex < len(next) {
-		// 若被编辑的正是当前使用中的预设，保存后需同步主表单里的高级参数。
-		oldArgs := m.presets[md.editIndex].Args
 		next[md.editIndex] = entry
 		if err := m.persistPresets(next, "已更新"); err != nil {
 			md.err = "保存失败: " + err.Error()
 			return nil
 		}
-		if m.managePresets {
+		if md.returnTo == returnPresetList {
 			m.presetCursor = md.editIndex
 		} else {
 			m.presetCursor = m.presetUserOffset() + md.editIndex
 		}
-		m.syncManualAdvance(oldArgs, entry.Args)
 	} else {
 		// 新增不影响当前选中的预设参数，只把光标指向新条目。
 		next = append(next, entry)
@@ -501,66 +509,16 @@ func (m *model) savePresetModal() tea.Cmd {
 			md.err = "保存失败: " + err.Error()
 			return nil
 		}
-		if m.managePresets {
+		if md.returnTo == returnPresetList {
 			m.presetCursor = len(next) - 1
 		} else {
 			m.presetCursor = m.presetCount() - 2 // 手动输入项之前
 		}
 	}
+	back := md.returnTo
 	m.modal = nil
-	if m.managePresets {
+	if back == returnPresetList {
 		m.openPresetList()
-		return nil
 	}
-	return m.schedulePlan(planDebounceDelay)
-}
-
-// syncManualAdvance 当被编辑的预设正是当前使用中的参数时，同步主表单里的高级参数字段。
-func (m *model) syncManualAdvance(before, after string) {
-	if before != "" && m.manualAdvance != before {
-		return // 编辑的不是当前选中的预设
-	}
-	if before != "" {
-		m.manualAdvance = after
-	}
-	for i := range m.fields {
-		if m.fields[i].def.key == "advance" && (before == "" || m.fields[i].input.Value() == before) {
-			m.fields[i].input.SetValue(after)
-		}
-	}
-}
-
-// saveSubModal 校验并保存字幕弹窗：留空字段使用默认值，语言码需为 ISO 639-2 三字母小写码。
-func (m *model) saveSubModal() tea.Cmd {
-	md := m.modal
-	suffix := md.fields[0].resolved()
-	lang := md.fields[1].resolved()
-	title := md.fields[2].resolved()
-	if suffix == "" {
-		md.fields[0].err = "必填"
-		return focusField(md.fields, 0)
-	}
-	if !isISO639Code(lang) {
-		md.fields[1].err = "需为 ISO 639-2 三字母码，如 chi / eng / jpn"
-		return focusField(md.fields, 1)
-	}
-	entry := command.SubtitleOption{
-		Suffix:  suffix,
-		Lang:    lang,
-		Title:   title,
-		Default: md.fields[3].Checked(),
-	}
-	if entry.Default {
-		for i := range m.subs {
-			m.subs[i].Default = false
-		}
-	}
-	if md.editIndex >= 0 && md.editIndex < len(m.subs) {
-		m.subs[md.editIndex] = entry
-	} else {
-		m.subs = append(m.subs, entry)
-		m.subCursor = len(m.subs) - 1
-	}
-	m.modal = nil
-	return m.schedulePlan(planDebounceDelay)
+	return nil
 }
