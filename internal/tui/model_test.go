@@ -701,6 +701,34 @@ func TestIsISO639Code(t *testing.T) {
 	}
 }
 
+func TestSavedTaskRemainsAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.OpenDir(dir)
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	m := newModel()
+	m.db = db
+	testQueue(t, &m)
+	_, err = m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	require.NoError(t, err)
+
+	again := newModel()
+	again.db = db
+	again.initQueue(make(chan tea.Msg, 8))
+	t.Cleanup(again.queue.Stop)
+	again.syncRoster()
+
+	require.NotEmpty(t, again.roster)
+	assert.Contains(t, again.roster[0].title, "等待执行")
+}
+
 // ---------- 辅助 ----------
 
 func taskModalText(m *model) string {
