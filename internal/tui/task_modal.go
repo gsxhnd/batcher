@@ -256,7 +256,7 @@ func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatc
 		return sel, opt, focusField(md.fields, 0), false
 	}
 	if sel.AddFonts && strings.TrimSpace(opt.FontsPath) == "" {
-		m.setStatus("× 勾选了添加字体，必须填写字体文件夹")
+		m.setStatus("× 添加字体需要填写字体文件夹")
 		return sel, opt, focusTaskField(md, "fonts_path"), false
 	}
 	if sel.Convert && strings.TrimSpace(opt.Advance) != "" {
@@ -336,15 +336,15 @@ func readSubtitleGroups(fields []field, sel *command.Selection, opt *command.Vid
 
 func validateSubtitles(subs []command.SubtitleOption) string {
 	if len(subs) == 0 {
-		return "已勾选添加字幕，请至少填写一条"
+		return "至少填写一条字幕"
 	}
 	defaults := 0
 	for i, sub := range subs {
 		if strings.TrimSpace(sub.Suffix) == "" {
-			return fmt.Sprintf("字幕 %d 的后缀不能为空", i+1)
+			return fmt.Sprintf("字幕 %d 后缀不能为空", i+1)
 		}
 		if !isISO639Code(sub.Lang) {
-			return fmt.Sprintf("字幕 %d 的语言需为三字母码，如 chi", i+1)
+			return fmt.Sprintf("字幕 %d 语言需为三字母码，如 chi", i+1)
 		}
 		if sub.Default {
 			defaults++

@@ -35,6 +35,7 @@ type planner struct {
 }
 
 // BuildPlan 扫描输入并生成任务，不写入文件、不创建目录，也不启动外部进程。
+// 错误消息保持精简：界面表单里已经能看到用户填的路径，不再重复。
 func BuildPlan(ctx context.Context, opt *VideoBatchOption, sel Selection) (*BatchPlan, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -45,7 +46,7 @@ func BuildPlan(ctx context.Context, opt *VideoBatchOption, sel Selection) (*Batc
 	}
 	jobs, err := p.planJobs(ctx, sel)
 	if err != nil {
-		return nil, fmt.Errorf("生成任务计划: %w", err)
+		return nil, err
 	}
 	return &BatchPlan{Jobs: jobs, option: *p.option}, nil
 }
@@ -91,7 +92,7 @@ func newPlanner(opt *VideoBatchOption) (*planner, error) {
 		return nil, errors.New("输出目录不能为空")
 	}
 	if info, err := os.Stat(opt.OutputPath); err == nil && !info.IsDir() {
-		return nil, fmt.Errorf("输出路径不是目录: %s", opt.OutputPath)
+		return nil, errors.New("输出路径不是目录")
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("检查输出目录: %w", err)
 	}
@@ -118,6 +119,14 @@ func (p *planner) fontsParams(ctx context.Context) ([]string, error) {
 		return nil, nil
 	}
 
+	// 先确认目录存在，给出一句短提示；遍历错误会带上一长串系统路径，
+	// 表单里已经能看到用户填的目录，toast 里不需要重复。
+	if _, err := os.Stat(p.option.FontsPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, errors.New("字体目录不存在")
+		}
+		return nil, fmt.Errorf("检查字体目录: %w", err)
+	}
 	fontsList, err := media.Fonts(ctx, p.option.FontsPath)
 	if err != nil {
 		return nil, err
@@ -132,7 +141,7 @@ func (p *planner) fontsParams(ctx context.Context) ([]string, error) {
 		attachPath := filepath.ToSlash(fontPath)
 		base := strings.ToLower(path.Base(attachPath))
 		if prev, ok := seenName[base]; ok {
-			return nil, fmt.Errorf("字体文件名重复：%s 与 %s", prev, fontPath)
+			return nil, fmt.Errorf("字体文件名重复：%s 与 %s", path.Base(prev), path.Base(fontPath))
 		}
 		seenName[base] = fontPath
 		fontsCmdList = append(fontsCmdList,
@@ -153,7 +162,7 @@ func (p *planner) advanceArgs() ([]string, error) {
 	}
 	for _, arg := range args {
 		if arg == "-i" || arg == "-y" || arg == "-stdin" {
-			return nil, fmt.Errorf("高级参数不允许使用 %s；输入由任务管理，已有输出文件不会覆盖", arg)
+			return nil, fmt.Errorf("高级参数不允许使用 %s", arg)
 		}
 	}
 	return args, nil
@@ -213,7 +222,7 @@ func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
 
 func (p *planner) checkPlanInputs(sel Selection) error {
 	if !sel.Any() {
-		return errors.New("至少需要选择一个操作（转码/添加字幕/添加字体）")
+		return errors.New("至少需要选择一个操作")
 	}
 	if p.option.InputPath == "" || p.option.InputFormat == "" || p.option.OutputFormat == "" {
 		return errors.New("输入路径、输入后缀和输出后缀不能为空")
@@ -234,7 +243,7 @@ func (p *planner) planExtras(ctx context.Context, sel Selection) (fontsParams, a
 		switch p.option.OutputFormat {
 		case "mkv", "mka":
 		default:
-			return nil, nil, nil, fmt.Errorf("内嵌字体只支持 mkv 或 mka 输出，当前是 %s", p.option.OutputFormat)
+			return nil, nil, nil, fmt.Errorf("内嵌字体只支持 mkv/mka，当前是 %s", p.option.OutputFormat)
 		}
 		if p.option.FontsPath == "" {
 			return nil, nil, nil, errors.New("添加字体时必须填写字体目录")
@@ -244,7 +253,7 @@ func (p *planner) planExtras(ctx context.Context, sel Selection) (fontsParams, a
 			return nil, nil, nil, err
 		}
 		if len(fontsParams) == 0 {
-			return nil, nil, nil, errors.New("字体目录中未找到 ttf、otf 或 ttc 文件")
+			return nil, nil, nil, errors.New("字体目录里没有 ttf/otf/ttc 字体")
 		}
 	}
 	if sel.Convert {
@@ -291,7 +300,7 @@ func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsPar
 			for _, sub := range subs {
 				name, err := resolveSubtitle(names, media.Stem(videoPath), sub.Suffix, stems)
 				if err != nil {
-					return nil, fmt.Errorf("匹配视频 %s 的字幕: %w", videoPath, err)
+					return nil, fmt.Errorf("匹配 %s 的字幕: %w", filepath.Base(videoPath), err)
 				}
 				cmd = append(cmd, "-sub_charenc", "UTF-8", "-i", filepath.Join(dir, name))
 			}
@@ -353,7 +362,7 @@ func resolveSubtitle(names []string, base, suffix string, stems []string) (strin
 	case 1:
 		return matches[0], nil
 	default:
-		return "", fmt.Errorf("后缀 %s 匹配到多个字幕（%s），请指定 chi.ass 等完整后缀", suffix, strings.Join(matches, "、"))
+		return "", fmt.Errorf("后缀 %s 匹配到多个字幕，请用完整后缀", suffix)
 	}
 }
 

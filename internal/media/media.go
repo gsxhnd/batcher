@@ -19,6 +19,14 @@ var FontExtensions = []string{".ttf", ".otf", ".ttc"}
 // Videos 递归列出 inputPath 下后缀为 format（不区分大小写）的视频；
 // 输出目录独立于输入目录时，其中的文件会被排除。
 func Videos(ctx context.Context, inputPath, outputPath, format string) ([]string, error) {
+	// 先确认路径存在，给一句短提示；遍历失败的原始错误里带着系统路径，
+	// 界面表单已经能看到用户填的路径，提示里不再重复。
+	if _, err := os.Stat(inputPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, errors.New("输入路径不存在")
+		}
+		return nil, fmt.Errorf("检查输入路径: %w", err)
+	}
 	input, err := filepath.Abs(inputPath)
 	if err != nil {
 		return nil, fmt.Errorf("解析输入目录: %w", err)
@@ -55,7 +63,8 @@ func WalkFiles(ctx context.Context, root, exclude string, match func(name string
 			return ctx.Err()
 		}
 		if err != nil {
-			return fmt.Errorf("遍历路径 %s: %w", path, err)
+			// WalkDir 的错误（如 lstat/open）本身已带路径，不再包一层重复路径的前缀。
+			return err
 		}
 		name := entry.Name()
 		if path != root && strings.HasPrefix(name, ".") {

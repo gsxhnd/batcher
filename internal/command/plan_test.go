@@ -136,7 +136,20 @@ func TestBuildPlanConvertCommands(t *testing.T) {
 	missing := fixtureOption(fx)
 	missing.InputPath = "../111"
 	_, err = BuildPlan(context.Background(), missing, buildSelection(true, false, false))
-	assert.Error(t, err)
+	assert.ErrorContains(t, err, "输入路径不存在")
+}
+
+// TestFontErrorsStayShort 字体相关的失败提示保持一句话，右上角 toast 一行放得下。
+func TestFontErrorsStayShort(t *testing.T) {
+	fx := testutil.NewFixture(t)
+	opt := fixtureOption(fx)
+	opt.FontsPath = filepath.Join(fx.Root, "不存在的字体目录")
+	_, err := BuildPlan(context.Background(), opt, buildSelection(false, false, true))
+	assert.EqualError(t, err, "字体目录不存在")
+
+	opt.FontsPath = t.TempDir()
+	_, err = BuildPlan(context.Background(), opt, buildSelection(false, false, true))
+	assert.EqualError(t, err, "字体目录里没有 ttf/otf/ttc 字体")
 }
 
 func TestBuildPlanAddFontsCommands(t *testing.T) {
