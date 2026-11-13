@@ -4,8 +4,11 @@ package command
 
 // VideoBatchOption 描述一次批量处理所需的全部参数。
 type VideoBatchOption struct {
-	InputPath      string `json:"inputPath"`
-	InputFormat    string `json:"inputFormat"`
+	InputPath   string `json:"inputPath"`
+	InputFormat string `json:"inputFormat"`
+	// Recursive 为真时递归扫描输入目录的全部子目录（并排除独立的输出子目录）；
+	// 默认只扫描输入目录的第一层。
+	Recursive      bool   `json:"recursive,omitempty"`
 	OutputPath     string `json:"outputPath"`
 	OutputFormat   string `json:"outputFormat"`
 	FontsPath      string `json:"fontsPath"`
@@ -24,6 +27,7 @@ func DefaultOption() VideoBatchOption {
 	return VideoBatchOption{
 		InputPath:      "./",
 		InputFormat:    "mp4",
+		Recursive:      false, // 默认只扫描输入目录第一层
 		OutputPath:     "./result/",
 		OutputFormat:   "mkv",
 		InputSubSuffix: "ass",

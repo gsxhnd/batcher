@@ -16,9 +16,10 @@ import (
 // FontExtensions 是可内嵌的字体文件后缀。
 var FontExtensions = []string{".ttf", ".otf", ".ttc"}
 
-// Videos 递归列出 inputPath 下后缀为 format（不区分大小写）的视频；
+// Videos 列出 inputPath 下后缀为 format（不区分大小写）的视频。
+// recursive 为真时递归全部子目录，否则只扫描第一层；
 // 输出目录独立于输入目录时，其中的文件会被排除。
-func Videos(ctx context.Context, inputPath, outputPath, format string) ([]string, error) {
+func Videos(ctx context.Context, inputPath, outputPath, format string, recursive bool) ([]string, error) {
 	// 先确认路径存在，给一句短提示；遍历失败的原始错误里带着系统路径，
 	// 界面表单已经能看到用户填的路径，提示里不再重复。
 	if _, err := os.Stat(inputPath); err != nil {
@@ -39,21 +40,22 @@ func Videos(ctx context.Context, inputPath, outputPath, format string) ([]string
 	if input != output {
 		exclude = output
 	}
-	return WalkFiles(ctx, inputPath, exclude, func(name string) bool {
+	return WalkFiles(ctx, inputPath, exclude, recursive, func(name string) bool {
 		return strings.EqualFold(filepath.Ext(name), "."+format)
 	})
 }
 
 // Fonts 递归列出 dir 下的字体文件。
 func Fonts(ctx context.Context, dir string) ([]string, error) {
-	return WalkFiles(ctx, dir, "", func(name string) bool {
+	return WalkFiles(ctx, dir, "", true, func(name string) bool {
 		return slices.Contains(FontExtensions, strings.ToLower(filepath.Ext(name)))
 	})
 }
 
-// WalkFiles 递归遍历 root，返回文件名满足 match 的文件路径（跳过目录）。
+// WalkFiles 遍历 root，返回文件名满足 match 的文件路径（跳过目录）。
+// recursive 为真时递归全部子目录，为假时只看第一层（root 本身是文件时仍会匹配）。
 // 根目录本身是符号链接时会跟着走。名为 ._ 或其它点开头的文件和目录会被跳过。
-func WalkFiles(ctx context.Context, root, exclude string, match func(name string) bool) ([]string, error) {
+func WalkFiles(ctx context.Context, root, exclude string, recursive bool, match func(name string) bool) ([]string, error) {
 	if target, ok := symlinkDir(root); ok {
 		root = target
 	}
@@ -79,6 +81,10 @@ func WalkFiles(ctx context.Context, root, exclude string, match func(name string
 				return fmt.Errorf("解析路径 %s: %w", path, err)
 			}
 			if abs == exclude {
+				return filepath.SkipDir
+			}
+			if !recursive && path != root {
+				// 单层模式：不进入任何子目录。
 				return filepath.SkipDir
 			}
 			return nil

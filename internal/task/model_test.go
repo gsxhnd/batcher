@@ -22,6 +22,7 @@ func fixturePlan(t *testing.T) (*command.BatchPlan, testutil.Fixture) {
 	fx := testutil.NewFixture(t)
 	opt := command.DefaultOption()
 	opt.InputPath, opt.InputFormat, opt.OutputPath = fx.Root, "mp4", fx.Out
+	opt.Recursive = true // fixture 视频在子目录里
 	plan, err := command.BuildPlan(context.Background(), &opt, command.Selection{Convert: true})
 	require.NoError(t, err)
 	require.Len(t, plan.Jobs, len(fx.MP4s))

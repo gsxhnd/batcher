@@ -23,6 +23,7 @@ func (m *model) openTaskModal() tea.Cmd {
 		{key: "op_fonts", label: "添加字体", kind: fieldBool},
 		{key: "input_path", label: "源视频路径"},
 		{key: "input_format", label: "源视频后缀"},
+		{key: "recursive", label: "递归扫描子目录", kind: fieldBool},
 		{key: "output_path", label: "输出目录"},
 		{key: "output_format", label: "输出后缀"},
 		{key: "preset", label: "转码预设", kind: fieldChoice},
@@ -303,6 +304,8 @@ func readSubtitleGroups(fields []field, sel *command.Selection, opt *command.Vid
 			sel.AddFonts = f.checked
 		case "input_path", "input_format", "output_path", "output_format", "advance", "fonts_path":
 			setStringOption(opt, f.def.key, f.resolved())
+		case "recursive":
+			opt.Recursive = f.checked
 		case "sub_suffix":
 			flush()
 			cur = &command.SubtitleOption{Suffix: f.resolved()}

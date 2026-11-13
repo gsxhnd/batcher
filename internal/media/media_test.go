@@ -17,19 +17,20 @@ import (
 func TestVideos(t *testing.T) {
 	fx := testutil.NewFixture(t)
 	tests := []struct {
-		name    string
-		input   string
-		format  string
-		want    []string
-		wantErr bool
+		name      string
+		input     string
+		format    string
+		recursive bool
+		want      []string
+		wantErr   bool
 	}{
-		{"test_mkv", fx.Root, "mkv", fx.MKVs, false},
-		{"test_mp4", fx.Root, "mp4", fx.MP4s, false},
-		{"test_not_exist_path", "../111", "mp4", nil, true},
+		{"test_mkv", fx.Root, "mkv", true, fx.MKVs, false},
+		{"test_mp4", fx.Root, "mp4", true, fx.MP4s, false},
+		{"test_not_exist_path", "../111", "mp4", true, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Videos(context.Background(), tt.input, "", tt.format)
+			got, err := Videos(context.Background(), tt.input, "", tt.format, tt.recursive)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -40,6 +41,25 @@ func TestVideos(t *testing.T) {
 	}
 }
 
+// TestVideosSingleLevelSkipsSubdirectories 单层模式只收第一层的视频。
+func TestVideosSingleLevelSkipsSubdirectories(t *testing.T) {
+	fx := testutil.NewFixture(t)
+	root := filepath.Join(fx.Root, "顶层")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "子"), 0o755))
+	top := filepath.Join(root, "a.mp4")
+	nested := filepath.Join(root, "子", "b.mp4")
+	testutil.WriteFile(t, top, "")
+	testutil.WriteFile(t, nested, "")
+
+	got, err := Videos(context.Background(), root, "", "mp4", false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{top}, got)
+
+	got, err = Videos(context.Background(), root, "", "mp4", true)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{top, nested}, got)
+}
+
 func TestFonts(t *testing.T) {
 	fx := testutil.NewFixture(t)
 	got, err := Fonts(context.Background(), fx.Root)
@@ -48,6 +68,26 @@ func TestFonts(t *testing.T) {
 
 	_, err = Fonts(context.Background(), "../111")
 	assert.Error(t, err)
+}
+
+// TestFontsAcceptUppercaseExtensions 字体后缀不区分大小写。
+func TestFontsAcceptUppercaseExtensions(t *testing.T) {
+	tmp := t.TempDir()
+	want := []string{
+		filepath.Join(tmp, "黑体.TTF"),
+		filepath.Join(tmp, "宋体.OTF"),
+		filepath.Join(tmp, "楷体.TTC"),
+	}
+	for _, p := range want {
+		testutil.WriteFile(t, p, "")
+	}
+	// 非字体后缀不应出现，大写的不认识后缀也不行。
+	testutil.WriteFile(t, filepath.Join(tmp, "说明.TXT"), "")
+	testutil.WriteFile(t, filepath.Join(tmp, "字体.WOFF2"), "")
+
+	got, err := Fonts(context.Background(), tmp)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, want, got)
 }
 
 func TestOutputPaths(t *testing.T) {
@@ -86,7 +126,7 @@ func TestVideosExcludeOutputsAndAcceptUppercase(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(fx.Out, "旧结果.MP4"), "")
 	uppercase := filepath.Join(fx.Root, "大写.MP4")
 	testutil.WriteFile(t, uppercase, "")
-	got, err := Videos(context.Background(), fx.Root, fx.Out+"/", "mp4")
+	got, err := Videos(context.Background(), fx.Root, fx.Out+"/", "mp4", true)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, append(slices.Clone(fx.MP4s), uppercase), got)
 }
@@ -113,9 +153,12 @@ func TestWalkSkipsAppleDoubleAndFollowsFileSymlink(t *testing.T) {
 	link := filepath.Join(root, "b.mp4")
 	require.NoError(t, os.Symlink(video, link))
 
-	got, err := Videos(context.Background(), root, "", "mp4")
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{video, link}, got)
+	// 文件都在根目录，单层与递归结果一致；隐藏文件与符号链接的处理对两种模式都生效。
+	for _, recursive := range []bool{false, true} {
+		got, err := Videos(context.Background(), root, "", "mp4", recursive)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{video, link}, got)
+	}
 }
 
 func TestCheckPaths(t *testing.T) {

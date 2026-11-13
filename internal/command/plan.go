@@ -198,7 +198,7 @@ func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
 	if err := p.checkPlanInputs(sel); err != nil {
 		return nil, err
 	}
-	videos, err := media.Videos(ctx, p.option.InputPath, p.option.OutputPath, p.option.InputFormat)
+	videos, err := media.Videos(ctx, p.option.InputPath, p.option.OutputPath, p.option.InputFormat, p.option.Recursive)
 	if err != nil {
 		return nil, err
 	}

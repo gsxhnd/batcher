@@ -668,6 +668,7 @@ func TestBatchNameDeduplication(t *testing.T) {
 	plan1, fx := fixturePlan(t)
 	opt2 := command.DefaultOption()
 	opt2.InputPath, opt2.InputFormat = fx.Root, "mp4"
+	opt2.Recursive = true // fixture 视频在子目录里
 	opt2.OutputPath = filepath.Join(t.TempDir(), "out2")
 	plan2, err := command.BuildPlan(context.Background(), &opt2, command.Selection{Convert: true})
 	require.NoError(t, err)

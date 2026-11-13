@@ -21,10 +21,12 @@ func buildSelection(convert, sub, fonts bool) Selection {
 }
 
 // fixtureOption 基于 fixture 目录构造一个组合流程的规划选项。
+// fixture 的视频放在子目录 1/ 2/ 里，这里默认打开递归扫描。
 func fixtureOption(fx testutil.Fixture) *VideoBatchOption {
 	return &VideoBatchOption{
 		InputPath:      fx.Root,
 		InputFormat:    "mp4",
+		Recursive:      true,
 		InputSubSuffix: "ass",
 		FontsPath:      fx.Dir1,
 		OutputPath:     fx.Out + "/", // 保持与真实配置一致的末尾斜杠
@@ -55,6 +57,33 @@ func TestSelectionString(t *testing.T) {
 	assert.Equal(t, "convert", buildSelection(true, false, false).String())
 	assert.Equal(t, "convert+add_sub", buildSelection(true, true, false).String())
 	assert.Equal(t, "convert+add_sub+add_fonts", buildSelection(true, true, true).String())
+}
+
+// TestPlanScanDepth 默认只扫描输入目录第一层，勾选递归后才进入子目录。
+func TestPlanScanDepth(t *testing.T) {
+	root := t.TempDir()
+	top := filepath.Join(root, "a.mp4")
+	nested := filepath.Join(root, "子", "b.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "子"), 0o755))
+	testutil.WriteFile(t, top, "")
+	testutil.WriteFile(t, nested, "")
+
+	opt := &VideoBatchOption{
+		InputPath:    root,
+		InputFormat:  "mp4",
+		OutputPath:   t.TempDir(),
+		OutputFormat: "mkv",
+	}
+	plan, err := BuildPlan(context.Background(), opt, buildSelection(true, false, false))
+	require.NoError(t, err)
+	inputs, _ := jobPaths(plan.Jobs)
+	assert.Equal(t, []string{top}, inputs, "默认单层，不进入子目录")
+
+	opt.Recursive = true
+	plan, err = BuildPlan(context.Background(), opt, buildSelection(true, false, false))
+	require.NoError(t, err)
+	inputs, _ = jobPaths(plan.Jobs)
+	assert.ElementsMatch(t, []string{top, nested}, inputs, "勾选递归后进入子目录")
 }
 
 func TestNewPlanner(t *testing.T) {
