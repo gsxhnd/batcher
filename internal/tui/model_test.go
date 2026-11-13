@@ -77,9 +77,10 @@ func TestMainScreenOpensTaskAndPresetModals(t *testing.T) {
 	for _, f := range m.modal.fields {
 		keys[f.def.key] = true
 	}
-	for _, key := range []string{"op_convert", "op_subtitle", "op_fonts", "input_path", "output_path", "preset", "advance", "fonts_path", "sub_suffix"} {
+	for _, key := range []string{"op_convert", "op_subtitle", "op_fonts", "input_path", "input_format", "recursive", "output_path", "output_format", "preset", "advance", "fonts_path", "sub_suffix"} {
 		assert.True(t, keys[key], "创建弹窗应直接包含 %s", key)
 	}
+	assert.Contains(t, m.modalView(), "递归扫描子目录", "没勾字幕时递归选项也要显示")
 	start := m.modal.kind
 	press(&m, "enter")
 	require.NotNil(t, m.modal)
@@ -628,12 +629,17 @@ func TestQuitConfirmsWhileRunning(t *testing.T) {
 	assert.True(t, quit, "确认后退出")
 	assert.Nil(t, m.modal)
 
+	// 暂停在失败项上时没有 ffmpeg 在跑，q 直接退出，不再确认。
 	m.running = true
 	m.pausedBatch = "batch"
-	press(&m, "q")
-	require.NotNil(t, m.modal)
-	assert.Equal(t, "batch", m.pausedBatch, "确认退出时还不中止")
-	press(&m, "esc")
+	pausedQuit := pressCmd(&m, "q")
+	require.NotNil(t, pausedQuit)
+	_, ok := pausedQuit().(tea.QuitMsg)
+	assert.True(t, ok, "暂停中 q 直接退出")
+
+	// 暂停中 esc 仍是中止当前任务。
+	m.running = true
+	m.pausedBatch = "batch"
 	press(&m, "esc")
 	assert.Contains(t, m.statusMsg, "中止", "暂停中 esc 中止当前任务")
 }
@@ -884,6 +890,62 @@ func TestSavedTaskRemainsAfterRestart(t *testing.T) {
 
 	require.NotEmpty(t, again.roster)
 	assert.Contains(t, again.roster[0].title, "等待执行")
+}
+
+// TestRemovingPausedBatchEndsRun 删除暂停中的任务后界面要收尾，恢复空闲。
+func TestRemovingPausedBatchEndsRun(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	testQueue(t, &m)
+	m.running = true
+	m.activeBatch = "b1"
+	m.pausedBatch = "b1"
+
+	next, _ := m.Update(queueEventMsg{evt: task.QueueEvent{Type: task.QueueBatchRemoved, BatchID: "b1"}})
+	m = next.(model)
+	assert.False(t, m.running, "删除暂停中的任务后应恢复空闲")
+	assert.Empty(t, m.activeBatch)
+	assert.Empty(t, m.pausedBatch)
+
+	quit := pressCmd(&m, "q")
+	require.NotNil(t, quit)
+	_, ok := quit().(tea.QuitMsg)
+	assert.True(t, ok, "删除后 q 直接退出，不再提示任务正在执行")
+}
+
+// TestRosterMouseNavigation 右键点任务行进入详情，左键点详情区回到任务列表。
+func TestRosterMouseNavigation(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	m.roster = []rosterRow{
+		{batchID: "b1", title: "任务一"},
+		{batchID: "b1", itemID: "001", title: "1.mp4", state: fileRunning},
+		{batchID: "b2", itemID: "002", title: "2.mp4", state: fileDone},
+	}
+	m.fileCursor = 0
+
+	// 第 3 行（y=3，列表从 y=2 开始）是第二个可见行。
+	next, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseRight, X: 3, Y: 3})
+	m = next.(model)
+	assert.Equal(t, 1, m.fileCursor, "右键应把光标移到点击的任务行")
+	assert.True(t, m.outputFocus, "右键应进入详情输出")
+
+	next, _ = m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.leftW + 4, Y: 5})
+	m = next.(model)
+	next, _ = m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: m.leftW + 4, Y: 5})
+	m = next.(model)
+	assert.False(t, m.outputFocus, "左键点详情区应回到任务列表")
+	assert.Equal(t, 1, m.fileCursor, "光标保持在被点击的任务行")
+
+	next, _ = m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 3, Y: 2})
+	m = next.(model)
+	next, _ = m.Update(tea.MouseReleaseMsg{Button: tea.MouseLeft, X: 3, Y: 2})
+	m = next.(model)
+	assert.Equal(t, 0, m.fileCursor, "左键点任务行应选中该行")
+	assert.False(t, m.outputFocus)
 }
 
 // ---------- 辅助 ----------

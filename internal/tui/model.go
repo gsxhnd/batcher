@@ -443,22 +443,23 @@ func (m *model) modalHoldsQuit() bool {
 	}
 }
 
-// requestQuit 退出界面。任务还在执行或暂停时先确认，避免一次按键中止转码。
+// requestQuit 退出界面。正在执行 ffmpeg 时先确认，避免一次按键中止转码；
+// 暂停在失败项上时没有进程在跑，直接退出。
 func (m *model) requestQuit() tea.Cmd {
 	if m.modal != nil && m.modal.quitting {
 		return nil
 	}
-	if !m.running && m.pausedBatch == "" {
-		return tea.Quit
+	if m.running && m.pausedBatch == "" {
+		m.stopCreate()
+		m.openConfirmModal("退出", "任务还在执行，退出会中止当前任务。\n\nenter 退出，esc 留下", func(m *model) tea.Cmd {
+			return tea.Quit
+		})
+		if m.modal != nil {
+			m.modal.quitting = true
+		}
+		return nil
 	}
-	m.stopCreate()
-	m.openConfirmModal("退出", "任务还在执行，退出会中止当前任务。\n\nenter 退出，esc 留下", func(m *model) tea.Cmd {
-		return tea.Quit
-	})
-	if m.modal != nil {
-		m.modal.quitting = true
-	}
-	return nil
+	return tea.Quit
 }
 
 // stopCreate 取消还没完成的任务扫描，避免退出确认打开后扫描结果再弹出。
@@ -698,7 +699,12 @@ func (m *model) moveFilePane(delta int) {
 	if next == m.fileCursor {
 		return
 	}
-	m.fileCursor = next
+	m.jumpToRosterRow(next)
+}
+
+// jumpToRosterRow 把光标跳到列表第 idx 行并刷新右侧内容；手动跳转会停止自动跟随。
+func (m *model) jumpToRosterRow(idx int) {
+	m.fileCursor = idx
 	if m.running {
 		m.fileFollow = false
 	}
@@ -707,6 +713,33 @@ func (m *model) moveFilePane(delta int) {
 		m.refreshRunHeights()
 	}
 	m.syncLogPane()
+}
+
+// rosterRowAt 把屏幕格子换算成任务列表的行下标。列表内容在宽布局的左栏、
+// 窄布局的顶部区块，都从第 2 行开始（第 0 行顶栏，第 1 行边框）。
+// 返回 false 表示点击不在任务列表的行上。
+func (m model) rosterRowAt(x, y int) (int, bool) {
+	if m.modal != nil || len(m.roster) == 0 || m.width == 0 {
+		return 0, false
+	}
+	h := m.bodyH() - 2
+	if m.width < narrowWidth {
+		if m.narrowFilePaneH() <= 0 {
+			return 0, false
+		}
+		h = m.narrowFilePaneH()
+	} else if x < 0 || x >= m.leftW {
+		return 0, false // 宽布局只认左栏
+	}
+	if h <= 0 || y < 2 || y >= 2+h {
+		return 0, false
+	}
+	start, end := windowBounds(len(m.roster), m.fileCursor, h)
+	idx := start + (y - 2)
+	if idx >= end {
+		return 0, false
+	}
+	return idx, true
 }
 
 // pinRosterCursor 记录光标所在行，供事件重建列表后恢复位置。
@@ -1725,6 +1758,16 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		// 只有正在执行时才收尾；取消队列里等待中的其他批次只刷新列表。
 		if m.running {
 			cmd = m.applyBatchFinish(e)
+		}
+	case task.QueueBatchRemoved:
+		// 删除的是当前暂停中的批次：队列只发移除事件，这里手动收尾恢复空闲。
+		if m.running && e.BatchID == m.activeBatch {
+			m.resumeTimer()
+			cmd = m.handleDone(context.Canceled)
+			// 任务已删除：清掉这次执行的统计，避免顶部继续提示“上次执行已取消”。
+			m.runErr = nil
+			m.total, m.done, m.failed, m.skipped, m.canceled = 0, 0, 0, 0, 0
+			m.setStatus("已删除任务")
 		}
 	case task.QueueStopped:
 		// 由 quitCleanup 或程序 ctx 触发，无需界面处理。

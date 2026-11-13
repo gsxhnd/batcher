@@ -36,14 +36,46 @@ func (m *model) clampCell(x, y int) (int, int) {
 	return x, y
 }
 
-// handleMouseClick 按下左键时从这一格开始拖选。
+// handleMouseClick 右键点击任务行直接进入该任务的详情；左键按下时从这一格开始拖选。
 func (m *model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if msg.Button == tea.MouseRight {
+		m.clearSelection()
+		x, y := m.clampCell(msg.X, msg.Y)
+		m.openRosterDetailAt(x, y)
+		return nil
+	}
 	if msg.Button != tea.MouseLeft {
 		return nil
 	}
 	x, y := m.clampCell(msg.X, msg.Y)
 	m.sel = textSelection{on: true, dragging: true, ax: x, ay: y, bx: x, by: y}
 	return nil
+}
+
+// openRosterDetailAt 响应右键点击：点任务行把光标跳过去并进入详情输出。
+func (m *model) openRosterDetailAt(x, y int) {
+	if idx, ok := m.rosterRowAt(x, y); ok {
+		m.setFocus(panelRun)
+		m.jumpToRosterRow(idx)
+		m.openOutput()
+	}
+}
+
+// leftClickAt 处理左键单击：点任务行跳到该行并回到列表；点详情区时退出输出查看。
+func (m *model) leftClickAt(x, y int) {
+	if m.modal != nil {
+		return
+	}
+	if idx, ok := m.rosterRowAt(x, y); ok {
+		m.jumpToRosterRow(idx)
+		if m.outputFocus {
+			m.leaveOutput()
+		}
+		return
+	}
+	if m.outputFocus {
+		m.leaveOutput()
+	}
 }
 
 // handleMouseMotion 拖动时扩展选区。
@@ -66,6 +98,8 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	m.sel.dragging = false
 	m.dragTo(msg.X, msg.Y)
 	if m.sel.ax == m.sel.bx && m.sel.ay == m.sel.by {
+		// 单击不构成拖选：点任务行跳到该行，点其他区域退出输出查看回到列表。
+		m.leftClickAt(m.sel.ax, m.sel.ay)
 		m.clearSelection()
 		return nil
 	}

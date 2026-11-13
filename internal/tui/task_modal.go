@@ -867,7 +867,7 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		case "op_fonts":
 			fontOn = md.fields[i].checked
 			ops = append(ops, i)
-		case "input_path", "input_format", "output_path", "output_format":
+		case "input_path", "input_format", "recursive", "output_path", "output_format":
 			paths = append(paths, i)
 		case "preset", "advance":
 			encode = append(encode, i)
@@ -924,8 +924,10 @@ func (m model) taskModalLines(boxW int) []taskLine {
 	})
 
 	rule()
-	head("源与输出", "递归扫描视频；输出留空则写到源目录下的 result")
-	fieldsOf(paths, nil)
+	head("源与输出", "默认只扫描第一层，勾选递归后扫描全部子目录；输出留空则写到源目录下的 result")
+	fieldsOf(paths, map[string]string{
+		"recursive": "space 勾选后扫描输入目录下的全部子目录",
+	})
 
 	note := "未勾选转码时，这里的参数不会写入命令"
 	if convertOn {
