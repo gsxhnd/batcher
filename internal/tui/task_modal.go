@@ -224,14 +224,13 @@ func (m *model) removeSubtitleFields() {
 	}
 	n := len(subFieldDefs)
 	if start < 0 || start+n > len(md.fields) {
-		md.err = "把光标移到字幕上再按 ctrl+d"
+		m.setStatus("× 把光标移到字幕上再按 ctrl+d")
 		return
 	}
 	md.fields = slices.Delete(md.fields, start, start+n)
 	if md.focus >= len(md.fields) {
 		md.focus = max(len(md.fields)-1, 0)
 	}
-	md.err = ""
 }
 
 // saveTaskModal 校验弹窗里的全部字段，扫描目录并创建任务。失败时弹窗保持打开。
@@ -246,23 +245,23 @@ func (m *model) saveTaskModal() tea.Cmd {
 	return m.startTaskScan(sel, opt)
 }
 
-// collectTaskForm 读取并校验新建任务表单。校验失败时 ok 为 false，cmd 用来把光标移回出错字段。
+// collectTaskForm 读取并校验新建任务表单。校验失败时 ok 为 false，
+// 错误发到右上角 toast，cmd 用来把光标移回出错字段，弹窗保持打开。
 func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatchOption, tea.Cmd, bool) {
-	md.err = ""
 	sel := command.Selection{}
 	opt := command.DefaultOption()
 	subs := readSubtitleGroups(md.fields, &sel, &opt)
 	if !sel.Any() {
-		md.err = "请至少勾选一项操作"
+		m.setStatus("× 请至少勾选一项操作")
 		return sel, opt, focusField(md.fields, 0), false
 	}
 	if sel.AddFonts && strings.TrimSpace(opt.FontsPath) == "" {
-		md.err = "勾选了添加字体，必须填写字体文件夹"
+		m.setStatus("× 勾选了添加字体，必须填写字体文件夹")
 		return sel, opt, focusTaskField(md, "fonts_path"), false
 	}
 	if sel.Convert && strings.TrimSpace(opt.Advance) != "" {
 		if _, err := commandline.Parse(opt.Advance); err != nil {
-			md.err = err.Error()
+			m.setStatus("× " + err.Error())
 			return sel, opt, focusTaskField(md, "advance"), false
 		}
 	}
@@ -277,7 +276,7 @@ func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatc
 		return sel, opt, nil, true
 	}
 	if err := validateSubtitles(subs); err != "" {
-		md.err = err
+		m.setStatus("× " + err)
 		return sel, opt, nil, false
 	}
 	opt.Subtitles = subs
@@ -371,7 +370,8 @@ func (m *model) startTaskScan(sel command.Selection, opt command.VideoBatchOptio
 	}
 	ctx, cancel := context.WithCancel(parent)
 	m.createCancel = cancel
-	m.modal.err = "正在扫描并生成任务…"
+	m.modal.info = "正在扫描并生成任务…"
+	m.setStatus("")
 	return func() tea.Msg {
 		plan, err := command.BuildPlan(ctx, &opt, sel)
 		return createPlanMsg{seq: seq, plan: plan, err: err}
@@ -752,9 +752,11 @@ func (m model) taskModalSize() (w, contentH int) {
 }
 
 // taskModalView 渲染分区后的创建表单，并把光标所在字段滚进可视区域。
+// 顶部徽标与摘要、扫描提示和底部快捷键固定不滚动，保证勾选操作的反馈始终可见。
 func (m model) taskModalView() string {
 	md := m.modal
 	w, contentH := m.taskModalSize()
+	header := m.taskModalHeader()
 	lines := m.taskModalLines(w)
 	focusAt := 0
 	for i, ln := range lines {
@@ -763,9 +765,9 @@ func (m model) taskModalView() string {
 			break
 		}
 	}
-	// 错误在顶部、快捷键在底部，这两行不参与滚动。
-	pinned := 1
-	if md.err != "" {
+	// 顶部徽标、扫描提示与底部快捷键这三处不参与滚动。
+	pinned := len(header) + 1
+	if md.info != "" {
 		pinned++
 	}
 	window := max(contentH-pinned, 1)
@@ -778,8 +780,9 @@ func (m model) taskModalView() string {
 	}
 	end := min(start+window, len(lines))
 	var body []string
-	if md.err != "" {
-		body = append(body, "  "+errorStyle.Render("× "+md.err)+"\n")
+	body = append(body, header...)
+	if md.info != "" {
+		body = append(body, "  "+statusStyle.Render(md.info)+"\n")
 	}
 	for _, ln := range lines[start:end] {
 		body = append(body, ln.text)
@@ -799,13 +802,66 @@ func (m model) taskModalView() string {
 	return drawBox(w, title, true, true, b.String(), contentH)
 }
 
+// taskModalFlags 汇总顶部徽标需要的勾选状态和字幕组数。
+func taskModalFlags(fields []field) (convert, sub, font bool, groups int) {
+	for i := range fields {
+		switch fields[i].def.key {
+		case "op_convert":
+			convert = fields[i].checked
+		case "op_subtitle":
+			sub = fields[i].checked
+		case "op_fonts":
+			font = fields[i].checked
+		case "sub_suffix":
+			groups++
+		}
+	}
+	return
+}
+
+// taskModalHeader 画出创建表单顶部的操作徽标和本次会做什么的摘要。
+// 这两行固定在弹窗顶部不参与滚动，勾选任何一项操作都能立刻在顶部看到反馈。
+func (m model) taskModalHeader() []string {
+	md := m.modal
+	if md == nil {
+		return nil
+	}
+	convertOn, subOn, fontOn, subGroups := taskModalFlags(md.fields)
+	chip := func(on bool, name string) string {
+		if on {
+			return stepOkStyle.Render(" " + name + " ")
+		}
+		return stepTodoStyle.Render(" " + name + " ")
+	}
+	var parts []string
+	if convertOn {
+		parts = append(parts, "转码")
+	}
+	if subOn {
+		parts = append(parts, "字幕")
+	}
+	if fontOn {
+		parts = append(parts, "字体")
+	}
+	summary := "先勾选要做的事，路径、预设和字幕都在这一页"
+	if len(parts) > 0 {
+		summary = "这次会做：" + strings.Join(parts, "、")
+		if subOn {
+			summary += fmt.Sprintf("，%d 组字幕", subGroups)
+		}
+	}
+	return []string{
+		"  " + chip(convertOn, "转码") + " " + chip(subOn, "字幕") + " " + chip(fontOn, "字体") + "\n",
+		"  " + descStyle.Render(summary) + "\n",
+	}
+}
+
 func (m model) taskModalLines(boxW int) []taskLine {
 	md := m.modal
 	if md == nil {
 		return nil
 	}
 	convertOn, subOn, fontOn := false, false, false
-	subGroups := 0
 	var ops, paths, encode, fonts, subs []int
 	for i := range md.fields {
 		switch md.fields[i].def.key {
@@ -825,9 +881,6 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		case "fonts_path":
 			fonts = append(fonts, i)
 		default:
-			if md.fields[i].def.key == "sub_suffix" {
-				subGroups++
-			}
 			subs = append(subs, i)
 		}
 	}
@@ -849,12 +902,6 @@ func (m model) taskModalLines(boxW int) []taskLine {
 	rule := func() {
 		add(-1, "  "+dividerStyle.Render(strings.Repeat("─", max(boxW-4, 4))))
 	}
-	chip := func(on bool, name string) string {
-		if on {
-			return stepOkStyle.Render(" " + name + " ")
-		}
-		return stepTodoStyle.Render(" " + name + " ")
-	}
 	fieldsOf := func(idxs []int, extra map[string]string) {
 		for _, idx := range idxs {
 			f := &md.fields[idx]
@@ -874,26 +921,6 @@ func (m model) taskModalLines(boxW int) []taskLine {
 			}
 		}
 	}
-
-	add(-1, "  "+chip(convertOn, "转码")+" "+chip(subOn, "字幕")+" "+chip(fontOn, "字体"))
-	var parts []string
-	if convertOn {
-		parts = append(parts, "转码")
-	}
-	if subOn {
-		parts = append(parts, "字幕")
-	}
-	if fontOn {
-		parts = append(parts, "字体")
-	}
-	summary := "先勾选要做的事，路径、预设和字幕都在这一页"
-	if len(parts) > 0 {
-		summary = "这次会做：" + strings.Join(parts, "、")
-		if subOn {
-			summary += fmt.Sprintf("，%d 组字幕", subGroups)
-		}
-	}
-	add(-1, "  "+descStyle.Render(summary))
 
 	rule()
 	head("操作", "可以同时勾选，一次 ffmpeg 做完")

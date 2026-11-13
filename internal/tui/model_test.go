@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -276,8 +277,47 @@ func TestCreateTaskRejectsEmptySelection(t *testing.T) {
 	require.Equal(t, modalTask, m.modal.kind)
 	press(&m, "ctrl+s")
 	require.NotNil(t, m.modal, "没勾选操作时弹窗保持打开")
-	assert.NotEmpty(t, m.modal.err)
+	assert.Contains(t, m.statusMsg, "至少勾选")
 	assert.Empty(t, m.queue.Snapshot())
+}
+
+// TestCreatePlanFailureShowsToast 扫描/生成失败时提示浮在右上角，弹窗保持打开继续改参数。
+func TestCreatePlanFailureShowsToast(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	m.modal.info = "正在扫描并生成任务…"
+	m.createSeq = 1
+	next, _ := m.Update(createPlanMsg{seq: 1, err: errors.New("输出目录不能为空")})
+	m = next.(model)
+	require.NotNil(t, m.modal, "失败后弹窗保持打开")
+	assert.Equal(t, modalTask, m.modal.kind)
+	assert.Contains(t, m.statusMsg, "输出目录不能为空")
+	assert.Empty(t, m.modal.info, "失败后清掉扫描提示")
+
+	m.createSeq = 2
+	next, _ = m.Update(createPlanMsg{seq: 2, plan: &command.BatchPlan{}})
+	m = next.(model)
+	assert.Contains(t, m.statusMsg, "未找到匹配的视频文件")
+}
+
+// TestTaskScanShowsPendingInfo 开始扫描时弹窗内显示进行中提示，不用错误样式，也不发错误 toast。
+func TestTaskScanShowsPendingInfo(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	_, i := fieldByKey(m.modal.fields, "op_convert")
+	m.modal.fields[i].checked = true
+	m.modal.focus = i
+	cmd := pressCmd(&m, "ctrl+s")
+	require.NotNil(t, cmd, "勾选转码后 ctrl+s 开始扫描")
+	assert.Contains(t, m.modal.info, "正在扫描")
+	assert.Empty(t, m.statusMsg, "扫描进行中不发错误提示")
+	assert.Empty(t, m.modal.err)
 }
 
 // TestPresetModalAddEditDuplicate 验证预设的新增/编辑全部在弹窗内完成。
@@ -446,14 +486,14 @@ func TestTryStartRunValidation(t *testing.T) {
 	press(&m, "a")
 	require.Equal(t, modalTask, m.modal.kind)
 	press(&m, "ctrl+s")
-	assert.Contains(t, m.modal.err, "至少勾选")
+	assert.Contains(t, m.statusMsg, "至少勾选", "校验失败用右上角 toast 提示")
 	assert.Empty(t, m.queue.Snapshot())
 	assert.False(t, m.running)
 
 	m.modal.focus = 2 // 添加字体
 	press(&m, "space")
 	press(&m, "ctrl+s")
-	assert.Contains(t, m.modal.err, "字体")
+	assert.Contains(t, m.statusMsg, "字体")
 	assert.Empty(t, m.queue.Snapshot())
 
 	m.modal.focus = 2
@@ -463,7 +503,7 @@ func TestTryStartRunValidation(t *testing.T) {
 	m.modal.focus = len(m.modal.fields) - 1
 	m.removeSubtitleFields()
 	press(&m, "ctrl+s")
-	assert.Contains(t, m.modal.err, "字幕")
+	assert.Contains(t, m.statusMsg, "字幕")
 	assert.Empty(t, m.queue.Snapshot())
 	assert.False(t, m.running)
 }

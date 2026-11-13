@@ -280,11 +280,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
-			m.modal.err = msg.err.Error()
+			m.modal.info = ""
+			m.setStatus("× " + msg.err.Error())
 			return m, nil
 		}
 		if msg.plan == nil || len(msg.plan.Jobs) == 0 {
-			m.modal.err = "未找到匹配的视频文件"
+			m.modal.info = ""
+			m.setStatus("× 未找到匹配的视频文件")
 			return m, nil
 		}
 		plan := msg.plan

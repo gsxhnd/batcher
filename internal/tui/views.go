@@ -60,18 +60,24 @@ func (m model) compose() string {
 		content = m.wideLayout()
 	}
 	assembled := lipgloss.JoinVertical(lipgloss.Left, m.header(), content, m.footer())
+	toast := m.errorToast()
 	if m.modal != nil {
 		// 弹窗打开时主界面只作底，压暗并且不再接收按键和滚轮。
 		assembled = m.dimScreen(assembled)
 		modalBox := m.modalView()
 		x := max((m.width-lipgloss.Width(modalBox))/2, 0)
 		y := max((m.height-lipgloss.Height(modalBox))/2, 0)
-		return lipgloss.NewCompositor(
+		layers := []*lipgloss.Layer{
 			lipgloss.NewLayer(assembled),
 			lipgloss.NewLayer(modalBox).X(x).Y(y),
-		).Render()
+		}
+		// 生成任务失败等提示依旧浮在右上角，盖在弹窗之上。
+		if toast != "" {
+			layers = append(layers, lipgloss.NewLayer(toast).
+				X(max(m.width-lipgloss.Width(toast)-1, 0)).Y(1))
+		}
+		return lipgloss.NewCompositor(layers...).Render()
 	}
-	toast := m.errorToast()
 	if toast == "" {
 		return assembled
 	}

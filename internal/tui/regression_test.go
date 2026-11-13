@@ -475,7 +475,7 @@ func TestOnlyOneDefaultSubtitle(t *testing.T) {
 	require.Equal(t, 2, defaults)
 	press(&m, "ctrl+s")
 	require.NotNil(t, m.modal)
-	assert.Contains(t, m.modal.err, "默认字幕")
+	assert.Contains(t, m.statusMsg, "默认字幕", "校验失败用右上角 toast 提示")
 
 	seen := false
 	for i := range m.modal.fields {
@@ -485,7 +485,7 @@ func TestOnlyOneDefaultSubtitle(t *testing.T) {
 		}
 	}
 	press(&m, "ctrl+s")
-	assert.NotContains(t, m.modal.err, "默认字幕")
+	assert.NotContains(t, m.statusMsg, "默认字幕")
 	assert.True(t, m.creating, "只保留一条默认字幕时应开始创建")
 }
 

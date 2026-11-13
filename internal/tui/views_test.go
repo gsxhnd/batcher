@@ -143,6 +143,61 @@ func TestRenderRowsUniform(t *testing.T) {
 	}
 }
 
+// TestToastShowsOverModal 弹窗打开时，错误提示依旧浮在右上角（创建任务失败的场景）。
+func TestToastShowsOverModal(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 120, 34
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	m.statusMsg = "× 生成任务失败: 目录不存在"
+	out := m.render()
+	lines := strings.Split(strings.TrimSuffix(ansi.Strip(out), "\n"), "\n")
+	found := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "生成任务失败") {
+			found = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, found, "错误提示应浮在弹窗之上")
+	assert.GreaterOrEqual(t, found, 1)
+	assert.LessOrEqual(t, found, 3, "错误应靠近顶栏")
+	idx := strings.Index(lines[found], "生成任务失败")
+	assert.Greater(t, idx, m.width/2, "错误文本应靠右，实际列 %d: %q", idx, lines[found])
+}
+
+// TestTaskModalHeaderStaysVisible 勾选操作后，顶部徽标与摘要固定在弹窗内容顶部，
+// 不会因为表单变长被滚出可视区，与勾选“视频转码”时的顶部反馈一致。
+func TestTaskModalHeaderStaysVisible(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 24 // 小窗口，勾选后字段一多就会滚动
+	press(&m, "a")
+	require.NotNil(t, m.modal)
+
+	assert.Contains(t, ansi.Strip(m.taskModalView()), "先勾选要做的事")
+
+	m.modal.focus = 2 // 添加字体
+	press(&m, "space")
+	view := ansi.Strip(m.taskModalView())
+	lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	require.Greater(t, len(lines), 3)
+	assert.Contains(t, lines[1], "转码", "徽标行固定在弹窗内容第一行")
+	assert.Contains(t, lines[1], "字幕")
+	assert.Contains(t, lines[1], "字体")
+	assert.Contains(t, lines[2], "这次会做：字体")
+	assert.Contains(t, view, "[✔]", "勾选状态在表单里可见")
+
+	m.modal.focus = 1 // 添加字幕
+	press(&m, "space")
+	view = ansi.Strip(m.taskModalView())
+	lines = strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	assert.Contains(t, lines[1], "字幕")
+	assert.Contains(t, lines[2], "这次会做：字幕、字体，1 组字幕")
+}
+
+// TestHeaderStatusPointsAtRetry 顶栏状态胶囊提示按 r 重试。
 func TestHeaderStatusPointsAtRetry(t *testing.T) {
 	m := newModel()
 	m.runErr = errors.New("主任务失败")

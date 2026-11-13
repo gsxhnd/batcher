@@ -32,15 +32,17 @@ const (
 	returnPresetList
 )
 
-// modal 是覆盖在主界面上的浮层。非空时全部按键由弹窗处理，
-// 保存失败时错误显示在弹窗内且弹窗保持打开，方便直接修改。
+// modal 是覆盖在主界面上的浮层。非空时全部按键由弹窗处理。
+// 预设编辑失败时错误显示在弹窗内且弹窗保持打开，方便直接修改；
+// 新建任务的失败提示发到右上角 toast，弹窗同样保持打开。
 type modal struct {
 	kind         modalKind
 	title        string
 	fields       []field
 	focus        int            // 表单弹窗内的字段下标
 	picking      bool           // 新建任务里转码预设列表是否展开
-	err          string         // 表单校验错误，显示在弹窗底部
+	err          string         // 预设弹窗/预设列表的错误，显示在弹窗内
+	info         string         // 弹窗内的进行中提示（新建任务扫描时），不用错误样式
 	editIndex    int            // 编辑的条目下标，-1 表示新增
 	prompt       string         // 确认弹窗的说明文字 / 帮助弹窗的原始文本
 	jobs         []enqueueJob   // 入队确认里的子任务；为空时按普通确认框处理
