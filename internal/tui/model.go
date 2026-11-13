@@ -371,6 +371,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 	s := key.String()
 	if s == "q" && !m.typingInField() {
+		if m.modalHoldsQuit() {
+			return nil
+		}
 		return m.requestQuit()
 	}
 	if m.modal != nil {
@@ -418,6 +421,22 @@ func (m *model) typingInField() bool {
 		return false
 	default:
 		return true
+	}
+}
+
+// modalHoldsQuit 表示创建任务或预设管理还开着。这时 q 不退出程序，先用 esc 关掉弹窗。
+func (m *model) modalHoldsQuit() bool {
+	md := m.modal
+	if md == nil || md.quitting {
+		return false
+	}
+	switch md.kind {
+	case modalTask, modalPreset, modalPresetList:
+		return true
+	case modalConfirm:
+		return len(md.jobs) > 0 || md.returnTo == returnPresetList
+	default:
+		return false
 	}
 }
 

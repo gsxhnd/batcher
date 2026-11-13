@@ -598,6 +598,42 @@ func TestQuitConfirmsWhileRunning(t *testing.T) {
 	assert.Contains(t, m.statusMsg, "中止", "暂停中 esc 中止当前任务")
 }
 
+func TestQDoesNotQuitTaskOrPresetModal(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	cmd := pressCmd(&m, "q")
+	assert.Nil(t, cmd, "创建任务里按 q 不退出")
+	require.NotNil(t, m.modal)
+	assert.Equal(t, modalTask, m.modal.kind)
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	quit := pressCmd(&m, "q")
+	require.NotNil(t, quit)
+	_, ok := quit().(tea.QuitMsg)
+	assert.True(t, ok, "关掉创建弹窗后 q 才退出")
+
+	m = newModel()
+	m.width, m.height = 100, 30
+	press(&m, "p")
+	require.Equal(t, modalPresetList, m.modal.kind)
+	assert.Nil(t, pressCmd(&m, "q"), "预设管理里按 q 不退出")
+	require.Equal(t, modalPresetList, m.modal.kind)
+	press(&m, "a")
+	require.Equal(t, modalPreset, m.modal.kind)
+	press(&m, "esc")
+	require.Equal(t, modalPresetList, m.modal.kind, "预设编辑仍用 esc 返回列表")
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	quit = pressCmd(&m, "q")
+	require.NotNil(t, quit)
+	_, ok = quit().(tea.QuitMsg)
+	assert.True(t, ok, "关掉预设管理后 q 才退出")
+}
+
 func TestQTypesIntoTextField(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
