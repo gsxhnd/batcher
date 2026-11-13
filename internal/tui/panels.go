@@ -44,7 +44,7 @@ func (m *model) movePreset(delta int) {
 	}
 }
 
-// presetDisplayName 返回预设删除确认中显示的名称。
+// presetDisplayName 返回预设列表与删除确认里显示的名称；名称为空时回退到参数。
 func presetDisplayName(p presets.Preset) string {
 	if p.Name != "" {
 		return p.Name
@@ -52,7 +52,7 @@ func presetDisplayName(p presets.Preset) string {
 	return p.Args
 }
 
-// persistPresets 写入用户预设文件，并以 action 作为成功提示前缀。
+// persistPresets 保存自定义预设（写入任务数据库），并以 action 作为成功提示前缀。
 func (m *model) persistPresets(next []presets.Preset, action string) error {
 	if err := presets.Save(next); err != nil {
 		m.notePresetList("× 保存预设失败: " + err.Error())
@@ -66,8 +66,9 @@ func (m *model) persistPresets(next []presets.Preset, action string) error {
 // focusField 聚焦 fields[focus] 并失焦其余字段，返回聚焦输入框的光标闪烁命令。
 func focusField(fields []field, focus int) tea.Cmd {
 	var cmd tea.Cmd
+	target := clamp(focus, 0, len(fields)-1)
 	for i := range fields {
-		if i == clamp(focus, 0, len(fields)-1) {
+		if i == target {
 			cmd = fields[i].input.Focus()
 		} else {
 			fields[i].input.Blur()
@@ -288,13 +289,18 @@ func (m *model) retryFocused(row rosterRow) bool {
 	return true
 }
 
-// startFocused 开始光标所在、还在等待的主任务。暂停中的批次留给中止键。
-func (m *model) startFocused(row rosterRow) bool {
+// canStartRow 报告该行是一条还在等待、可以手动开始的主任务。暂停中的批次留给中止键。
+func (m model) canStartRow(row rosterRow) bool {
 	if m.queue == nil || row.batchID == "" || m.pausedBatch == row.batchID {
 		return false
 	}
 	snap, ok := m.batchByID(row.batchID)
-	if !ok || snap.Status != task.StatusPending {
+	return ok && snap.Status == task.StatusPending
+}
+
+// startFocused 开始光标所在、还在等待的主任务。暂停中的批次留给中止键。
+func (m *model) startFocused(row rosterRow) bool {
+	if !m.canStartRow(row) {
 		return false
 	}
 	busy := m.running || m.pausedBatch != ""
@@ -338,14 +344,10 @@ func (m model) canOverwriteFocused() bool {
 // canStartFocused 表示光标在一条等待执行的主任务上，底栏把 x 显示为开始。
 func (m model) canStartFocused() bool {
 	row, ok := m.focusedRosterRow()
-	if m.queue == nil || !ok {
+	if !ok {
 		return false
 	}
-	if row.batchID == "" || m.pausedBatch == row.batchID {
-		return false
-	}
-	snap, ok := m.batchByID(row.batchID)
-	return ok && snap.Status == task.StatusPending
+	return m.canStartRow(row)
 }
 
 // pauseDecision 在暂停等待时发送跳过或中止。子任务行与主任务行都作用于当前暂停的批次。

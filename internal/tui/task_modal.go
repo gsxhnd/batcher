@@ -33,9 +33,6 @@ func (m *model) openTaskModal() tea.Cmd {
 	for _, def := range defs {
 		nf := newField(def)
 		nf.applyDefaults(&d)
-		if def.key == "advance" {
-			nf.input.Placeholder = "例如: -c:v libx265 -crf 26 -c:a copy"
-		}
 		if def.kind == fieldChoice {
 			nf.options, nf.choiceArgs = m.presetChoices()
 		}
@@ -94,11 +91,7 @@ func (m model) presetChoices() (labels, args []string) {
 	labels = append(labels, "手动输入")
 	args = append(args, "")
 	for _, p := range m.presets {
-		label := p.Name
-		if label == "" {
-			label = p.Args
-		}
-		labels = append(labels, label)
+		labels = append(labels, presetDisplayName(p))
 		args = append(args, p.Args)
 	}
 	return labels, args
@@ -476,14 +469,17 @@ func (m model) enqueueConfirmBody() string {
 	return strings.Join(lines, "\n")
 }
 
+// wrapLines 把文本按宽度折行后逐行返回；空字符串也会产生一行空行，保持占位。
+func wrapLines(text string, width int) []string {
+	return strings.Split(wrapText(text, width), "\n")
+}
+
 // enqueueConfirmLines 按展开状态生成确认列表，并标出每条子任务的行范围。
 func enqueueConfirmLines(md *modal, width int) ([]string, []jobSpan) {
 	width = max(width, 8)
 	var lines []string
 	add := func(s string) {
-		for _, ln := range strings.Split(wrapText(s, width), "\n") {
-			lines = append(lines, ln)
-		}
+		lines = append(lines, wrapLines(s, width)...)
 	}
 	add(md.prompt)
 	if len(md.sharedFonts) > 0 {
@@ -547,9 +543,7 @@ func countPhrase(n int, name string) string {
 func pathSection(paths []string, title string, width int) []string {
 	var lines []string
 	add := func(s string) {
-		for _, ln := range strings.Split(wrapText(s, width), "\n") {
-			lines = append(lines, ln)
-		}
+		lines = append(lines, wrapLines(s, width)...)
 	}
 	add("  " + descStyle.Render(title))
 	if len(paths) == 0 {
@@ -679,7 +673,7 @@ func (m *model) updatePresetList(key string) tea.Cmd {
 	return nil
 }
 
-// copyPresetModal 把当前选中的内置或自定义预设复制成一条新的自定义预设。
+// copyPresetModal 把当前选中的自定义预设复制成一条新的自定义预设。
 func (m *model) copyPresetModal() tea.Cmd {
 	idx, ok := m.listedPreset()
 	if !ok {
@@ -701,11 +695,7 @@ func (m model) presetListContent() string {
 		rows = append(rows, "  "+descStyle.Render("还没有预设"))
 	}
 	for i := 0; i < n; i++ {
-		p := m.presets[i]
-		label := p.Name
-		if label == "" {
-			label = p.Args
-		}
+		label := presetDisplayName(m.presets[i])
 		mark := "  "
 		if i == cur {
 			mark = "▸ "
@@ -1023,9 +1013,7 @@ func taskFieldReachable(fields []field, focus, idx int) bool {
 		if fields[idx].def.key == "sub_suffix" {
 			return true
 		}
-		g, ok := subtitleGroup(fields, idx)
-		fg, fok := subtitleGroup(fields, focus)
-		return ok && fok && g == fg
+		return subtitleGroupOpen(fields, focus, idx)
 	default:
 		return true
 	}

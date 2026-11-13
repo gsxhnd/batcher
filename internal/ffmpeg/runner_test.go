@@ -3,6 +3,7 @@ package ffmpeg
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,19 @@ func TestOutputExistsLineIgnoresInputPath(t *testing.T) {
 	assert.True(t, outputExistsLine("File '/tmp/1.mkv' already exists. Exiting."))
 	assert.ErrorIs(t, ErrOutputExists, ErrOutputExists)
 	assert.True(t, IsOutputExists(ErrOutputExists))
+}
+
+func TestStderrTailKeepsExistsLineBeyondWindow(t *testing.T) {
+	var s stderrTail
+	s.add("File '/tmp/1.mkv' already exists. Exiting.")
+	for i := range 20 {
+		s.add(fmt.Sprintf("frame=%d", i))
+	}
+	// 「输出已存在」的行滚出最近几行后仍要保留，供失败时判断覆盖确认。
+	require.Len(t, s.lines, stderrTailKeep)
+	assert.Equal(t, "frame=12", s.lines[0])
+	assert.Equal(t, "frame=19", s.last())
+	assert.Equal(t, "File '/tmp/1.mkv' already exists. Exiting.", s.existsLine())
 }
 
 func TestLineWriterCapsLongLine(t *testing.T) {

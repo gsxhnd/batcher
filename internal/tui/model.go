@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,7 +50,7 @@ type fileItem struct {
 	input       string          // 源文件路径
 	output      string          // 输出文件路径
 	cmd         string          // 已格式化的完整 ffmpeg 命令
-	state       string          // filePending / fileRunning / fileDone / fileFailed / fileCanceled
+	state       string          // filePending / fileRunning / filePaused / fileDone / fileFailed / fileCanceled / fileSkipped
 	logs        []string        // 该任务执行时的 ffmpeg 输出（按行，带样式）
 	attempts    []attemptLog    // 按次数分开的输出，左侧列表挂在子任务下面
 	progress    ffmpeg.Progress // 当前这次执行的 ffmpeg 进度
@@ -589,10 +590,7 @@ func (m *model) recordLine(idx int, line, state string, s lipgloss.Style) {
 		if state != "" {
 			a.status = state
 		}
-		a.lines = append(a.lines, rendered)
-		if len(a.lines) > maxLogLines {
-			a.lines = a.lines[len(a.lines)-maxLogLines:]
-		}
+		a.lines = appendRendered(a.lines, rendered)
 	}
 }
 
@@ -610,15 +608,16 @@ func (m *model) adjustCount(state string, delta int) {
 	}
 }
 
-// appendFileLog 向单个文件的日志缓冲追加一行（带样式），超过上限时丢弃旧行。
+// appendFileLog 向日志缓冲追加一行（带样式），超过上限时丢弃旧行。
 func appendFileLog(logs []string, line string, s lipgloss.Style) []string {
 	return appendRendered(logs, s.Render(line))
 }
 
 func appendRendered(logs []string, rendered string) []string {
 	logs = append(logs, rendered)
-	if len(logs) > maxLogLines {
-		logs = logs[len(logs)-maxLogLines:]
+	if n := len(logs) - maxLogLines; n > 0 {
+		// 用 slices.Delete 截掉前缀，释放已淘汰字符串的引用。
+		logs = slices.Delete(logs, 0, n)
 	}
 	return logs
 }
@@ -715,9 +714,8 @@ func (m *model) pinRosterCursor() {
 	if len(m.roster) == 0 {
 		return
 	}
-	if idx := clamp(m.fileCursor, 0, len(m.roster)-1); idx < len(m.roster) {
-		m.rosterPinBatch, m.rosterPinItem, m.rosterPinAttempt = m.roster[idx].batchID, m.roster[idx].itemID, m.roster[idx].attempt
-	}
+	idx := clamp(m.fileCursor, 0, len(m.roster)-1)
+	m.rosterPinBatch, m.rosterPinItem, m.rosterPinAttempt = m.roster[idx].batchID, m.roster[idx].itemID, m.roster[idx].attempt
 	m.fileCursor = clamp(m.fileCursor, 0, max(len(m.roster)-1, 0))
 }
 
@@ -856,8 +854,6 @@ func (m *model) syncRosterLogPane() {
 	case row.attempt > 0:
 		m.setLogContent(wrapText(strings.Join(m.oneAttemptLines(row), "\n"), m.rightW-2))
 		return
-	case row.batchID == m.filesBatch:
-		lines = m.attemptListLines(row)
 	default:
 		lines = m.attemptListLines(row)
 	}
@@ -1273,11 +1269,11 @@ func (m *model) syncRoster() {
 			title:   title,
 			state:   batchState(b.Status),
 		})
-		explanded, seen := m.expanded[b.ID]
+		open, seen := m.expanded[b.ID]
 		if !seen {
-			explanded = b.Status == task.StatusRunning || b.Status == task.StatusPaused
+			open = b.Status == task.StatusRunning || b.Status == task.StatusPaused
 		}
-		if !explanded {
+		if !open {
 			continue
 		}
 		for _, it := range b.Items {
@@ -1463,19 +1459,24 @@ func (m model) batchByID(id string) (*task.Batch, bool) {
 	return nil, false
 }
 
-// rosterBatches 返回左侧列表要展示的主任务：队列中的在前，仅存在于数据库的历史任务在后。
+// refreshLiveBatches 从队列快照刷新正在队列中的主任务映射。
 func (m *model) refreshLiveBatches() {
 	if m.queue == nil {
 		m.liveBatches = nil
 		return
 	}
-	copies := m.queue.Copies()
-	m.liveBatches = make(map[string]*task.Batch, len(copies))
+	m.liveBatches = liveBatchMap(m.queue.Copies())
+}
+
+// liveBatchMap 把队列快照按 ID 建成映射，跳过空元素。
+func liveBatchMap(copies []*task.Batch) map[string]*task.Batch {
+	live := make(map[string]*task.Batch, len(copies))
 	for _, b := range copies {
 		if b != nil {
-			m.liveBatches[b.ID] = b
+			live[b.ID] = b
 		}
 	}
+	return live
 }
 
 func (m *model) rosterBatches() []*task.Batch {
@@ -1484,12 +1485,11 @@ func (m *model) rosterBatches() []*task.Batch {
 	m.liveBatches = nil
 	if m.queue != nil {
 		copies := m.queue.Copies()
-		m.liveBatches = make(map[string]*task.Batch, len(copies))
+		m.liveBatches = liveBatchMap(copies)
 		for _, b := range copies {
 			if b == nil {
 				continue
 			}
-			m.liveBatches[b.ID] = b
 			seen[b.ID] = true
 			out = append(out, b)
 		}
@@ -1790,19 +1790,18 @@ func (m *model) applyBatchStart(batchID string) tea.Cmd {
 }
 
 // applyBatchFinish 用队列快照对账文件状态与计数，再走统一收尾；
-// 取消的批次按被取消提示，暗示的未启动子任务也同步为 canceled。
+// 取消的批次按被取消提示，未启动的子任务也同步为 canceled。
 func (m *model) applyBatchFinish(e task.QueueEvent) tea.Cmd {
 	if m.running && e.BatchID != m.activeBatch {
 		return nil // 结束的是旧批次消息，忽略
 	}
 	m.resumeTimer()
 	if snap, ok := m.batchByID(e.BatchID); ok {
-		states := buildQueueItems(snap.Items)
-		for i := range states {
+		for i, it := range snap.Items {
 			if i >= len(m.files) {
 				break
 			}
-			m.files[i].state = states[i].state
+			m.files[i].state = itemState(it.Status)
 		}
 		// 按快照状态修正对账：事件计数可能遗漏未启动的子任务，删除的子任务不再计入总数。
 		c := snap.Counts()

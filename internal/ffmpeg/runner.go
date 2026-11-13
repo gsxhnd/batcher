@@ -159,8 +159,9 @@ func (s *stderrTail) add(line string) {
 		s.exists = line
 	}
 	s.lines = append(s.lines, line)
-	if len(s.lines) > stderrTailKeep {
-		s.lines = s.lines[len(s.lines)-stderrTailKeep:]
+	if n := len(s.lines) - stderrTailKeep; n > 0 {
+		// 用 slices.Delete 截掉前缀，释放已淘汰字符串的引用。
+		s.lines = slices.Delete(s.lines, 0, n)
 	}
 }
 

@@ -167,13 +167,7 @@ func (q *Queue) Start(batchID string) error {
 		q.mu.Unlock()
 		return errors.New("队列已停止，无法开始")
 	}
-	var target *Batch
-	for _, b := range q.batches {
-		if b.ID == batchID {
-			target = b
-			break
-		}
-	}
+	target, _ := q.findLocked(batchID)
 	if target == nil {
 		q.mu.Unlock()
 		return fmt.Errorf("未找到任务 %s", batchID)
@@ -253,10 +247,8 @@ func (q *Queue) ItemStatus(batchID, itemID string) (Status, bool) {
 func (q *Queue) BatchCopy(batchID string) (*Batch, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for _, b := range q.batches {
-		if b.ID == batchID {
-			return copyBatch(b), true
-		}
+	if b, _ := q.findLocked(batchID); b != nil {
+		return copyBatch(b), true
 	}
 	return nil, false
 }
@@ -334,18 +326,11 @@ func resetForRetry(b *Batch) {
 // 任务记录文件保留，仅从队列列表中删除。
 func (q *Queue) Discard(batchID string) error {
 	q.mu.Lock()
-	idx := -1
-	for i, b := range q.batches {
-		if b.ID == batchID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
+	b, idx := q.findLocked(batchID)
+	if b == nil {
 		q.mu.Unlock()
 		return fmt.Errorf("未找到任务 %s", batchID)
 	}
-	b := q.batches[idx]
 	if b.Status == StatusRunning {
 		q.mu.Unlock()
 		return errors.New("任务正在执行，无法删除")
@@ -455,13 +440,7 @@ func (q *Queue) drainDecision() {
 // 尚未开始的批次直接标为取消，不再执行。已结束的批次返回错误。
 func (q *Queue) CancelBatch(batchID string) error {
 	q.mu.Lock()
-	var b *Batch
-	for _, other := range q.batches {
-		if other.ID == batchID {
-			b = other
-			break
-		}
-	}
+	b, _ := q.findLocked(batchID)
 	if b == nil {
 		q.mu.Unlock()
 		return fmt.Errorf("未找到任务 %s", batchID)
@@ -497,21 +476,8 @@ func (q *Queue) CancelBatch(batchID string) error {
 // 暂停中的失败子任务由消费者收尾为取消并继续后续子任务；其余子任务立即从列表消失。
 func (q *Queue) DiscardItem(batchID, itemID string) error {
 	q.mu.Lock()
-	var b *Batch
-	var it *Item
-	for _, other := range q.batches {
-		if other.ID != batchID {
-			continue
-		}
-		b = other
-		for _, item := range other.Items {
-			if item.ID == itemID {
-				it = item
-				break
-			}
-		}
-		break
-	}
+	b, _ := q.findLocked(batchID)
+	it := q.findItemLocked(b, itemID)
 	if b == nil || it == nil {
 		q.mu.Unlock()
 		return fmt.Errorf("未找到子任务 %s", itemID)
@@ -847,8 +813,6 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 		finalStatus = StatusFailed
 	}
 	finish(finalStatus)
-	// 主任务结束后继续已经手动开始的下一个主任务。
-	q.wake()
 	return true
 }
 
@@ -925,13 +889,7 @@ func (q *Queue) takePauseDecision(b *Batch, it *Item, decision PauseDecision) (a
 func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	var b *Batch
-	for _, other := range q.batches {
-		if other.ID == batchID {
-			b = other
-			break
-		}
-	}
+	b, _ := q.findLocked(batchID)
 	if b == nil {
 		return fmt.Errorf("未找到任务 %s", batchID)
 	}

@@ -274,11 +274,18 @@ func (p *planner) planExtras(ctx context.Context, sel Selection) (fontsParams, a
 	return fontsParams, advance, subs, nil
 }
 
+// dirInfo 缓存一个视频目录的文件列表与视频主文件名，规划期间只计算一次。
+type dirInfo struct {
+	names []string
+	stems []string
+}
+
 func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsParams, advance []string, subs []subtitleInput) ([]Job, error) {
 	outputs := media.OutputPaths(videos, p.option.OutputPath, p.option.OutputFormat)
 	jobs := make([]Job, 0, len(videos))
-	// 每个视频目录只读取一次，避免多视频、多字幕反复扫描同一目录。
-	directories := make(map[string][]string)
+	// 每个视频目录只读取一次，目录文件列表与视频主文件名都只算一遍，
+	// 避免多视频、多字幕反复扫描同一目录或重复遍历全部视频。
+	dirs := make(map[string]*dirInfo)
 	for _, videoPath := range videos {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -287,18 +294,17 @@ func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsPar
 		var subtitleOutput []string
 		if sel.AddSubtitle {
 			dir := filepath.Dir(videoPath)
-			names, ok := directories[dir]
+			info, ok := dirs[dir]
 			if !ok {
-				var err error
-				names, err = media.ListFiles(dir)
+				names, err := media.ListFiles(dir)
 				if err != nil {
 					return nil, err
 				}
-				directories[dir] = names
+				info = &dirInfo{names: names, stems: videoStems(videos, dir)}
+				dirs[dir] = info
 			}
-			stems := videoStems(videos, dir)
 			for _, sub := range subs {
-				name, err := resolveSubtitle(names, media.Stem(videoPath), sub.Suffix, stems)
+				name, err := resolveSubtitle(info.names, media.Stem(videoPath), sub.Suffix, info.stems)
 				if err != nil {
 					return nil, fmt.Errorf("匹配 %s 的字幕: %w", filepath.Base(videoPath), err)
 				}

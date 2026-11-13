@@ -13,9 +13,8 @@ type fieldKind int
 
 const (
 	fieldString fieldKind = iota
-	fieldInt
-	fieldBool   // 勾选型字段：不吃文本输入，space 切换勾选状态
-	fieldChoice // 若干选项里选一个；新建任务里按 enter 展开列表
+	fieldBool             // 勾选型字段：不吃文本输入，space 切换勾选状态
+	fieldChoice           // 若干选项里选一个；新建任务里按 enter 展开列表
 )
 
 // fieldDef 描述一个表单项映射到 VideoBatchOption 的哪个配置。
@@ -85,9 +84,6 @@ func fieldInputStyles() textinput.Styles {
 	return s
 }
 
-// Checked 返回 bool 字段的勾选状态；非 bool 字段恒为 false。
-func (f *field) Checked() bool { return f.def.kind == fieldBool && f.checked }
-
 // useDefault 把默认值设为灰色占位。输入框保持空白，留空提交时再采用该值。
 func (f *field) useDefault(v string) {
 	f.fallback = v
@@ -114,7 +110,7 @@ func (f *field) applyDefaults(d *command.VideoBatchOption) {
 	case "output_format":
 		f.useDefault(d.OutputFormat)
 	case "advance":
-		f.input.Placeholder = "例如: -c:v h265 -crf 20 -c:a copy（可留空，ctrl+s 可保存为常用参数）"
+		f.input.Placeholder = "例如: -c:v libx265 -crf 26 -c:a copy"
 	case "fonts_path":
 		f.input.Placeholder = "字体文件所在文件夹"
 	}

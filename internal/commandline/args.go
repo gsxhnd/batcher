@@ -82,9 +82,11 @@ func join(args []string, powershell bool) string {
 			quoted[i] = arg
 			continue
 		}
-		escaped := strings.ReplaceAll(arg, "'", "'\\''")
+		var escaped string
 		if powershell {
 			escaped = strings.ReplaceAll(arg, "'", "''")
+		} else {
+			escaped = strings.ReplaceAll(arg, "'", "'\\''")
 		}
 		quoted[i] = "'" + escaped + "'"
 	}

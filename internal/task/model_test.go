@@ -113,6 +113,20 @@ func TestItemAddStderrKeepsTail(t *testing.T) {
 	assert.Equal(t, "l59", it.StderrTail[len(it.StderrTail)-1])
 }
 
+func TestItemAppendAttemptLogKeepsTail(t *testing.T) {
+	it := &Item{}
+	// 没有先调用 BeginAttemptLog 时也会自动开一段；空行不写入、也不开段。
+	it.AppendAttemptLog("")
+	require.Empty(t, it.AttemptLogs)
+	for i := range 60 {
+		it.AppendAttemptLog(fmt.Sprintf("l%d", i))
+	}
+	require.Len(t, it.AttemptLogs, 1)
+	require.Len(t, it.AttemptLogs[0], maxStderrTail)
+	assert.Equal(t, "l10", it.AttemptLogs[0][0])
+	assert.Equal(t, "l59", it.AttemptLogs[0][len(it.AttemptLogs[0])-1])
+}
+
 func TestNewIDIsUniqueAndSortable(t *testing.T) {
 	seen := make(map[string]bool)
 	for range 50 {

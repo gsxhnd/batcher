@@ -166,14 +166,20 @@ func (m model) narrowLayout() string {
 	return drawBox(m.width, m.taskListTitle(), true, true, body, m.bodyH()-2)
 }
 
-// taskListTitle 左侧列表标题，带上主任务数量。
-func (m model) taskListTitle() string {
+// rosterBatchCount 统计列表里的主任务行数（不含子任务行和次数行）。
+func (m model) rosterBatchCount() int {
 	n := 0
 	for _, row := range m.roster {
 		if row.itemID == "" && row.attempt == 0 {
 			n++
 		}
 	}
+	return n
+}
+
+// taskListTitle 左侧列表标题，带上主任务数量。
+func (m model) taskListTitle() string {
+	n := m.rosterBatchCount()
 	if n == 0 {
 		return "任务"
 	}
@@ -228,13 +234,7 @@ func (m model) headerStatus() string {
 		text = fmt.Sprintf("上次执行 %d/%d 成功", m.done, m.total)
 		style = stepOkStyle
 	default:
-		n := 0
-		for _, row := range m.roster {
-			if row.itemID == "" && row.attempt == 0 {
-				n++
-			}
-		}
-		if n == 0 {
+		if n := m.rosterBatchCount(); n == 0 {
 			text = "按 a 创建任务"
 		} else {
 			text = fmt.Sprintf("%d 个任务", n)
@@ -272,7 +272,7 @@ func windowRows(rows []string, cur int, h int) []string {
 	return rows[start:end]
 }
 
-// barLine 在当前面板里把选中行铺成整行高亮。其他面板仍只用文字颜色，避免五条高亮叠在一起。
+// barLine 在左侧任务列表里把光标行铺成整行高亮；其余场合只用文字颜色。
 func (m model) barLine(active, focused bool, plain, styled string) string {
 	if !active || !focused || m.leftW < 8 {
 		return styled
@@ -680,7 +680,7 @@ func (m model) runBarH() int {
 	return 2
 }
 
-// truncate 截断到指定显示宽度。
+// truncateText 截断到指定显示宽度。
 func truncateText(s string, w int) string {
 	return ansi.Truncate(s, max(w, 4), "…")
 }
@@ -731,17 +731,18 @@ func (m model) rosterRowView(idx int, row rosterRow) string {
 
 // fileStatusMark 渲染文件执行状态标记。
 func fileStatusMark(state string) string {
+	glyph := fileStatusGlyph(state)
 	switch state {
 	case fileRunning:
-		return logLineInfoStyle.Render(fileStatusGlyph(state))
+		return logLineInfoStyle.Render(glyph)
 	case filePaused:
-		return statusStyle.Render(fileStatusGlyph(state))
+		return statusStyle.Render(glyph)
 	case fileDone:
-		return logLineDoneStyle.Render(fileStatusGlyph(state))
+		return logLineDoneStyle.Render(glyph)
 	case fileFailed:
-		return logLineFailedStyle.Render(fileStatusGlyph(state))
+		return logLineFailedStyle.Render(glyph)
 	default:
-		return descStyle.Render(fileStatusGlyph(state))
+		return descStyle.Render(glyph)
 	}
 }
 

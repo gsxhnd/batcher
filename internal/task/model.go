@@ -94,7 +94,8 @@ func (it *Item) AppendAttemptLog(line string) {
 	last := len(it.AttemptLogs) - 1
 	it.AttemptLogs[last] = append(it.AttemptLogs[last], line)
 	if n := len(it.AttemptLogs[last]) - maxStderrTail; n > 0 {
-		it.AttemptLogs[last] = it.AttemptLogs[last][n:]
+		// 用 slices.Delete 截掉前缀，释放已淘汰字符串的引用。
+		it.AttemptLogs[last] = slices.Delete(it.AttemptLogs[last], 0, n)
 	}
 }
 

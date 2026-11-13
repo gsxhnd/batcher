@@ -12,7 +12,7 @@ import (
 	"github.com/gsxhnd/batcher/internal/presets"
 )
 
-// modalKind 描述弹窗类型：表单编辑（预设/字幕）或删除确认。
+// modalKind 描述弹窗类型：表单编辑（预设/新建任务）、确认、帮助或预设列表。
 type modalKind int
 
 const (
@@ -50,7 +50,7 @@ type modal struct {
 	showJobFonts bool           // 字体不同，展开后写在各自的子任务里
 	jobOpen      []bool         // 与 jobs 等长，默认全部展开
 	quitting     bool           // 这是退出确认；再按 q 不再重复打开
-	vp           viewport.Model // 帮助弹窗的滚动视口
+	vp           viewport.Model // 长内容弹窗的滚动视口（帮助、入队确认等）
 	// onConfirm 确认回调：由打开处捕获需要的下标等上下文，内部完成变更并清理弹窗。
 	onConfirm func(*model) tea.Cmd
 	returnTo  modalReturn
@@ -481,12 +481,7 @@ func (m *model) updateFormModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 	case "esc":
 		back := md.returnTo
 		if md.kind == modalTask {
-			m.createSeq++
-			m.creating = false
-			if m.createCancel != nil {
-				m.createCancel()
-				m.createCancel = nil
-			}
+			m.stopCreate()
 		}
 		m.modal = nil
 		if back == returnPresetList {
@@ -544,16 +539,8 @@ func (m *model) updateFormModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 		}
 		return nil
 	case "left", "right", "h", "l":
-		f := &md.fields[md.focus]
-		if f.def.kind == fieldBool || f.def.kind == fieldChoice {
-			return nil
-		}
-		var cmd tea.Cmd
-		f.input, cmd = f.input.Update(msg)
-		if md.kind == modalTask {
-			m.syncTaskOutputPlaceholder()
-		}
-		return cmd
+		// 文本字段的光标移动；bool/choice 字段在 updateModalInput 里被守卫拦下。
+		return m.updateModalInput(msg)
 	default:
 		if len(md.fields) == 0 {
 			return nil
@@ -569,16 +556,11 @@ func (m *model) updateFormModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 			}
 			return nil
 		}
-		var cmd tea.Cmd
-		f.input, cmd = f.input.Update(msg)
-		if md.kind == modalTask {
-			m.syncTaskOutputPlaceholder()
-		}
-		return cmd
+		return m.updateModalInput(msg)
 	}
 }
 
-// saveModal 校验并保存当前编辑弹窗（预设或字幕）；失败时把错误写在弹窗内并保持打开。
+// saveModal 校验并保存当前编辑弹窗（预设或新建任务）；失败时把错误写在弹窗内并保持打开。
 // 确认弹窗不经过此函数，由 updateModal 直接回调。
 func (m *model) saveModal() tea.Cmd {
 	switch m.modal.kind {
