@@ -366,12 +366,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKey 按当前状态分发按键：弹窗 > 输出查看 > 执行中取消 > 全局键 > 任务列表。
+// handleKey 按当前状态分发按键：q 只退出 > 弹窗 > 输出查看 > 运行/暂停时的 esc > 全局键 > 任务列表。
+// 文本框里的 q 仍是输入，不退出。
 func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
+	s := key.String()
+	if s == "q" && !m.typingInField() {
+		return m.requestQuit()
+	}
 	if m.modal != nil {
 		return m.updateModal(key)
 	}
-	s := key.String()
 
 	if m.outputFocus {
 		switch s {
@@ -383,26 +387,8 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 
-	if m.running || m.pausedBatch != "" {
-		switch s {
-		case "q", "esc":
-			if s == "esc" && m.outputFocus {
-				m.leaveOutput()
-				return nil
-			}
-			if m.pausedBatch != "" {
-				if m.queue != nil {
-					m.queue.Decide(task.DecisionAbort)
-				}
-				m.clearPause("已发送中止指令")
-				return nil
-			}
-			if m.queue != nil {
-				m.queue.CancelCurrent()
-				m.setStatus("已发送取消请求，等待正在执行的任务结束…")
-			}
-			return nil
-		}
+	if (m.running || m.pausedBatch != "") && s == "esc" {
+		return m.cancelRunning()
 	}
 
 	switch s {
@@ -411,13 +397,72 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 	case "p":
 		m.openPresetList()
 		return nil
-	case "q":
-		return tea.Quit
 	case "?":
 		m.openHelpModal()
 		return nil
 	}
 	return m.updateRunPanel(key)
+}
+
+// typingInField 表示当前按键会写进文本框。这时 q 是路径或参数里的字母，不是退出。
+func (m *model) typingInField() bool {
+	md := m.modal
+	if md == nil || md.picking || (md.kind != modalTask && md.kind != modalPreset) {
+		return false
+	}
+	if md.focus < 0 || md.focus >= len(md.fields) {
+		return false
+	}
+	switch md.fields[md.focus].def.kind {
+	case fieldBool, fieldChoice:
+		return false
+	default:
+		return true
+	}
+}
+
+// requestQuit 退出界面。任务还在执行或暂停时先确认，避免一次按键中止转码。
+func (m *model) requestQuit() tea.Cmd {
+	if m.modal != nil && m.modal.quitting {
+		return nil
+	}
+	if !m.running && m.pausedBatch == "" {
+		return tea.Quit
+	}
+	m.stopCreate()
+	m.openConfirmModal("退出", "任务还在执行，退出会中止当前任务。\n\nenter 退出，esc 留下", func(m *model) tea.Cmd {
+		return tea.Quit
+	})
+	if m.modal != nil {
+		m.modal.quitting = true
+	}
+	return nil
+}
+
+// stopCreate 取消还没完成的任务扫描，避免退出确认打开后扫描结果再弹出。
+func (m *model) stopCreate() {
+	m.createSeq++
+	m.creating = false
+	if m.createCancel != nil {
+		m.createCancel()
+		m.createCancel = nil
+	}
+}
+
+// cancelRunning 结束当前批次：暂停中中止，执行中取消。界面保持到队列收尾。
+func (m *model) cancelRunning() tea.Cmd {
+	if m.pausedBatch != "" {
+		if m.queue != nil {
+			m.queue.Decide(task.DecisionAbort)
+		}
+		m.clearPause("已发送中止指令")
+		return nil
+	}
+	if m.queue != nil {
+		m.queue.CancelCurrent()
+		m.setStatus("已发送取消请求，等待正在执行的任务结束…")
+	}
+	return nil
 }
 
 // handleMouse 处理鼠标滚轮事件：任务面板滚动命令/日志，帮助弹窗滚动帮助文本，其余面板忽略。

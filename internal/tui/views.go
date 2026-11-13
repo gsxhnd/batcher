@@ -863,7 +863,7 @@ func (m model) footer() string {
 			}
 		}
 	case m.outputFocus:
-		hints = []string{"↑/↓ 滚动输出", "esc 返回", "y 复制"}
+		hints = []string{"↑/↓ 滚动输出", "esc 返回", "y 复制", "q 退出"}
 	case m.running || m.queueViewActive():
 		hints = []string{"↑/↓ 切换", "r 重试", "d 删除", "c 取消", "s 跳过", "x 中止", "y 复制", "f 跟随"}
 		if m.canOverwriteFocused() {
@@ -884,9 +884,15 @@ func (m model) footer() string {
 			}
 		}
 		if m.running || m.pausedBatch != "" {
-			hints = append(hints, "a 新建", "q 取消执行")
+			hints = append(hints, "a 新建")
+			if m.pausedBatch != "" {
+				hints = append(hints, "esc 中止")
+			} else {
+				hints = append(hints, "esc 取消执行")
+			}
+			hints = append(hints, "q 退出")
 		} else {
-			hints = append(hints, "a 新建", "p 预设", "? 帮助")
+			hints = append(hints, "a 新建", "p 预设", "? 帮助", "q 退出")
 		}
 	default:
 		hints = []string{"a 新建任务", "p 转码预设", "↑/↓ 选择任务", "? 帮助", "q 退出"}

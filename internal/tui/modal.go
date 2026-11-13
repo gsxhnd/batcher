@@ -47,6 +47,7 @@ type modal struct {
 	sharedFonts  []string       // 各子任务字体相同时，列在列表上方
 	showJobFonts bool           // 字体不同，展开后写在各自的子任务里
 	jobOpen      []bool         // 与 jobs 等长，默认全部展开
+	quitting     bool           // 这是退出确认；再按 q 不再重复打开
 	vp           viewport.Model // 帮助弹窗的滚动视口
 	// onConfirm 确认回调：由打开处捕获需要的下标等上下文，内部完成变更并清理弹窗。
 	onConfirm func(*model) tea.Cmd
@@ -217,7 +218,8 @@ func helpText() string {
 	row("a", "新建任务；执行中也可以创建，新任务排在当前任务之后")
 	row("p", "转码预设管理")
 	row("?", "打开/关闭本帮助")
-	row("q", "退出；执行中或暂停中=取消/中止当前任务")
+	row("q", "退出；任务还在执行时先确认，确认后中止当前任务并退出")
+	row("esc", "关闭弹窗或返回；执行中取消当前任务，暂停中中止当前任务")
 	row("ctrl+c", "强制退出并中止任务")
 	row("拖选", "按住鼠标拖选界面文字，松手后复制；输入框里可直接粘贴")
 
@@ -390,7 +392,7 @@ func (m *model) updateModalInput(msg tea.Msg) tea.Cmd {
 
 func (m *model) updateHelpModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 	switch key.String() {
-	case "esc", "q", "?", "enter", "space", "y":
+	case "esc", "?", "enter", "space", "y":
 		m.modal = nil
 		return nil
 	case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
@@ -413,7 +415,7 @@ func (m *model) updateConfirmModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 			return md.onConfirm(m)
 		}
 		return nil
-	case "esc", "n", "q":
+	case "esc", "n":
 		back := md.returnTo
 		m.modal = nil
 		if back == returnPresetList {
@@ -440,7 +442,7 @@ func (m *model) updateEnqueueConfirm(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 			return md.onConfirm(m)
 		}
 		return nil
-	case "esc", "n", "q":
+	case "esc", "n":
 		m.modal = nil
 		return nil
 	case "enter":

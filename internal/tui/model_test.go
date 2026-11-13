@@ -30,6 +30,10 @@ func isolatePresets(t *testing.T) {
 }
 
 func press(m *model, s string) {
+	_ = pressCmd(m, s)
+}
+
+func pressCmd(m *model, s string) tea.Cmd {
 	var key tea.KeyPressMsg
 	switch s {
 	case "enter":
@@ -57,8 +61,9 @@ func press(m *model, s string) {
 	default:
 		key = tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
 	}
-	next, _ := m.Update(key)
+	next, cmd := m.Update(key)
 	*m = next.(model)
+	return cmd
 }
 
 func TestMainScreenOpensTaskAndPresetModals(t *testing.T) {
@@ -540,11 +545,74 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	press(&m, "x")
 	assert.Contains(t, m.statusMsg, "中止")
 
-	// q/esc 取消当前批次：非暂停时走 CancelCurrent，界面保持执行态直到结束。
+	// esc 取消当前批次：非暂停时走 CancelCurrent，界面保持执行态直到结束。
 	m.pausedBatch = ""
-	press(&m, "q")
+	press(&m, "esc")
 	assert.Contains(t, m.statusMsg, "取消请求")
 	assert.True(t, m.running, "取消是异步的，界面保持执行态直到结束")
+	assert.Nil(t, m.modal, "esc 直接取消，不弹出退出确认")
+}
+
+func TestQuitConfirmsWhileRunning(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	testQueue(t, &m)
+
+	idle := pressCmd(&m, "q")
+	require.NotNil(t, idle)
+	_, quit := idle().(tea.QuitMsg)
+	assert.True(t, quit, "空闲时 q 直接退出")
+	assert.Nil(t, m.modal)
+
+	m.running = true
+	again := pressCmd(&m, "q")
+	assert.Nil(t, again, "执行中 q 先确认，不立刻退出")
+	require.NotNil(t, m.modal)
+	assert.True(t, m.modal.quitting)
+	assert.Equal(t, "退出", m.modal.title)
+	assert.True(t, m.running)
+	assert.NotContains(t, m.statusMsg, "取消请求")
+
+	press(&m, "q")
+	require.NotNil(t, m.modal, "确认框里再按 q 不重复打开，也不退出")
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	assert.True(t, m.running, "留下时任务继续")
+	assert.NotContains(t, m.statusMsg, "取消请求")
+
+	press(&m, "q")
+	confirmed := pressCmd(&m, "enter")
+	require.NotNil(t, confirmed)
+	_, quit = confirmed().(tea.QuitMsg)
+	assert.True(t, quit, "确认后退出")
+	assert.Nil(t, m.modal)
+
+	m.running = true
+	m.pausedBatch = "batch"
+	press(&m, "q")
+	require.NotNil(t, m.modal)
+	assert.Equal(t, "batch", m.pausedBatch, "确认退出时还不中止")
+	press(&m, "esc")
+	press(&m, "esc")
+	assert.Contains(t, m.statusMsg, "中止", "暂停中 esc 中止当前任务")
+}
+
+func TestQTypesIntoTextField(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.running = true
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	_, idx := fieldByKey(m.modal.fields, "input_path")
+	require.NotEqual(t, -1, idx)
+	m.modal.focus = idx
+	focusField(m.modal.fields, idx)
+	press(&m, "q")
+	assert.Equal(t, modalTask, m.modal.kind, "文本框里的 q 不退出")
+	assert.False(t, m.modal.quitting)
+	assert.Equal(t, "q", m.modal.fields[idx].input.Value())
 }
 
 func TestIsISO639Code(t *testing.T) {
