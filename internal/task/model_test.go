@@ -56,6 +56,17 @@ func TestNewBatchFromPlan(t *testing.T) {
 	}
 }
 
+func TestNewBatchUsesPlanName(t *testing.T) {
+	plan, fx := fixturePlan(t)
+	plan.Name = "  我的队列  "
+	b := NewBatch("batch-1", plan, command.Selection{Convert: true}, fixedNow)
+	assert.Equal(t, "我的队列", b.Name, "队列名称去首尾空白后优先于文件夹名")
+
+	plan.Name = "   "
+	b = NewBatch("batch-2", plan, command.Selection{Convert: true}, fixedNow)
+	assert.Equal(t, filepath.Base(fx.Root), b.Name, "空白名称回退到输入文件夹名")
+}
+
 func TestNewBatchMakesInputOutputAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

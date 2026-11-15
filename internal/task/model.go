@@ -164,6 +164,7 @@ func NewID(now time.Time) string {
 }
 
 // NewBatch 用计划快照创建主任务，所有子任务初始为 pending。
+// 队列名称优先用计划里填写的 Name，留空时取输入文件夹名；
 // 配置与参数都是副本，不与计划共享；输入输出目录记为绝对路径，任务记录落在输出目录里。
 func NewBatch(id string, plan *command.BatchPlan, sel command.Selection, now time.Time) *Batch {
 	opt := plan.Option()
@@ -180,10 +181,14 @@ func NewBatch(id string, plan *command.BatchPlan, sel command.Selection, now tim
 	if opt.OutputPath != "" {
 		opt.OutputPath = outputDir
 	}
+	name := strings.TrimSpace(plan.Name)
+	if name == "" {
+		name = filepath.Base(inputDir)
+	}
 	b := &Batch{
 		Version:   recordVersion,
 		ID:        id,
-		Name:      filepath.Base(inputDir),
+		Name:      name,
 		InputDir:  inputDir,
 		OutputDir: outputDir,
 		Selection: sel,

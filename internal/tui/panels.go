@@ -477,6 +477,10 @@ func (m *model) enqueue(plan *command.BatchPlan, sel command.Selection) tea.Cmd 
 		m.setStatus("× 入队失败: " + err.Error())
 		return nil
 	}
+	if name := strings.TrimSpace(plan.Name); name != "" {
+		m.setStatus(fmt.Sprintf("已加入队列「%s」（%d 个任务），在该任务上按 x 开始", name, len(b.Items)))
+		return nil
+	}
 	m.setStatus(fmt.Sprintf("已加入任务队列（%d 个任务），在该任务上按 x 开始", len(b.Items)))
 	return nil
 }

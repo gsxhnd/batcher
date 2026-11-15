@@ -853,7 +853,7 @@ func (m model) footer() string {
 			hints = []string{"↑/↓ 滚动", "esc 关闭"}
 		case modalConfirm:
 			if len(m.modal.jobs) > 0 {
-				hints = []string{"↑/↓ 选择", "enter 展开/收起", "ctrl+s 加入队列", "esc 取消"}
+				hints = []string{"↑/↓ 选择", "enter 展开/收起", "ctrl+s 加入队列", "esc 返回修改"}
 				break
 			}
 			hints = []string{"enter 确认", "esc 取消", "? 快捷键"}

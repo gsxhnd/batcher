@@ -77,7 +77,7 @@ func TestMainScreenOpensTaskAndPresetModals(t *testing.T) {
 	for _, f := range m.modal.fields {
 		keys[f.def.key] = true
 	}
-	for _, key := range []string{"op_convert", "op_subtitle", "op_fonts", "input_path", "input_format", "recursive", "output_path", "output_format", "preset", "advance", "fonts_path", "sub_suffix"} {
+	for _, key := range []string{"op_convert", "op_subtitle", "op_fonts", "batch_name", "input_path", "input_format", "recursive", "output_path", "output_format", "preset", "advance", "fonts_path", "sub_suffix"} {
 		assert.True(t, keys[key], "创建弹窗应直接包含 %s", key)
 	}
 	assert.Contains(t, m.modalView(), "递归扫描子目录", "没勾字幕时递归选项也要显示")
@@ -259,15 +259,42 @@ func TestTaskOutputFollowsInput(t *testing.T) {
 	assert.Equal(t, defaultOutputDir(in.resolved()), out.resolved())
 
 	in.input.SetValue("/videos/show")
-	m.syncTaskOutputPlaceholder()
+	m.syncTaskDefaults()
 	assert.Equal(t, defaultOutputDir("/videos/show"), out.resolved())
 	assert.Empty(t, out.Value(), "跟着源目录走的输出仍是灰色占位")
 
 	out.input.SetValue("/custom/out")
-	m.syncTaskOutputPlaceholder()
+	m.syncTaskDefaults()
 	in.input.SetValue("/videos/other")
-	m.syncTaskOutputPlaceholder()
+	m.syncTaskDefaults()
 	assert.Equal(t, "/custom/out", out.resolved(), "手填的输出目录保持不变")
+}
+
+// TestTaskNameAndFontsDefaults 队列名称占位跟随源目录名且可自定义；字体路径默认值是 fonts。
+func TestTaskNameAndFontsDefaults(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	press(&m, "a")
+	name, ok := findField(&m.modal.fields, "batch_name")
+	require.True(t, ok)
+	assert.Empty(t, name.Value(), "队列名称默认留空")
+	assert.Equal(t, "留空则用源目录名", name.input.Placeholder)
+
+	in, _ := findField(&m.modal.fields, "input_path")
+	in.input.SetValue("/videos/show")
+	m.syncTaskDefaults()
+	assert.Equal(t, "show", name.fallback, "队列名称占位跟随源目录名")
+	assert.Empty(t, name.Value(), "灰色占位只是提示，不写入表单值")
+
+	name.input.SetValue("我的队列")
+	in.input.SetValue("/videos/other")
+	m.syncTaskDefaults()
+	assert.Equal(t, "我的队列", name.Value(), "手填的队列名称保持不变")
+
+	fonts, ok := findField(&m.modal.fields, "fonts_path")
+	require.True(t, ok)
+	assert.Equal(t, "fonts", fonts.fallback, "字体路径默认值是 fonts")
+	assert.Equal(t, "fonts", fonts.resolved(), "留空保存时采用 fonts")
 }
 
 func TestCreateTaskRejectsEmptySelection(t *testing.T) {
@@ -491,20 +518,23 @@ func TestTryStartRunValidation(t *testing.T) {
 	assert.Empty(t, m.queue.Snapshot())
 	assert.False(t, m.running)
 
-	m.modal.focus = 2 // 添加字体
-	press(&m, "space")
-	press(&m, "ctrl+s")
-	assert.Contains(t, m.statusMsg, "字体")
-	assert.Empty(t, m.queue.Snapshot())
-
-	m.modal.focus = 2
-	press(&m, "space") // 取消字体
-	m.modal.focus = 1  // 添加字幕
+	m.modal.focus = 1 // 添加字幕
 	press(&m, "space")
 	m.modal.focus = len(m.modal.fields) - 1
 	m.removeSubtitleFields()
 	press(&m, "ctrl+s")
 	assert.Contains(t, m.statusMsg, "字幕")
+	assert.Empty(t, m.queue.Snapshot())
+	assert.False(t, m.running)
+
+	// 字体路径默认 fonts，勾选后表单校验通过，直接进入扫描而不是弹错误提示。
+	m.modal.focus = 1 // 取消字幕
+	press(&m, "space")
+	m.modal.focus = 2 // 添加字体
+	press(&m, "space")
+	press(&m, "ctrl+s")
+	assert.True(t, m.creating, "字体路径默认 fonts 时校验通过，开始扫描")
+	assert.Empty(t, m.statusMsg, "进入扫描后清掉右上角提示")
 	assert.Empty(t, m.queue.Snapshot())
 	assert.False(t, m.running)
 }
@@ -784,7 +814,10 @@ func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
 	assert.Contains(t, m.modalView(), "/v/a.chi.ass")
 
 	press(&m, "esc")
-	assert.Nil(t, m.modal)
+	assert.Equal(t, modalTask, m.modal.kind, "esc 返回创建任务表单而不是直接取消")
+	assert.Empty(t, m.queue.Snapshot())
+	press(&m, "esc")
+	assert.Nil(t, m.modal, "在创建表单里再按 esc 才关闭")
 	assert.Empty(t, m.queue.Snapshot())
 
 	m.createSeq = 2
@@ -855,6 +888,70 @@ func TestEnqueueConfirmScrollsToFocusedJob(t *testing.T) {
 	assert.Equal(t, 1, m.modal.focus)
 	assert.Positive(t, m.modal.vp.YOffset(), "移到下面的子任务时应把它滚进视口")
 	assert.Contains(t, m.modal.vp.View(), "b.mkv")
+}
+
+// TestCreateTaskUsesCustomQueueName 确认弹窗与队列都使用表单里填写的队列名称。
+func TestCreateTaskUsesCustomQueueName(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	testQueue(t, &m)
+	plan := &command.BatchPlan{Jobs: []command.Job{
+		{Input: "/v/a.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/a.mkv", "/out/a.mkv"}},
+	}}
+
+	m.createSeq = 1
+	m.modal = &modal{kind: modalTask}
+	next, _ := m.Update(createPlanMsg{seq: 1, plan: plan, name: "我的队列"})
+	m = next.(model)
+	require.NotNil(t, m.modal)
+	assert.Equal(t, modalConfirm, m.modal.kind)
+	assert.Contains(t, m.modalView(), "我的队列", "确认弹窗显示自定义队列名称")
+
+	press(&m, "ctrl+s")
+	require.Len(t, m.queue.Snapshot(), 1)
+	assert.Equal(t, "我的队列", m.queue.Snapshot()[0].Name, "入队后主任务使用自定义名称")
+	assert.Contains(t, m.statusMsg, "我的队列", "入队成功提示带上队列名称")
+}
+
+// TestEnqueueConfirmEscReturnsToTaskForm 入队确认里按 esc 回到创建表单继续改参数，
+// 已填内容保留；再次生成后仍能进入确认并正常入队。
+func TestEnqueueConfirmEscReturnsToTaskForm(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	testQueue(t, &m)
+	press(&m, "a")
+	require.Equal(t, modalTask, m.modal.kind)
+	name, ok := findField(&m.modal.fields, "batch_name")
+	require.True(t, ok)
+	name.input.SetValue("我的队列")
+
+	plan := &command.BatchPlan{Jobs: []command.Job{
+		{Input: "/v/a.mkv", Args: []string{"-nostdin", "-n", "-i", "/v/a.mkv", "/out/a.mkv"}},
+	}}
+	m.createSeq = 1
+	next, _ := m.Update(createPlanMsg{seq: 1, plan: plan, name: "我的队列"})
+	m = next.(model)
+	require.Equal(t, modalConfirm, m.modal.kind)
+
+	press(&m, "esc")
+	require.Equal(t, modalTask, m.modal.kind, "esc 返回创建任务表单而不是直接取消")
+	saved, ok := findField(&m.modal.fields, "batch_name")
+	require.True(t, ok)
+	assert.Equal(t, "我的队列", saved.input.Value(), "返回表单后已填内容保留")
+	assert.Contains(t, m.modalView(), "新建任务", "表单正常渲染")
+	assert.Empty(t, m.queue.Snapshot(), "esc 不会入队")
+
+	// 回到表单后再生成一次，仍能进入确认并入队
+	m.createSeq = 2
+	next, _ = m.Update(createPlanMsg{seq: 2, plan: plan, name: "我的队列"})
+	m = next.(model)
+	require.Equal(t, modalConfirm, m.modal.kind)
+	press(&m, "ctrl+s")
+	require.Len(t, m.queue.Snapshot(), 1)
+	assert.Equal(t, "我的队列", m.queue.Snapshot()[0].Name)
 }
 
 func TestSavedTaskRemainsAfterRestart(t *testing.T) {

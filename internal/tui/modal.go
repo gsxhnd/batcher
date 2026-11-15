@@ -54,6 +54,8 @@ type modal struct {
 	// onConfirm 确认回调：由打开处捕获需要的下标等上下文，内部完成变更并清理弹窗。
 	onConfirm func(*model) tea.Cmd
 	returnTo  modalReturn
+	// taskForm 是入队确认要返回的新建任务表单；为 nil 时 esc 直接关闭。
+	taskForm *modal
 }
 
 // openPresetModal 打开转码参数编辑弹窗。index=-1 表示新增，p 为表单初始值。
@@ -246,9 +248,9 @@ func helpText() string {
 	row("enter", "下一项；转码预设先展开列表，上下选择后再确认；最后一项先确认输入再创建")
 	row("ctrl+n / ctrl+d", "增加或删除一条字幕")
 	row("字幕组", "多条字幕时，没选中的组收成一行，移到该行展开")
-	row("ctrl+s", "生成任务；确认弹窗里再按一次，把任务加入队列")
+	row("ctrl+s", "生成任务并进入确认；确认弹窗里再按一次，把任务加入队列")
 	row("确认入队", "子任务默认全部展开，↑/↓ 选择，enter 收起或展开")
-	row("esc", "关闭预设列表，否则取消")
+	row("esc", "确认入队时返回创建表单；预设列表里收起列表；其余取消创建")
 
 	section("转码预设")
 	row("p", "打开预设管理")
@@ -389,7 +391,7 @@ func (m *model) updateModalInput(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	f.input, cmd = f.input.Update(msg)
 	if md.kind == modalTask {
-		m.syncTaskOutputPlaceholder()
+		m.syncTaskDefaults()
 	}
 	return cmd
 }
@@ -447,6 +449,14 @@ func (m *model) updateEnqueueConfirm(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 		}
 		return nil
 	case "esc", "n":
+		// esc 回到新建任务表单继续改参数；不是从表单进入时直接关闭。
+		if form := md.taskForm; form != nil {
+			m.modal = form
+			if len(form.fields) > 0 {
+				return focusField(form.fields, form.focus)
+			}
+			return nil
+		}
 		m.modal = nil
 		return nil
 	case "enter":

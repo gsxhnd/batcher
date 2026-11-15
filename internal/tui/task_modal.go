@@ -21,6 +21,7 @@ func (m *model) openTaskModal() tea.Cmd {
 		{key: "op_convert", label: "视频转码", kind: fieldBool},
 		{key: "op_subtitle", label: "添加字幕", kind: fieldBool},
 		{key: "op_fonts", label: "添加字体", kind: fieldBool},
+		{key: "batch_name", label: "队列名称"},
 		{key: "input_path", label: "源视频路径"},
 		{key: "input_format", label: "源视频后缀"},
 		{key: "recursive", label: "递归扫描子目录", kind: fieldBool},
@@ -41,7 +42,7 @@ func (m *model) openTaskModal() tea.Cmd {
 	}
 	m.modal = &modal{kind: modalTask, title: "新建任务", fields: fields}
 	m.appendSubtitleFields(subtitleDefaults())
-	m.syncTaskOutputPlaceholder()
+	m.syncTaskDefaults()
 	return focusField(m.modal.fields, 0)
 }
 
@@ -54,26 +55,49 @@ func defaultOutputDir(input string) string {
 	return filepath.Join(input, "result")
 }
 
-// syncTaskOutputPlaceholder 在输出目录还没手填时，把灰色占位改成源目录下的 result。
-func (m *model) syncTaskOutputPlaceholder() {
+// syncTaskDefaults 在输出目录和队列名称还没手填时，把灰色占位改成跟随源目录的默认值。
+func (m *model) syncTaskDefaults() {
 	md := m.modal
 	if md == nil {
 		return
 	}
 	var input string
-	var output *field
+	var output, name *field
 	for i := range md.fields {
 		switch md.fields[i].def.key {
 		case "input_path":
 			input = md.fields[i].resolved()
 		case "output_path":
 			output = &md.fields[i]
+		case "batch_name":
+			name = &md.fields[i]
 		}
 	}
-	if output == nil || output.Value() != "" {
-		return
+	if output != nil && output.Value() == "" {
+		output.useDefault(defaultOutputDir(input))
 	}
-	output.useDefault(defaultOutputDir(input))
+	if name != nil && name.Value() == "" {
+		if base := defaultBatchName(input); base != "" {
+			name.useDefault(base)
+		} else {
+			name.fallback = ""
+			name.input.Placeholder = "留空则用源目录名"
+		}
+	}
+}
+
+// defaultBatchName 是未填写队列名称时显示的名称：源目录的文件夹名。
+// 源路径为空或指向根目录时返回空，让位给灰色的提示文字。
+func defaultBatchName(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	base := filepath.Base(input)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return base
 }
 
 // checkTaskOp 勾选新建任务里的一项操作，用来在添加字幕时把字幕区展开。
@@ -232,31 +256,36 @@ func (m *model) saveTaskModal() tea.Cmd {
 	if m.creating || m.modal == nil {
 		return nil
 	}
-	sel, opt, cmd, ok := m.collectTaskForm(m.modal)
+	sel, opt, name, cmd, ok := m.collectTaskForm(m.modal)
 	if !ok {
 		return cmd
 	}
-	return m.startTaskScan(sel, opt)
+	return m.startTaskScan(sel, opt, name)
 }
 
 // collectTaskForm 读取并校验新建任务表单。校验失败时 ok 为 false，
 // 错误发到右上角 toast，cmd 用来把光标移回出错字段，弹窗保持打开。
-func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatchOption, tea.Cmd, bool) {
+// name 是用户填写的队列名称；留空时主任务沿用输入文件夹名。
+func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatchOption, string, tea.Cmd, bool) {
 	sel := command.Selection{}
 	opt := command.DefaultOption()
+	name := ""
+	if f, _ := fieldByKey(md.fields, "batch_name"); f != nil {
+		name = f.Value()
+	}
 	subs := readSubtitleGroups(md.fields, &sel, &opt)
 	if !sel.Any() {
 		m.setStatus("× 请至少勾选一项操作")
-		return sel, opt, focusField(md.fields, 0), false
+		return sel, opt, name, focusField(md.fields, 0), false
 	}
 	if sel.AddFonts && strings.TrimSpace(opt.FontsPath) == "" {
 		m.setStatus("× 添加字体需要填写字体文件夹")
-		return sel, opt, focusTaskField(md, "fonts_path"), false
+		return sel, opt, name, focusTaskField(md, "fonts_path"), false
 	}
 	if sel.Convert && strings.TrimSpace(opt.Advance) != "" {
 		if _, err := commandline.Parse(opt.Advance); err != nil {
 			m.setStatus("× " + err.Error())
-			return sel, opt, focusTaskField(md, "advance"), false
+			return sel, opt, name, focusTaskField(md, "advance"), false
 		}
 	}
 	if !sel.Convert {
@@ -267,14 +296,14 @@ func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatc
 	}
 	if !sel.AddSubtitle {
 		opt.Subtitles = nil
-		return sel, opt, nil, true
+		return sel, opt, name, nil, true
 	}
 	if err := validateSubtitles(subs); err != "" {
 		m.setStatus("× " + err)
-		return sel, opt, nil, false
+		return sel, opt, name, nil, false
 	}
 	opt.Subtitles = subs
-	return sel, opt, nil, true
+	return sel, opt, name, nil, true
 }
 
 // readSubtitleGroups 从字段里收集操作勾选、路径和字幕组。空白字幕组会被丢掉。
@@ -352,7 +381,7 @@ func validateSubtitles(subs []command.SubtitleOption) string {
 	return ""
 }
 
-func (m *model) startTaskScan(sel command.Selection, opt command.VideoBatchOption) tea.Cmd {
+func (m *model) startTaskScan(sel command.Selection, opt command.VideoBatchOption, name string) tea.Cmd {
 	m.createSel = sel
 	m.creating = true
 	m.createSeq++
@@ -370,7 +399,7 @@ func (m *model) startTaskScan(sel command.Selection, opt command.VideoBatchOptio
 	m.setStatus("")
 	return func() tea.Msg {
 		plan, err := command.BuildPlan(ctx, &opt, sel)
-		return createPlanMsg{seq: seq, plan: plan, err: err}
+		return createPlanMsg{seq: seq, plan: plan, err: err, name: name}
 	}
 }
 
@@ -408,10 +437,16 @@ type jobSpan struct {
 // 字体由 -attach 写入，不在 -i 里；各任务字体相同时只准备一份。
 func enqueueJobs(plan *command.BatchPlan) (header string, shared []string, jobs []enqueueJob, showJobFonts bool) {
 	n := 0
+	name := ""
 	if plan != nil {
 		n = len(plan.Jobs)
+		name = strings.TrimSpace(plan.Name)
 	}
-	header = fmt.Sprintf("确认将 %d 个任务加入队列？", n)
+	if name != "" {
+		header = fmt.Sprintf("确认将 %d 个任务加入队列「%s」？", n, name)
+	} else {
+		header = fmt.Sprintf("确认将 %d 个任务加入队列？", n)
+	}
 	if plan == nil || n == 0 {
 		return header, nil, nil, false
 	}
@@ -443,11 +478,16 @@ func enqueueJobs(plan *command.BatchPlan) (header string, shared []string, jobs 
 }
 
 // openEnqueueConfirm 打开入队确认。子任务默认全部展开，enter 收起或展开，ctrl+s 加入队列。
+// esc 回到来源的新建任务表单继续改参数；不是从表单进入时（测试等场景）直接关闭。
 func (m *model) openEnqueueConfirm(plan *command.BatchPlan, onConfirm func(*model) tea.Cmd) {
 	header, shared, jobs, showFonts := enqueueJobs(plan)
 	open := make([]bool, len(jobs))
 	for i := range open {
 		open[i] = true
+	}
+	var taskForm *modal
+	if m.modal != nil && m.modal.kind == modalTask {
+		taskForm = m.modal
 	}
 	m.modal = &modal{
 		kind:         modalConfirm,
@@ -458,6 +498,7 @@ func (m *model) openEnqueueConfirm(plan *command.BatchPlan, onConfirm func(*mode
 		showJobFonts: showFonts,
 		jobOpen:      open,
 		onConfirm:    onConfirm,
+		taskForm:     taskForm,
 	}
 	m.layoutConfirm()
 }
@@ -867,7 +908,7 @@ func (m model) taskModalLines(boxW int) []taskLine {
 		case "op_fonts":
 			fontOn = md.fields[i].checked
 			ops = append(ops, i)
-		case "input_path", "input_format", "recursive", "output_path", "output_format":
+		case "batch_name", "input_path", "input_format", "recursive", "output_path", "output_format":
 			paths = append(paths, i)
 		case "preset", "advance":
 			encode = append(encode, i)
@@ -939,7 +980,7 @@ func (m model) taskModalLines(boxW int) []taskLine {
 
 	if fontOn {
 		rule()
-		head("字体", "目录里的字体都会作为附件写入")
+		head("字体", "留空使用 fonts；目录里的字体都会作为附件写入")
 		fieldsOf(fonts, nil)
 	}
 

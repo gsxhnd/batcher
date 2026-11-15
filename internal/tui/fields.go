@@ -112,7 +112,8 @@ func (f *field) applyDefaults(d *command.VideoBatchOption) {
 	case "advance":
 		f.input.Placeholder = "例如: -c:v libx265 -crf 26 -c:a copy"
 	case "fonts_path":
-		f.input.Placeholder = "字体文件所在文件夹"
+		// 默认用当前目录下的 fonts；灰色占位提示，留空保存时采用。
+		f.useDefault("fonts")
 	}
 }
 

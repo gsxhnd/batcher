@@ -228,6 +228,8 @@ type createPlanMsg struct {
 	seq  int
 	plan *command.BatchPlan
 	err  error
+	// name 是表单里填写的队列名称；写入计划快照，供确认与入队使用。
+	name string
 }
 
 type eventMsg struct {
@@ -291,6 +293,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		plan := msg.plan
+		plan.Name = msg.name
 		sel := m.createSel
 		m.openEnqueueConfirm(plan, func(m *model) tea.Cmd {
 			return m.enqueue(plan, sel)

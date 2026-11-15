@@ -25,7 +25,9 @@ type Job struct {
 // BatchPlan 保存配置与任务快照；调用方应只读使用 Jobs。
 // 预览与执行共用该快照，不在执行时重新扫描或重新生成命令。
 type BatchPlan struct {
-	Jobs   []Job
+	Jobs []Job
+	// Name 是创建时在表单里填写的队列名称；为空时主任务沿用输入文件夹名。
+	Name   string
 	option VideoBatchOption
 }
 
