@@ -416,7 +416,12 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 // typingInField 表示当前按键会写进文本框。这时 q 是路径或参数里的字母，不是退出。
 func (m *model) typingInField() bool {
 	md := m.modal
-	if md == nil || md.picking || (md.kind != modalTask && md.kind != modalPreset) {
+	if md == nil || md.picking {
+		return false
+	}
+	switch md.kind {
+	case modalTask, modalPreset, modalRename:
+	default:
 		return false
 	}
 	if md.focus < 0 || md.focus >= len(md.fields) {
@@ -437,7 +442,7 @@ func (m *model) modalHoldsQuit() bool {
 		return false
 	}
 	switch md.kind {
-	case modalTask, modalPreset, modalPresetList:
+	case modalTask, modalPreset, modalRename, modalPresetList:
 		return true
 	case modalConfirm:
 		return len(md.jobs) > 0 || md.returnTo == returnPresetList

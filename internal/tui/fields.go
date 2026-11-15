@@ -38,6 +38,11 @@ var presetFieldDefs = []fieldDef{
 	{key: "preset_args", label: "高级参数"},
 }
 
+// renameFieldDefs 是主任务重命名的编辑字段。
+var renameFieldDefs = []fieldDef{
+	{key: "task_name", label: "任务名称"},
+}
+
 // field 保存表单项的运行时状态。
 type field struct {
 	def        fieldDef

@@ -253,6 +253,22 @@ func (q *Queue) BatchCopy(batchID string) (*Batch, bool) {
 	return nil, false
 }
 
+// Rename 修改主任务的展示名称并落盘。名称只是列表里的标签，
+// 不影响执行、输入输出路径和子任务；任务不在队列中时返回错误。
+func (q *Queue) Rename(batchID, name string) error {
+	q.mu.Lock()
+	target, _ := q.findLocked(batchID)
+	if target == nil {
+		q.mu.Unlock()
+		return fmt.Errorf("未找到任务 %s", batchID)
+	}
+	target.Name = strings.TrimSpace(name)
+	q.persistLocked(target)
+	q.mu.Unlock()
+	q.signalSave()
+	return nil
+}
+
 // RetryBatch 重试主任务：暂停中的批次转为重试当前失败的子任务；
 // 已结束（failed/canceled/interrupted）的批次把失败过/被取消的子任务重置为 pending
 // （done 与跳过的保持不变）并重新排队执行。

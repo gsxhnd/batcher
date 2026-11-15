@@ -107,8 +107,8 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		}
 	}
 	// 队列视图的任务操作键：按光标所在行分发（子任务/批次行）。
-	if m.runTaskKeys(key.String()) {
-		return nil
+	if consumed, cmd := m.runTaskKeys(key.String()); consumed {
+		return cmd
 	}
 	switch key.String() {
 	case "f":
@@ -165,47 +165,86 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 }
 
 // runTaskKeys 处理队列视图下的任务操作。按光标所在行分发：
-// r 重试（暂停中的失败子任务，或已结束主任务里失败/取消的子任务）；
+// n 重命名主任务；r 重试（暂停中的失败子任务，或已结束主任务里失败/取消的子任务）；
 // d 删除子任务或整个主任务；c 取消主任务；暂停时 s 跳过、x 中止。
-// 返回是否消费了该按键。
-func (m *model) runTaskKeys(key string) bool {
+// 返回是否消费了该按键，以及要执行的命令（打开输入弹窗时的光标闪烁）。
+func (m *model) runTaskKeys(key string) (bool, tea.Cmd) {
 	if m.queue == nil {
-		return false
+		return false, nil
 	}
 	if key == "c" && !m.queueViewActive() {
 		if !m.running {
-			return false
+			return false, nil
 		}
 		m.queue.CancelCurrent()
 		m.setStatus("已发送取消请求，等待正在执行的任务结束…")
-		return true
+		return true, nil
 	}
 	if !m.queueViewActive() {
-		return false
+		return false, nil
 	}
 	row, ok := m.focusedRosterRow()
 	if !ok {
-		return false
+		return false, nil
 	}
 	switch key {
+	case "n":
+		return m.renameFocused(row)
 	case "c":
-		return m.cancelFocused(row)
+		return m.cancelFocused(row), nil
 	case "d":
-		return m.deleteFocused(row)
+		return m.deleteFocused(row), nil
 	case "r":
-		return m.retryFocused(row)
+		return m.retryFocused(row), nil
 	case "o":
-		return m.confirmOverwrite(row)
+		return m.confirmOverwrite(row), nil
 	case "s":
-		return m.pauseDecision(row, task.DecisionSkip, "已发送跳过指令")
+		return m.pauseDecision(row, task.DecisionSkip, "已发送跳过指令"), nil
 	case "x":
 		if m.startFocused(row) {
-			return true
+			return true, nil
 		}
-		return m.pauseDecision(row, task.DecisionAbort, "已发送中止指令")
+		return m.pauseDecision(row, task.DecisionAbort, "已发送中止指令"), nil
 	default:
-		return false
+		return false, nil
 	}
+}
+
+// renameFocused 重命名光标所在的主任务。子任务行和某一次的行不支持。
+func (m *model) renameFocused(row rosterRow) (bool, tea.Cmd) {
+	if row.itemID != "" {
+		return false, nil
+	}
+	b, ok := m.batchByID(row.batchID)
+	if !ok {
+		m.setStatus("× 未找到任务，无法重命名")
+		return true, nil
+	}
+	return true, m.openRenameModal(b)
+}
+
+// renameBatch 修改主任务名称并持久化。队列中的任务经队列改名（异步落盘，列表实时刷新）；
+// 历史任务不在队列里，直接改数据库副本。最后重读数据库并刷新列表。
+func (m *model) renameBatch(id, name string) error {
+	if m.queue != nil {
+		if _, inQueue := m.queue.BatchCopy(id); inQueue {
+			if err := m.queue.Rename(id, name); err != nil {
+				return err
+			}
+			m.syncRoster()
+			return nil
+		}
+	}
+	b, ok := m.batchByID(id)
+	if !ok {
+		return fmt.Errorf("未找到任务 %s", id)
+	}
+	b.Name = strings.TrimSpace(name)
+	if err := b.Save(); err != nil {
+		return err
+	}
+	m.syncRosterFromStore()
+	return nil
 }
 
 // confirmOverwrite 对「输出已存在」的失败确认一次，然后带覆盖重试。

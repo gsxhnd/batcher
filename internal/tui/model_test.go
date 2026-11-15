@@ -954,6 +954,126 @@ func TestEnqueueConfirmEscReturnsToTaskForm(t *testing.T) {
 	assert.Equal(t, "我的队列", m.queue.Snapshot()[0].Name)
 }
 
+// TestRenameTaskUpdatesName 主任务行按 n 重命名：输入框预填当前名称，保存后队列
+// 副本、落盘记录和列表标题同步更新；空名称弹窗保持打开；子任务行没有重命名。
+func TestRenameTaskUpdatesName(t *testing.T) {
+	isolatePresets(t)
+	dir := t.TempDir()
+	db, err := store.OpenDir(dir)
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	m.db = db
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	require.NoError(t, err)
+	m.syncRoster()
+	require.NotEmpty(t, m.roster)
+	require.Empty(t, m.roster[0].itemID, "光标应停在主任务行")
+
+	press(&m, "n")
+	require.NotNil(t, m.modal)
+	require.Equal(t, modalRename, m.modal.kind)
+	require.Len(t, m.modal.fields, 1)
+	assert.Equal(t, batch.Name, m.modal.fields[0].Value(), "输入框预填当前名称")
+
+	m.modal.fields[0].input.SetValue("  新的名字  ")
+	press(&m, "enter")
+	assert.Nil(t, m.modal)
+	renamed, ok := m.queue.BatchCopy(batch.ID)
+	require.True(t, ok)
+	assert.Equal(t, "新的名字", renamed.Name, "队列里的名称已更新（去首尾空白）")
+	assert.Contains(t, m.roster[0].title, "新的名字", "列表标题同步更新")
+	assert.Contains(t, m.statusMsg, "新的名字")
+
+	// 空名称不能保存，弹窗保持打开继续改
+	press(&m, "n")
+	require.Equal(t, modalRename, m.modal.kind)
+	m.modal.fields[0].input.SetValue("   ")
+	press(&m, "ctrl+s")
+	require.NotNil(t, m.modal, "空名称时弹窗保持打开")
+	assert.Contains(t, m.modal.err, "不能为空")
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+
+	// 子任务行不支持重命名
+	press(&m, "enter")
+	require.Greater(t, len(m.roster), 1)
+	m.fileCursor = 1
+	press(&m, "n")
+	assert.Nil(t, m.modal, "子任务行没有重命名")
+
+	// 名称随异步保存落盘
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		saved, err := task.LoadTask(batch.ID)
+		if err == nil && saved.Name == "新的名字" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	saved, err := task.LoadTask(batch.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "新的名字", saved.Name, "重命名已持久化")
+}
+
+// TestRenameHistoryTask 不在队列里的历史任务也能重命名：直接改数据库副本并刷新列表。
+func TestRenameHistoryTask(t *testing.T) {
+	isolatePresets(t)
+	dir := t.TempDir()
+	db, err := store.OpenDir(dir)
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	first := newModel()
+	first.db = db
+	testQueue(t, &first)
+	batch, err := first.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
+	require.NoError(t, err)
+
+	// 新模型接同一个库：批次不在队列里，走历史任务路径
+	again := newModel()
+	again.db = db
+	again.initQueue(make(chan tea.Msg, 8))
+	t.Cleanup(again.queue.Stop)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		again.syncRosterFromStore()
+		if len(again.roster) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NotEmpty(t, again.roster)
+
+	press(&again, "n")
+	require.NotNil(t, again.modal)
+	require.Equal(t, modalRename, again.modal.kind)
+	again.modal.fields[0].input.SetValue("历史任务改名")
+	press(&again, "enter")
+	assert.Nil(t, again.modal)
+	assert.Contains(t, again.roster[0].title, "历史任务改名", "列表标题同步更新")
+
+	saved, err := db.LoadTask(batch.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "历史任务改名", saved.Name, "历史任务改名直接落盘")
+}
+
 func TestSavedTaskRemainsAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.OpenDir(dir)

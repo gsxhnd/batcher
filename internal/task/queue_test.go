@@ -689,6 +689,37 @@ func TestBatchNameDeduplication(t *testing.T) {
 	assert.NotEqual(t, snap1.ID, snap2.ID)
 }
 
+func TestQueueRename(t *testing.T) {
+	plan, _ := fixturePlan(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, _ := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan, command.Selection{Convert: true})
+	require.NoError(t, err)
+
+	require.NoError(t, q.Rename(b.ID, "  我的队列  "))
+	got, ok := q.BatchCopy(b.ID)
+	require.True(t, ok)
+	assert.Equal(t, "我的队列", got.Name, "队列副本的名称去首尾空白后更新")
+
+	// 名称随异步保存落盘；轮询等保存协程写完。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		saved, err := LoadTask(b.ID)
+		if err == nil && saved.Name == "我的队列" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	saved, err := LoadTask(b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "我的队列", saved.Name, "重命名已持久化")
+
+	assert.ErrorContains(t, q.Rename("nope", "x"), "未找到任务")
+}
+
 func TestQueueSkipsDoneItems(t *testing.T) {
 	plan, _ := fixturePlan(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

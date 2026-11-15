@@ -865,6 +865,8 @@ func (m model) footer() string {
 			switch m.modal.kind {
 			case modalTask:
 				hints = []string{"↑/↓ 切换", "space 勾选", "ctrl+n 加字幕", "ctrl+s 创建", "esc 取消"}
+			case modalRename:
+				hints = []string{"enter 保存", "esc 取消"}
 			case modalPresetList:
 				hints = []string{"↑/↓ 选择", "a 空白新建", "c 复制", "e 编辑", "d 删除", "J/K 排序", "esc 关闭"}
 			}

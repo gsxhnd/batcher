@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/gsxhnd/batcher/internal/commandline"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/task"
 )
 
 // modalKind 描述弹窗类型：表单编辑（预设/新建任务）、确认、帮助或预设列表。
@@ -21,6 +22,7 @@ const (
 	modalHelp                        // 快捷键帮助（? 键开关）
 	modalTask                        // 新建任务：全部字段在同一个弹窗里
 	modalPresetList                  // 转码预设管理列表
+	modalRename                      // 主任务重命名（单个名称字段）
 )
 
 // modalReturn 是这个弹窗关闭后要回到的界面。只记在当前弹窗上，
@@ -56,6 +58,8 @@ type modal struct {
 	returnTo  modalReturn
 	// taskForm 是入队确认要返回的新建任务表单；为 nil 时 esc 直接关闭。
 	taskForm *modal
+	// renameID 是重命名弹窗要修改的主任务 ID。
+	renameID string
 }
 
 // openPresetModal 打开转码参数编辑弹窗。index=-1 表示新增，p 为表单初始值。
@@ -78,6 +82,18 @@ func (m *model) openPresetModal(index int, p presets.Preset) tea.Cmd {
 		back = returnPresetList
 	}
 	m.modal = &modal{kind: modalPreset, title: title, fields: fields, editIndex: index, returnTo: back}
+	return m.modal.fields[0].input.Focus()
+}
+
+// openRenameModal 打开主任务重命名弹窗，输入框预填当前名称。
+func (m *model) openRenameModal(b *task.Batch) tea.Cmd {
+	fields := make([]field, 0, len(renameFieldDefs))
+	for _, def := range renameFieldDefs {
+		nf := newField(def)
+		nf.input.SetValue(b.Name)
+		fields = append(fields, nf)
+	}
+	m.modal = &modal{kind: modalRename, title: "重命名任务", fields: fields, renameID: b.ID}
 	return m.modal.fields[0].input.Focus()
 }
 
@@ -231,6 +247,7 @@ func helpText() string {
 	row("↑/↓", "在主任务、子任务和每一次之间移动")
 	row("enter", "折叠/展开主任务或某一次；进入输出后 esc 返回")
 	row("y", "复制当前子任务的命令（主任务行=整个任务全部命令）")
+	row("n", "重命名主任务（弹窗里改名称，enter 保存）")
 	row("r", "重试失败的子任务；已结束或历史任务重新排队")
 	row("o", "输出已存在时覆盖。确认一次后重试")
 	row("d", "删除子任务，或把主任务从列表和数据库移除")
@@ -572,7 +589,7 @@ func (m *model) updateFormModal(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 	}
 }
 
-// saveModal 校验并保存当前编辑弹窗（预设或新建任务）；失败时把错误写在弹窗内并保持打开。
+// saveModal 校验并保存当前编辑弹窗（预设、新建任务或重命名）；失败时把错误写在弹窗内并保持打开。
 // 确认弹窗不经过此函数，由 updateModal 直接回调。
 func (m *model) saveModal() tea.Cmd {
 	switch m.modal.kind {
@@ -580,7 +597,26 @@ func (m *model) saveModal() tea.Cmd {
 		return m.savePresetModal()
 	case modalTask:
 		return m.saveTaskModal()
+	case modalRename:
+		return m.saveRenameModal()
 	}
+	return nil
+}
+
+// saveRenameModal 保存主任务的新名称：名称不能为空；成功后写库并刷新列表。
+func (m *model) saveRenameModal() tea.Cmd {
+	md := m.modal
+	name := strings.TrimSpace(md.fields[0].Value())
+	if name == "" {
+		md.err = "任务名称不能为空"
+		return focusField(md.fields, 0)
+	}
+	if err := m.renameBatch(md.renameID, name); err != nil {
+		md.err = "重命名失败: " + err.Error()
+		return focusField(md.fields, 0)
+	}
+	m.modal = nil
+	m.setStatus(fmt.Sprintf("已重命名为「%s」", name))
 	return nil
 }
 
