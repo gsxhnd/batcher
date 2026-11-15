@@ -16,10 +16,8 @@ import (
 // TestViewsRender 确保每种面板状态的视图都能渲染（不 panic，输出非空）。
 func TestViewsRender(t *testing.T) {
 	cases := map[string]func(m *model){
-		"操作面板":  func(m *model) { m.focus = panelOps },
-		"预设面板":  func(m *model) { m.rows(); m.focus = panelPresets },
-		"字幕面板":  func(m *model) { m.focus = panelSubs },
 		"任务面板":  func(m *model) { m.focus = panelRun },
+		"有文件列表": func(m *model) { m.rows(); m.focus = panelRun },
 		"执行中":   func(m *model) { m.running = true; m.total = 2; m.focus = panelRun },
 		"执行完成":  func(m *model) { m.total = 2; m.done = 2; m.focus = panelRun },
 		"弹窗-预设": func(m *model) { m.openPresetModal(-1, presets.Preset{}) },

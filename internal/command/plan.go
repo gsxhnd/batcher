@@ -355,7 +355,9 @@ func resolveSubtitle(names []string, base, suffix string, stems []string) (strin
 		if strings.EqualFold(name, exact) {
 			return name, nil
 		}
-		if !hasFoldPrefix(name, base+".") || !hasFoldSuffix(name, "."+suffix) {
+		// 前缀 <base>. 与后缀 .<suffix> 在名字里不能重叠，否则下面取标记段会越界。
+		if len(name) < len(base)+len(suffix)+2 ||
+			!hasFoldPrefix(name, base+".") || !hasFoldSuffix(name, "."+suffix) {
 			continue
 		}
 		middle := name[len(base)+1 : len(name)-len(suffix)-1]

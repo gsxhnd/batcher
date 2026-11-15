@@ -15,15 +15,17 @@ import (
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/ffmpeg"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/store"
 	"github.com/gsxhnd/batcher/internal/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// 预设列表为空、或光标落在列表之外时，编辑/删除/排序不 panic，也不改动已有预设。
 func TestPresetBoundaryActions(t *testing.T) {
 	for _, count := range []int{0, 2} {
 		for _, key := range []string{"e", "d", "J", "K"} {
-			t.Run(fmt.Sprintf("%d/最后一个内置项/%s", count, key), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%d/光标越界/%s", count, key), func(t *testing.T) {
 				isolatePresets(t)
 				m := newModel()
 				if count > 0 {
@@ -31,7 +33,7 @@ func TestPresetBoundaryActions(t *testing.T) {
 					m.presets = []presets.Preset{{Args: "a"}, {Args: "b"}}
 				}
 				m.openPresetList()
-				m.presetCursor = m.presetUserOffset() - 1
+				m.presetCursor = len(m.presets)
 				m.modal.focus = m.presetCursor
 				before := slices.Clone(m.presets)
 				require.NotPanics(t, func() { press(&m, key) })
@@ -130,12 +132,12 @@ func TestExecutionRequiresLatestPreview(t *testing.T) {
 	m := newModel()
 	testQueue(t, &m)
 	press(&m, "x")
-	assert.Empty(t, m.queue.Snapshot(), "按 x 不入队")
+	assert.Empty(t, m.queue.Copies(), "按 x 不入队")
 	press(&m, "enter")
-	assert.Empty(t, m.queue.Snapshot(), "回车不入队")
+	assert.Empty(t, m.queue.Copies(), "回车不入队")
 	press(&m, "a")
 	require.Equal(t, modalTask, m.modal.kind)
-	assert.Empty(t, m.queue.Snapshot(), "打开创建弹窗还不入队")
+	assert.Empty(t, m.queue.Copies(), "打开创建弹窗还不入队")
 	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), command.Selection{Convert: true})
 	require.NoError(t, err)
 	require.Len(t, batch.Items, 1)
@@ -324,10 +326,7 @@ func TestOldRunMessagesAreIgnored(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.running, m.eventing, m.runID = true, true, 2
-	for _, msg := range []tea.Msg{
-		eventMsg{runID: 1, event: ffmpeg.Event{Type: ffmpeg.EventCommandDone}},
-		doneMsg{runID: 1}, tickMsg{runID: 1}, logRefreshMsg{runID: 1},
-	} {
+	for _, msg := range []tea.Msg{tickMsg{runID: 1}, logRefreshMsg{runID: 1}} {
 		next, cmd := m.Update(msg)
 		m = next.(model)
 		assert.Nil(t, cmd)
@@ -428,8 +427,7 @@ func TestCanceledRunMarksPendingTasks(t *testing.T) {
 	m.running, m.runID, m.done, m.canceled = true, 1, 1, 1
 	m.startAt = time.Now()
 	m.files = []fileItem{{state: fileDone}, {state: fileCanceled}, {state: filePending}}
-	next, _ := m.Update(doneMsg{runID: 1, err: context.Canceled})
-	m = next.(model)
+	m.handleDone(context.Canceled)
 	assert.Equal(t, 2, m.canceled)
 	assert.Equal(t, fileCanceled, m.files[2].state)
 	assert.Zero(t, m.failed)
@@ -790,15 +788,15 @@ func TestTaskPanelXDoesNotEnqueue(t *testing.T) {
 	m.roster = []rosterRow{{batchID: "existing", title: "已有任务"}}
 
 	press(&m, "x")
-	assert.Empty(t, m.queue.Snapshot(), "任务列表里按 x 不应新建主任务")
+	assert.Empty(t, m.queue.Copies(), "任务列表里按 x 不应新建主任务")
 	assert.Nil(t, m.modal)
 
 	press(&m, "a")
 	require.Equal(t, modalTask, m.modal.kind)
-	assert.Empty(t, m.queue.Snapshot(), "打开创建弹窗还不入队")
+	assert.Empty(t, m.queue.Copies(), "打开创建弹窗还不入队")
 	press(&m, "esc")
 	assert.Nil(t, m.modal)
-	assert.Empty(t, m.queue.Snapshot(), "取消创建不入队")
+	assert.Empty(t, m.queue.Copies(), "取消创建不入队")
 }
 
 func TestRunBodySplitsFixedAndOutput(t *testing.T) {
@@ -836,4 +834,93 @@ func TestRunBodySplitsFixedAndOutput(t *testing.T) {
 	for i, ln := range strings.Split(out, "\n") {
 		assert.Equal(t, 120, lipgloss.Width(ln), "第 %d 行宽度应为 120", i+1)
 	}
+}
+
+// 删除暂停中的主任务后，数据库里的记录必须真的消失：
+// 队列在发出移除事件前已写完排队的快照，界面随后删库不会被落盘协程写回。
+func TestDeletePausedBatchRemovesStoredRecord(t *testing.T) {
+	db, err := store.OpenDir(t.TempDir())
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	for round := 0; round < 10; round++ {
+		m := newModel()
+		m.db = db
+		m.width, m.height = 100, 30
+		m.resizePanes()
+		testQueue(t, &m)
+		plan := testPlan("a")
+		plan.Jobs[0].Output = filepath.Join(t.TempDir(), "out.mkv")
+		plan.Jobs[0].Args = []string{"-batcher-invalid"}
+		batch, err := m.queue.Enqueue(plan, queueSelection())
+		require.NoError(t, err)
+		require.NoError(t, m.queue.Start(batch.ID))
+		waitBatchEvent(t, &m, task.QueueBatchPaused)
+		m.syncRoster()
+		m.fileCursor = 0
+
+		press(&m, "d")
+		waitBatchEvent(t, &m, task.QueueBatchRemoved)
+		m.queue.Stop() // 等落盘协程退出，之后库里的内容不会再变
+
+		_, err = db.LoadTask(batch.ID)
+		require.Error(t, err, "第 %d 轮：已删除的任务不应被异步落盘写回数据库", round+1)
+	}
+}
+
+// ffmpeg 日志与进度事件不改变任务状态：处理它们不应重新深拷贝队列、替换 liveBatches 快照。
+// 状态类事件（这里用入队）才刷新快照。
+func TestFFmpegEventsDoNotRefreshLiveBatches(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
+	require.NoError(t, err)
+
+	m.handleQueueEvent(task.QueueEvent{Type: task.QueueBatchAdded, BatchID: batch.ID})
+	require.Contains(t, m.liveBatches, batch.ID, "状态类事件刷新快照")
+	before := m.liveBatches[batch.ID]
+
+	m.running, m.activeBatch = true, batch.ID
+	m.files = buildQueueItems(before.Items)
+	for _, evt := range []ffmpeg.Event{
+		{Type: ffmpeg.EventLog, Message: "frame=1"},
+		{Type: ffmpeg.EventProgress, Progress: &ffmpeg.Progress{OutTime: time.Second}},
+	} {
+		e := evt
+		m.handleQueueEvent(task.QueueEvent{Type: task.QueueFFmpeg, BatchID: batch.ID, ItemID: "001", FFmpegEvt: &e})
+	}
+	assert.Same(t, before, m.liveBatches[batch.ID], "ffmpeg 事件不应替换队列快照")
+
+	m.handleQueueEvent(task.QueueEvent{Type: task.QueueBatchAdded, BatchID: batch.ID})
+	assert.NotSame(t, before, m.liveBatches[batch.ID], "状态类事件重新取快照")
+}
+
+// 列表由队列里的实时副本在前、数据库里不在队列的历史任务在后组成；同一个任务只出现一次，以队列为准。
+func TestRosterBatchesMergeQueueAndSaved(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	testQueue(t, &m)
+	queued, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
+	require.NoError(t, err)
+
+	stale := &task.Batch{ID: queued.ID, Name: "库里的旧副本"}
+	history := &task.Batch{ID: "20200101-000000-aaaaaaaa", Name: "历史任务"}
+	m.savedList = []*task.Batch{nil, stale, history}
+
+	got := m.rosterBatches()
+	require.Len(t, got, 2)
+	assert.Equal(t, queued.ID, got[0].ID)
+	assert.NotEqual(t, "库里的旧副本", got[0].Name, "同一个任务以队列里的副本为准")
+	assert.Equal(t, history.ID, got[1].ID, "历史任务排在队列任务之后")
+	assert.Contains(t, m.liveBatches, queued.ID)
+	assert.NotContains(t, m.liveBatches, history.ID, "liveBatches 只含队列里的任务")
 }

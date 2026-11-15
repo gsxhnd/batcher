@@ -118,6 +118,22 @@ func TestSubtitleResolutionErrors(t *testing.T) {
 	}
 }
 
+// 视频主文件名自带标记（Movie.chi）、字幕后缀又以同一标记开头（chi.ass）时，
+// 前缀 "Movie.chi." 与后缀 ".chi.ass" 在 Movie.chi.ass 里重叠，不能因切片越界 panic。
+func TestResolveSubtitleOverlappingPrefixAndSuffix(t *testing.T) {
+	require.NotPanics(t, func() {
+		got, err := resolveSubtitle([]string{"Movie.chi.ass"}, "Movie.chi", "chi.ass", []string{"Movie.chi"})
+		require.ErrorContains(t, err, "未找到")
+		assert.Empty(t, got)
+	})
+
+	require.NotPanics(t, func() {
+		got, err := resolveSubtitle([]string{"Movie.chi.chi.ass"}, "Movie.chi", "chi.ass", []string{"Movie.chi"})
+		require.NoError(t, err)
+		assert.Equal(t, "Movie.chi.chi.ass", got, "前后缀不重叠时仍按标记段匹配")
+	})
+}
+
 func TestResolveSubtitleSkipsLongerVideoName(t *testing.T) {
 	got, err := resolveSubtitle([]string{"Movie.Extended.ass"}, "Movie", "ass", []string{"Movie", "Movie.Extended"})
 	require.ErrorContains(t, err, "未找到")

@@ -83,6 +83,8 @@ type Queue struct {
 	saveAck     map[string]uint64
 	saveSig     chan struct{}
 	saveStop    bool
+	saveExited  bool       // 落盘协程已退出；等待落盘的调用方据此不再等
+	saveCond    *sync.Cond // 与 mu 配对，落盘协程每写完一份快照广播一次
 	saveDone    chan struct{}
 }
 
@@ -110,6 +112,7 @@ func NewQueue(ctx context.Context, onEvent func(QueueEvent)) *Queue {
 		saveSig:      make(chan struct{}, 1),
 		saveDone:     make(chan struct{}),
 	}
+	q.saveCond = sync.NewCond(&q.mu)
 	go q.dispatch()
 	go q.saveLoop()
 	go q.run(qctx)
@@ -279,38 +282,22 @@ func (q *Queue) RetryBatch(batchID string) error {
 		q.mu.Unlock()
 		return fmt.Errorf("未找到任务 %s", batchID)
 	}
-	status := b.Status
-	q.mu.Unlock()
-
-	if status == StatusPaused {
-		// 暂停中：等同于重试当前失败的子任务。
-		q.Decide(DecisionRetry)
-		return nil
-	}
-
-	q.mu.Lock()
-	b, _ = q.findLocked(batchID)
-	if b == nil {
-		q.mu.Unlock()
-		return fmt.Errorf("未找到任务 %s", batchID)
-	}
-	switch b.Status {
+	switch status := b.Status; status {
 	case StatusPaused:
+		// 暂停中：等同于重试当前失败的子任务。
 		q.mu.Unlock()
 		q.Decide(DecisionRetry)
 		return nil
 	case StatusFailed, StatusCanceled, StatusInterrupted:
 		resetForRetry(b)
 	default:
-		status = b.Status
 		q.mu.Unlock()
-		if status == StatusRunning {
+		switch status {
+		case StatusRunning:
 			return errors.New("任务正在执行，无法重试")
-		}
-		if status == StatusDone {
+		case StatusDone:
 			return errors.New("任务已完成，无需重试")
-		}
-		if status == StatusPending {
+		case StatusPending:
 			return errors.New("任务已在队列等待执行")
 		}
 		return fmt.Errorf("任务状态 %s 不可重试", status)
@@ -366,6 +353,7 @@ func (q *Queue) Discard(batchID string) error {
 	}
 	q.batches = append(q.batches[:idx], q.batches[idx+1:]...)
 	q.mu.Unlock()
+	q.waitPersisted(batchID)
 	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: batchID})
 	return nil
 }
@@ -397,6 +385,7 @@ func (q *Queue) completeDiscard(b *Batch) bool {
 	delete(q.discard, b.ID)
 	q.mu.Unlock()
 	q.persist(b)
+	q.waitPersisted(b.ID)
 	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: b.ID})
 	return true
 }
@@ -519,15 +508,6 @@ func (q *Queue) DiscardItem(batchID, itemID string) error {
 	q.persist(b)
 	q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: batchID, ItemID: itemID})
 	return nil
-}
-
-// Snapshot 返回当前队列内容的只读快照（切片副本，元素指针共享）。
-func (q *Queue) Snapshot() []*Batch {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	out := make([]*Batch, len(q.batches))
-	copy(out, q.batches)
-	return out
 }
 
 // Copies 在一次加锁里返回每个主任务的深拷贝。
@@ -661,12 +641,34 @@ func (q *Queue) signalSave() {
 func (q *Queue) persisted(id string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	return q.persistedLocked(id)
+}
+
+// persistedLocked 与 persisted 相同。调用方需持有 q.mu。
+func (q *Queue) persistedLocked(id string) bool {
 	_, waiting := q.savePending[id]
 	return !waiting && q.saveAck[id] >= q.saveSeq[id]
 }
 
+// waitPersisted 阻塞到该主任务已排队的快照都写完；落盘协程已退出时不再等。
+// 主任务被移除前必须先等它：界面收到移除事件就会删库，
+// 此时还在排队或正在写的快照会把刚删掉的记录写回去。
+func (q *Queue) waitPersisted(id string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for !q.persistedLocked(id) && !q.saveExited {
+		q.saveCond.Wait()
+	}
+}
+
 func (q *Queue) saveLoop() {
 	defer close(q.saveDone)
+	defer func() {
+		q.mu.Lock()
+		q.saveExited = true
+		q.mu.Unlock()
+		q.saveCond.Broadcast()
+	}()
 	for {
 		q.mu.Lock()
 		var id string
@@ -693,6 +695,7 @@ func (q *Queue) saveLoop() {
 			q.saveAck[id] = snap.gen
 		}
 		q.mu.Unlock()
+		q.saveCond.Broadcast()
 	}
 }
 

@@ -153,6 +153,30 @@ func TestListTasksSkipsBadRecords(t *testing.T) {
 	assert.Len(t, db.Warnings(), 2)
 }
 
+// 界面在删除、重命名、任务移出队列时会反复读取任务列表；同一条损坏记录的提示只记一次，
+// 否则警告列表随操作次数无限增长。
+func TestListTasksRepeatedReadsDoNotGrowWarnings(t *testing.T) {
+	db, err := OpenDir(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.NoError(t, db.bolt.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketTasks).Put([]byte("bad-json"), []byte("{"))
+	}))
+
+	for range 5 {
+		_, err := db.ListTasks()
+		require.NoError(t, err)
+	}
+	assert.Len(t, db.Warnings(), 1, "同一条损坏记录反复读取只提示一次")
+
+	require.NoError(t, db.bolt.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketTasks).Put([]byte("another-bad"), []byte("["))
+	}))
+	_, err = db.ListTasks()
+	require.NoError(t, err)
+	assert.Len(t, db.Warnings(), 2, "新出现的损坏记录仍要提示")
+}
+
 func TestOpenSkipsCorruptLegacyPresets(t *testing.T) {
 	root := t.TempDir()
 	legacy := filepath.Join(root, "presets")

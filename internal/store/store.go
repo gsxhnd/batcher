@@ -54,10 +54,15 @@ func (db *DB) Warnings() []string {
 	return slices.Clone(db.warnings)
 }
 
+// addWarning 记录一条提示。同样的内容只记一次：界面会反复读取任务列表，
+// 同一条损坏记录每次都会再报，不去重警告就随操作无限增长。
 func (db *DB) addWarning(msg string) {
 	db.mu.Lock()
+	defer db.mu.Unlock()
+	if slices.Contains(db.warnings, msg) {
+		return
+	}
 	db.warnings = append(db.warnings, msg)
-	db.mu.Unlock()
 }
 
 // Dir 返回数据目录：环境变量 BATCHER_DATA_DIR，否则是可执行文件所在目录。

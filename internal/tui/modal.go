@@ -398,7 +398,12 @@ func (m *model) updateModal(msg tea.Msg) tea.Cmd {
 // updateModalInput 把粘贴和输入框内部消息交给当前文本字段。
 func (m *model) updateModalInput(msg tea.Msg) tea.Cmd {
 	md := m.modal
-	if (md.kind != modalPreset && md.kind != modalTask) || len(md.fields) == 0 {
+	switch md.kind {
+	case modalPreset, modalTask, modalRename:
+	default:
+		return nil
+	}
+	if len(md.fields) == 0 {
 		return nil
 	}
 	f := &md.fields[md.focus]
@@ -648,23 +653,15 @@ func (m *model) savePresetModal() tea.Cmd {
 			md.err = "保存失败: " + err.Error()
 			return nil
 		}
-		if md.returnTo == returnPresetList {
-			m.presetCursor = md.editIndex
-		} else {
-			m.presetCursor = m.presetUserOffset() + md.editIndex
-		}
+		m.presetCursor = md.editIndex
 	} else {
-		// 新增不影响当前选中的预设参数，只把光标指向新条目。
+		// 新增后把光标指向新条目。
 		next = append(next, entry)
 		if err := m.persistPresets(next, "已新增"); err != nil {
 			md.err = "保存失败: " + err.Error()
 			return nil
 		}
-		if md.returnTo == returnPresetList {
-			m.presetCursor = len(next) - 1
-		} else {
-			m.presetCursor = m.presetCount() - 2 // 手动输入项之前
-		}
+		m.presetCursor = len(next) - 1
 	}
 	back := md.returnTo
 	m.modal = nil

@@ -103,7 +103,7 @@ func TestMoveFilePaneBoundsAndFollow(t *testing.T) {
 	assert.True(t, m.fileFollow)
 }
 
-func TestDoneMsgUnlocks(t *testing.T) {
+func TestHandleDoneUnlocks(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
 	m.running = true
@@ -111,8 +111,7 @@ func TestDoneMsgUnlocks(t *testing.T) {
 	m.done = 2
 	m.startAt = time.Now().Add(-time.Second)
 
-	next, _ := m.Update(doneMsg{err: nil})
-	m = next.(model)
+	m.handleDone(nil)
 	assert.False(t, m.running, "执行结束应解锁")
 	assert.NotEmpty(t, m.statusMsg)
 }

@@ -306,7 +306,7 @@ func TestCreateTaskRejectsEmptySelection(t *testing.T) {
 	press(&m, "ctrl+s")
 	require.NotNil(t, m.modal, "没勾选操作时弹窗保持打开")
 	assert.Contains(t, m.statusMsg, "至少勾选")
-	assert.Empty(t, m.queue.Snapshot())
+	assert.Empty(t, m.queue.Copies())
 }
 
 // TestCreatePlanFailureShowsToast 扫描/生成失败时提示浮在右上角，弹窗保持打开继续改参数。
@@ -475,7 +475,8 @@ func TestPresetGuardsBuiltins(t *testing.T) {
 func TestBuiltinCopyPresetFromPanelPresets(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	src := presets.Preset{Name: m.builtins[0].Name, Args: m.builtins[0].Args}
+	builtin := presets.Builtins()[0]
+	src := presets.Preset{Name: builtin.Name, Args: builtin.Args}
 	m.presets = []presets.Preset{src}
 	press(&m, "p")
 	require.Equal(t, 0, m.modal.focus)
@@ -515,7 +516,7 @@ func TestTryStartRunValidation(t *testing.T) {
 	require.Equal(t, modalTask, m.modal.kind)
 	press(&m, "ctrl+s")
 	assert.Contains(t, m.statusMsg, "至少勾选", "校验失败用右上角 toast 提示")
-	assert.Empty(t, m.queue.Snapshot())
+	assert.Empty(t, m.queue.Copies())
 	assert.False(t, m.running)
 
 	m.modal.focus = 1 // 添加字幕
@@ -524,7 +525,7 @@ func TestTryStartRunValidation(t *testing.T) {
 	m.removeSubtitleFields()
 	press(&m, "ctrl+s")
 	assert.Contains(t, m.statusMsg, "字幕")
-	assert.Empty(t, m.queue.Snapshot())
+	assert.Empty(t, m.queue.Copies())
 	assert.False(t, m.running)
 
 	// 字体路径默认 fonts，勾选后表单校验通过，直接进入扫描而不是弹错误提示。
@@ -535,7 +536,7 @@ func TestTryStartRunValidation(t *testing.T) {
 	press(&m, "ctrl+s")
 	assert.True(t, m.creating, "字体路径默认 fonts 时校验通过，开始扫描")
 	assert.Empty(t, m.statusMsg, "进入扫描后清掉右上角提示")
-	assert.Empty(t, m.queue.Snapshot())
+	assert.Empty(t, m.queue.Copies())
 	assert.False(t, m.running)
 }
 
@@ -546,35 +547,22 @@ func TestEnterTaskListDoesNotEnqueue(t *testing.T) {
 
 	press(&m, "enter")
 	assert.Nil(t, m.modal, "任务列表里按回车不入队")
-	assert.Empty(t, m.queue.Snapshot())
+	assert.Empty(t, m.queue.Copies())
 	press(&m, "x")
-	assert.Empty(t, m.queue.Snapshot(), "按 x 不入队")
+	assert.Empty(t, m.queue.Copies(), "按 x 不入队")
 	press(&m, "a")
 	require.Equal(t, modalTask, m.modal.kind, "按 a 打开创建弹窗")
-	assert.Empty(t, m.queue.Snapshot(), "打开弹窗还不入队")
+	assert.Empty(t, m.queue.Copies(), "打开弹窗还不入队")
 }
 
-func TestFormEscDoesNotQuitAndFocusKept(t *testing.T) {
+func TestEscWithoutModalDoesNotQuitAndFocusKept(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()
-	m.focus = panelForm
 
 	press(&m, "up")
-	assert.Equal(t, panelForm, m.focus, "方向键不离开当前焦点")
+	assert.Equal(t, panelRun, m.focus, "方向键不离开当前焦点")
 	press(&m, "esc")
 	assert.Nil(t, m.modal, "没有弹窗时 esc 不退出程序")
-}
-
-func TestSetFocusLeavesRunStopsFollow(t *testing.T) {
-	isolatePresets(t)
-	m := newModel()
-	m.focus = panelRun
-	m.fileFollow = true
-	m.running = false
-
-	m.setFocus(panelOps)
-	assert.Equal(t, panelOps, m.focus)
-	assert.False(t, m.fileFollow, "离开任务面板应取消自动跟随")
 }
 
 func TestRunLockedFocusDuringExecution(t *testing.T) {
@@ -587,17 +575,17 @@ func TestRunLockedFocusDuringExecution(t *testing.T) {
 	require.NoError(t, m.queue.Start(batch.ID))
 	m.running = true
 	m.focus = panelRun
-	before := len(m.queue.Snapshot())
+	before := len(m.queue.Copies())
 	press(&m, "a")
 	require.Equal(t, modalTask, m.modal.kind, "执行中仍可打开创建弹窗")
-	assert.Equal(t, before, len(m.queue.Snapshot()), "打开弹窗还不入队")
+	assert.Equal(t, before, len(m.queue.Copies()), "打开弹窗还不入队")
 	press(&m, "esc")
 	assert.Nil(t, m.modal)
 	m.enqueue(testPlanOut(t, "b.mkv"), command.Selection{Convert: true})
-	assert.Len(t, m.queue.Snapshot(), before+1, "执行中创建的主任务排在后面")
+	assert.Len(t, m.queue.Copies(), before+1, "执行中创建的主任务排在后面")
 	assert.Contains(t, m.statusMsg, "按 x 开始")
 	press(&m, "enter")
-	assert.Len(t, m.queue.Snapshot(), before+1, "任务列表回车不入队")
+	assert.Len(t, m.queue.Copies(), before+1, "任务列表回车不入队")
 
 	// 等真实暂停后再测 r/s/x（光标在该批次行上），避免竞态。
 	m.roster = []rosterRow{{batchID: batch.ID, state: fileRunning, cmd: ""}}
@@ -798,7 +786,7 @@ func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
 	assert.Contains(t, shown, "字体")
 	assert.Equal(t, 1, strings.Count(shown, "/fonts/a.ttf"), "各任务字体相同时只列一次")
 	assert.Contains(t, m.footer(), "展开/收起")
-	assert.Empty(t, m.queue.Snapshot(), "确认前不应入队")
+	assert.Empty(t, m.queue.Copies(), "确认前不应入队")
 
 	press(&m, "enter")
 	assert.False(t, m.modal.jobOpen[0], "enter 收起当前子任务")
@@ -807,7 +795,7 @@ func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
 	assert.NotContains(t, folded, "/v/a.chi.ass")
 	assert.Contains(t, folded, "/v/b.mkv")
 	assert.Contains(t, folded, "/fonts/a.ttf", "共用字体不受子任务收起影响")
-	assert.Empty(t, m.queue.Snapshot(), "收起不应入队")
+	assert.Empty(t, m.queue.Copies(), "收起不应入队")
 
 	press(&m, "enter")
 	assert.True(t, m.modal.jobOpen[0])
@@ -815,17 +803,17 @@ func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
 
 	press(&m, "esc")
 	assert.Equal(t, modalTask, m.modal.kind, "esc 返回创建任务表单而不是直接取消")
-	assert.Empty(t, m.queue.Snapshot())
+	assert.Empty(t, m.queue.Copies())
 	press(&m, "esc")
 	assert.Nil(t, m.modal, "在创建表单里再按 esc 才关闭")
-	assert.Empty(t, m.queue.Snapshot())
+	assert.Empty(t, m.queue.Copies())
 
 	m.createSeq = 2
 	m.modal = &modal{kind: modalTask}
 	next, _ = m.Update(createPlanMsg{seq: 2, plan: plan})
 	m = next.(model)
 	press(&m, "ctrl+s")
-	require.Len(t, m.queue.Snapshot(), 1)
+	require.Len(t, m.queue.Copies(), 1)
 }
 
 func TestEnqueueConfirmListsFilesAndFonts(t *testing.T) {
@@ -910,8 +898,8 @@ func TestCreateTaskUsesCustomQueueName(t *testing.T) {
 	assert.Contains(t, m.modalView(), "我的队列", "确认弹窗显示自定义队列名称")
 
 	press(&m, "ctrl+s")
-	require.Len(t, m.queue.Snapshot(), 1)
-	assert.Equal(t, "我的队列", m.queue.Snapshot()[0].Name, "入队后主任务使用自定义名称")
+	require.Len(t, m.queue.Copies(), 1)
+	assert.Equal(t, "我的队列", m.queue.Copies()[0].Name, "入队后主任务使用自定义名称")
 	assert.Contains(t, m.statusMsg, "我的队列", "入队成功提示带上队列名称")
 }
 
@@ -942,7 +930,7 @@ func TestEnqueueConfirmEscReturnsToTaskForm(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "我的队列", saved.input.Value(), "返回表单后已填内容保留")
 	assert.Contains(t, m.modalView(), "新建任务", "表单正常渲染")
-	assert.Empty(t, m.queue.Snapshot(), "esc 不会入队")
+	assert.Empty(t, m.queue.Copies(), "esc 不会入队")
 
 	// 回到表单后再生成一次，仍能进入确认并入队
 	m.createSeq = 2
@@ -950,8 +938,8 @@ func TestEnqueueConfirmEscReturnsToTaskForm(t *testing.T) {
 	m = next.(model)
 	require.Equal(t, modalConfirm, m.modal.kind)
 	press(&m, "ctrl+s")
-	require.Len(t, m.queue.Snapshot(), 1)
-	assert.Equal(t, "我的队列", m.queue.Snapshot()[0].Name)
+	require.Len(t, m.queue.Copies(), 1)
+	assert.Equal(t, "我的队列", m.queue.Copies()[0].Name)
 }
 
 // TestRenameTaskUpdatesName 主任务行按 n 重命名：输入框预填当前名称，保存后队列
@@ -986,6 +974,12 @@ func TestRenameTaskUpdatesName(t *testing.T) {
 	require.Len(t, m.modal.fields, 1)
 	assert.Equal(t, batch.Name, m.modal.fields[0].Value(), "输入框预填当前名称")
 
+	// 真实按键必须能写进输入框，不能只靠 SetValue 绕过按键分发。
+	m.modal.fields[0].input.SetValue("")
+	for _, ch := range "新的名字" {
+		press(&m, string(ch))
+	}
+	require.Equal(t, "新的名字", m.modal.fields[0].Value(), "重命名弹窗里键入的字符应进入输入框")
 	m.modal.fields[0].input.SetValue("  新的名字  ")
 	press(&m, "enter")
 	assert.Nil(t, m.modal)
@@ -1182,4 +1176,83 @@ func findField(fields *[]field, key string) (*field, bool) {
 		}
 	}
 	return nil, false
+}
+
+// ctrl+d 删除光标所在的整组字幕（后缀/语言/标题/默认四个字段）：
+// 光标在组内任意字段都行，在组外（操作、路径等）时只提示、不删。
+func TestRemoveSubtitleFieldsByFocus(t *testing.T) {
+	groupCount := func(m *model) int {
+		n := 0
+		for _, f := range m.modal.fields {
+			if f.def.key == "sub_suffix" {
+				n++
+			}
+		}
+		return n
+	}
+	// open 打开创建弹窗并保证有 3 组字幕，各组后缀依次是 a、b、c。
+	open := func(t *testing.T) *model {
+		t.Helper()
+		isolatePresets(t)
+		m := newModel()
+		press(&m, "a")
+		press(&m, "ctrl+n")
+		press(&m, "ctrl+n")
+		suffixes := []string{"a", "b", "c"}
+		g := 0
+		for i := range m.modal.fields {
+			if m.modal.fields[i].def.key == "sub_suffix" {
+				m.modal.fields[i].input.SetValue(suffixes[g])
+				g++
+			}
+		}
+		require.Equal(t, 3, groupCount(&m))
+		return &m
+	}
+	suffixOrder := func(m *model) []string {
+		var out []string
+		for _, f := range m.modal.fields {
+			if f.def.key == "sub_suffix" {
+				out = append(out, f.input.Value())
+			}
+		}
+		return out
+	}
+	_, baseIdx := fieldByKey(open(t).modal.fields, "sub_suffix")
+
+	for offset, key := range []string{"sub_suffix", "sub_lang", "sub_title", "sub_default"} {
+		t.Run("删除第二组/光标在"+key, func(t *testing.T) {
+			m := open(t)
+			total := len(m.modal.fields)
+			m.modal.focus = baseIdx + len(subFieldDefs) + offset
+			require.Equal(t, key, m.modal.fields[m.modal.focus].def.key)
+			m.removeSubtitleFields()
+			assert.Equal(t, []string{"a", "c"}, suffixOrder(m), "只删光标所在的那一组")
+			assert.Equal(t, total-len(subFieldDefs), len(m.modal.fields))
+			assert.Less(t, m.modal.focus, len(m.modal.fields), "光标仍在有效范围内")
+		})
+	}
+
+	t.Run("删除最后一组后光标收回到末尾", func(t *testing.T) {
+		m := open(t)
+		m.modal.focus = len(m.modal.fields) - 1
+		m.removeSubtitleFields()
+		assert.Equal(t, []string{"a", "b"}, suffixOrder(m))
+		assert.Equal(t, len(m.modal.fields)-1, m.modal.focus)
+	})
+
+	t.Run("光标不在字幕组里不删除", func(t *testing.T) {
+		m := open(t)
+		total := len(m.modal.fields)
+		for _, key := range []string{"op_convert", "input_path", "advance", "fonts_path"} {
+			_, idx := fieldByKey(m.modal.fields, key)
+			require.GreaterOrEqual(t, idx, 0)
+			m.modal.focus = idx
+			m.setStatus("")
+			m.removeSubtitleFields()
+			assert.Equal(t, total, len(m.modal.fields), "%s 不属于字幕组，不应删除任何字段", key)
+			assert.Contains(t, m.statusMsg, "ctrl+d")
+		}
+		assert.Equal(t, []string{"a", "b", "c"}, suffixOrder(m))
+	})
 }

@@ -100,6 +100,7 @@ func (it *Item) AppendAttemptLog(line string) {
 }
 
 // AddStderr 追加一行日志，只保留末尾 maxStderrTail 行。
+// 执行时的输出现在记在 AttemptLogs 里；StderrTail 只用来读取旧版本留下的任务记录。
 func (it *Item) AddStderr(line string) {
 	it.StderrTail = append(it.StderrTail, line)
 	if n := len(it.StderrTail) - maxStderrTail; n > 0 {

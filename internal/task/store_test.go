@@ -188,3 +188,14 @@ func TestMarkInterrupted(t *testing.T) {
 	assert.True(t, paused.MarkInterrupted())
 	assert.Equal(t, StatusInterrupted, paused.Status)
 }
+
+// slowStore 在每次写入前等待一小段时间，让异步落盘稳定晚于队列事件，用来暴露「先发事件、后落盘」的竞态。
+type slowStore struct {
+	memStore
+	delay time.Duration
+}
+
+func (s *slowStore) SaveTask(b *Batch) error {
+	time.Sleep(s.delay)
+	return s.memStore.SaveTask(b)
+}

@@ -221,23 +221,15 @@ func (m *model) appendSubtitleFields(entry command.SubtitleOption) {
 	}
 }
 
+// removeSubtitleFields 删除光标所在的整组字幕；光标不在字幕组里时只给出提示。
 func (m *model) removeSubtitleFields() {
 	md := m.modal
 	if md == nil || len(md.fields) == 0 {
 		return
 	}
 	start := -1
-	for i := md.focus; i >= 0; i-- {
-		switch md.fields[i].def.key {
-		case "sub_suffix":
-			start = i
-		case "sub_lang", "sub_title", "sub_default":
-			continue
-		default:
-			i = -1
-		}
-		if start >= 0 || i < 0 {
-			break
+	if _, ok := subtitleGroup(md.fields, md.focus); ok {
+		for start = md.focus; md.fields[start].def.key != "sub_suffix"; start-- {
 		}
 	}
 	n := len(subFieldDefs)

@@ -485,7 +485,7 @@ func TestDiscardPausesBatchMarksCanceledAndRemoves(t *testing.T) {
 	assert.True(t, col.has(QueueBatchRemoved))
 	_, ok := q.BatchCopy(batchID)
 	assert.False(t, ok, "删除后不应再在队列中")
-	snapshot := q.Snapshot()
+	snapshot := q.Copies()
 	for _, s := range snapshot {
 		assert.NotEqual(t, batchID, s.ID)
 	}
@@ -1050,4 +1050,87 @@ func TestEmptyDecisionKeepsWaiting(t *testing.T) {
 	require.NotNil(t, done)
 	assert.Equal(t, StatusDone, done.Status)
 	assert.Equal(t, StatusSkipped, done.Items[0].Status)
+}
+
+// 移除事件到达时，这个批次排队的快照必须已经写完。
+// 否则界面收到事件后删除数据库记录，随后落盘协程又把它写回去，已删除的任务重启后会重新出现。
+func TestDiscardEmitsRemovedOnlyAfterPersisted(t *testing.T) {
+	slow := &slowStore{delay: 80 * time.Millisecond}
+	BindStore(slow)
+	t.Cleanup(func() { BindStore(&memStore{}) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var q *Queue
+	var mu sync.Mutex
+	var persistedAtRemoval []bool
+	var removed = make(chan struct{}, 4)
+	q = NewQueue(ctx, func(e QueueEvent) {
+		if e.Type != QueueBatchRemoved {
+			return
+		}
+		mu.Lock()
+		persistedAtRemoval = append(persistedAtRemoval, q.persisted(e.BatchID))
+		mu.Unlock()
+		removed <- struct{}{}
+	})
+	defer q.Stop()
+
+	waitRemoved := func() {
+		t.Helper()
+		select {
+		case <-removed:
+		case <-time.After(10 * time.Second):
+			t.Fatal("等待移除事件超时")
+		}
+	}
+
+	// 暂停中的批次：由消费者收尾，收尾时会排一份 canceled 快照。
+	paused, err := q.Enqueue(singlePlan(t), command.Selection{Convert: true})
+	require.NoError(t, err)
+	require.NoError(t, q.Start(paused.ID))
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if s, _ := q.BatchStatus(paused.ID); s == StatusPaused {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "等待批次暂停超时")
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NoError(t, q.Discard(paused.ID))
+	waitRemoved()
+
+	// 等待中的批次：刚入队的快照可能还没写完，直接移除前也要等它落盘。
+	pending, err := q.Enqueue(singlePlan(t), command.Selection{Convert: true})
+	require.NoError(t, err)
+	require.NoError(t, q.Discard(pending.ID))
+	waitRemoved()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, persistedAtRemoval, 2)
+	for i, ok := range persistedAtRemoval {
+		assert.True(t, ok, "第 %d 个移除事件到达时，该批次的快照应已落盘", i+1)
+	}
+}
+
+// 队列停止之后再删除批次不能卡住：落盘协程已经退出，没有人会再广播。
+func TestDiscardAfterStopDoesNotBlock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	q, _ := newTestQueue(ctx)
+
+	b, err := q.Enqueue(singlePlan(t), command.Selection{Convert: true})
+	require.NoError(t, err)
+	q.Stop()
+
+	done := make(chan error, 1)
+	go func() { done <- q.Discard(b.ID) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("队列停止后删除批次被卡住")
+	}
 }

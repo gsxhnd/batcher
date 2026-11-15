@@ -21,18 +21,11 @@ import (
 	"github.com/gsxhnd/batcher/internal/task"
 )
 
-// panel 描述左右分栏布局中的各个面板（左侧小方块按 1-5 编号）。
+// panel 描述主界面里可以聚焦的面板。创建任务、预设管理等都在弹窗里，
+// 主界面只剩任务面板：左侧任务列表 + 右侧命令/日志。
 type panel int
 
-const (
-	panelOps     panel = iota // [1] 操作组合勾选
-	panelPresets              // [2] 转码参数预设（内置/自定义/手动输入）
-	panelSubs                 // [3] 字幕轨道列表
-	panelForm                 // [4] 主参数表单
-	panelRun                  // [5] 任务：文件列表 + 命令预览/执行日志
-
-	panelCount
-)
+const panelRun panel = iota
 
 // 文件任务的执行状态（左侧列表标记用）。
 const (
@@ -80,8 +73,7 @@ type model struct {
 
 	focus panel // 当前聚焦的面板
 
-	// 转码参数预设：内置（只读）在前，用户自定义在后。
-	builtins     []presets.Builtin
+	// 转码参数预设，来自数据库。
 	presets      []presets.Preset
 	presetCursor int
 	statusMsg    string        // 界面上的临时提示；以 × 开头的错误显示在右上角
@@ -123,8 +115,7 @@ type model struct {
 	startAt             time.Time     // 开始执行时间（用于显示耗时）
 	elapsed             time.Duration // 批处理总耗时（结束时记录）
 	logFollow           bool          // 日志是否贴底跟随最新输出（用户向上滚动后暂停）
-	cancel              context.CancelFunc
-	evCh                chan tea.Msg // 状态、日志与结束结果有序传递
+	evCh                chan tea.Msg  // 状态、日志与结束结果有序传递
 	eventing            bool
 	runErr              error
 	runID               int
@@ -155,8 +146,7 @@ func newModel() model {
 			progress.WithColors(lipgloss.Color(cProgress), lipgloss.Color(cOk)),
 			progress.WithScaled(true),
 		),
-		builtins: presets.Builtins(),
-		runIdx:   -1,
+		runIdx: -1,
 	}
 	user, err := presets.Load()
 	if err != nil {
@@ -181,14 +171,6 @@ func (m *model) initQueue(ch chan tea.Msg) {
 	})
 }
 
-// presetCount 返回转码预设列表完整长度：内置 + 自定义 + 手动输入。
-func (m model) presetCount() int {
-	return len(m.builtins) + len(m.presets) + 1
-}
-
-// presetUserOffset 返回自定义预设区在完整列表中的起始下标。
-func (m model) presetUserOffset() int { return len(m.builtins) }
-
 // presetHintText 返回任务数据库路径，预设和任务都写在这里。
 func presetHintText() string {
 	dir, err := store.Dir()
@@ -198,14 +180,10 @@ func presetHintText() string {
 	return filepath.Join(dir, store.FileName)
 }
 
-// setFocus 切换聚焦面板。离开任务面板时停止自动跟随。
+// setFocus 切换聚焦面板并重算详情区高度。
 func (m *model) setFocus(p panel) {
-	if p < 0 || p >= panelCount || m.focus == p {
+	if m.focus == p {
 		return
-	}
-	if m.focus == panelRun && p != panelRun {
-		m.fileFollow = false
-		m.outputFocus = false
 	}
 	m.focus = p
 	m.refreshRunHeights()
@@ -230,16 +208,6 @@ type createPlanMsg struct {
 	err  error
 	// name 是表单里填写的队列名称；写入计划快照，供确认与入队使用。
 	name string
-}
-
-type eventMsg struct {
-	runID int
-	event ffmpeg.Event
-}
-
-type doneMsg struct {
-	runID int
-	err   error
 }
 
 type logRefreshMsg struct{ runID int }
@@ -316,18 +284,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.handleQueueEvent(msg.evt)
 		}
 		return m, tea.Batch(m.handleQueueEvent(msg.evt), listenEvents(m.ctx, m.evCh))
-
-	case eventMsg:
-		if !m.running || msg.runID != m.runID {
-			return m, nil
-		}
-		return m, m.handleEvent(msg.event)
-
-	case doneMsg:
-		if !m.running || msg.runID != m.runID {
-			return m, nil
-		}
-		return m, m.handleDone(msg.err)
 
 	case tickMsg:
 		if m.eventing && msg.runID == m.runID {
@@ -1166,9 +1122,6 @@ func (m model) quitCleanup() {
 	if m.createCancel != nil {
 		m.createCancel()
 	}
-	if m.cancel != nil {
-		m.cancel()
-	}
 	if m.queue != nil {
 		m.queue.Stop()
 	}
@@ -1384,10 +1337,6 @@ func (m *model) handleDone(err error) tea.Cmd {
 	m.runErr = err
 	m.elapsed = m.elapsedNow().Round(time.Second)
 	m.running = false
-	if m.cancel != nil {
-		m.cancel()
-		m.cancel = nil
-	}
 	switch {
 	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		for i := range m.files {
@@ -1479,7 +1428,8 @@ func (m model) focusedSnapshot() (*task.Batch, bool) {
 	return m.batchByID(id)
 }
 
-// batchByID 先取队列中的实时副本，否则取数据库里的任务。
+// batchByID 先取 liveBatches 里的队列副本；快照还没刷新到（刚入队、尚未重建列表）时
+// 才回落到逐条加锁深拷贝，最后取数据库里的任务。渲染路径正常只走第一步。
 func (m model) batchByID(id string) (*task.Batch, bool) {
 	if id == "" {
 		return nil, false
@@ -1500,43 +1450,34 @@ func (m model) batchByID(id string) (*task.Batch, bool) {
 	return nil, false
 }
 
-// refreshLiveBatches 从队列快照刷新正在队列中的主任务映射。
-func (m *model) refreshLiveBatches() {
+// refreshLiveBatches 从队列取一份深拷贝快照，刷新 liveBatches 并按队列顺序返回。
+func (m *model) refreshLiveBatches() []*task.Batch {
+	m.liveBatches = nil
 	if m.queue == nil {
-		m.liveBatches = nil
-		return
+		return nil
 	}
-	m.liveBatches = liveBatchMap(m.queue.Copies())
-}
-
-// liveBatchMap 把队列快照按 ID 建成映射，跳过空元素。
-func liveBatchMap(copies []*task.Batch) map[string]*task.Batch {
+	copies := m.queue.Copies()
 	live := make(map[string]*task.Batch, len(copies))
+	ordered := make([]*task.Batch, 0, len(copies))
 	for _, b := range copies {
 		if b != nil {
 			live[b.ID] = b
+			ordered = append(ordered, b)
 		}
 	}
-	return live
+	m.liveBatches = live
+	return ordered
 }
 
+// rosterBatches 返回列表要显示的主任务：队列里的实时副本在前，库里没出现在队列中的历史任务在后。
+// 队列副本与 liveBatches 取自同一份快照，界面读取和这次建列表看到的内容一致。
 func (m *model) rosterBatches() []*task.Batch {
-	var out []*task.Batch
-	seen := map[string]bool{}
-	m.liveBatches = nil
-	if m.queue != nil {
-		copies := m.queue.Copies()
-		m.liveBatches = liveBatchMap(copies)
-		for _, b := range copies {
-			if b == nil {
-				continue
-			}
-			seen[b.ID] = true
-			out = append(out, b)
-		}
-	}
+	out := m.refreshLiveBatches()
 	for _, b := range m.savedList {
-		if b == nil || seen[b.ID] {
+		if b == nil {
+			continue
+		}
+		if _, inQueue := m.liveBatches[b.ID]; inQueue {
 			continue
 		}
 		out = append(out, b)
@@ -1672,7 +1613,6 @@ func buildQueueItems(items []*task.Item) []fileItem {
 // handleQueueEvent 把队列事件映射到既有执行状态。ffmpeg 日志与进度都走 handleEvent；
 // 起停状态仍由队列子任务事件驱动，避免和进度快照重复计数。
 func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
-	m.refreshLiveBatches()
 	if e.Type == task.QueueStoreError {
 		msg := "保存任务记录失败"
 		if e.Err != nil {
@@ -1681,6 +1621,8 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 		m.setStatus("× " + msg)
 		return nil
 	}
+	// ffmpeg 日志与进度事件不改变任务和子任务状态，不必为它们逐条深拷贝整个队列；
+	// 状态变化走下面的事件，进入时才刷新快照。
 	if e.Type == task.QueueFFmpeg {
 		if !m.running || e.BatchID != m.activeBatch || e.FFmpegEvt == nil {
 			return nil
@@ -1700,6 +1642,7 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 			return nil
 		}
 	}
+	m.refreshLiveBatches()
 	// 入队、开始、删除、取消以及子任务删除都要在空闲时刷新列表。
 	// 正在执行的批次的结束事件仍走下面的收尾；其他批次的结束只刷新列表。
 	if !m.running && !queueEventWhenIdle(e.Type) {
