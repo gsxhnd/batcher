@@ -112,10 +112,13 @@ type model struct {
 	logs                []string
 	logVp               viewport.Model
 	bar                 progress.Model
-	startAt             time.Time     // 开始执行时间（用于显示耗时）
-	elapsed             time.Duration // 批处理总耗时（结束时记录）
-	logFollow           bool          // 日志是否贴底跟随最新输出（用户向上滚动后暂停）
-	evCh                chan tea.Msg  // 状态、日志与结束结果有序传递
+	startAt             time.Time      // 开始执行时间（用于显示耗时）
+	elapsed             time.Duration  // 批处理总耗时（结束时记录）
+	logFollow           bool           // 日志是否贴底跟随最新输出（用户向上滚动后暂停）
+	cmdVp               viewport.Model // 命令区视口：高度固定，超长命令在这里上下滚动
+	cmdFocus            bool           // Tab 聚焦命令区：滚动键作用于命令而不是输出
+	cmdContent          string         // 命令区已设置的内容，用于检测命令变化并回到顶部
+	evCh                chan tea.Msg   // 状态、日志与结束结果有序传递
 	eventing            bool
 	runErr              error
 	runID               int
@@ -349,12 +352,23 @@ func (m *model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		return m.updateModal(key)
 	}
 
+	if m.cmdFocus {
+		// Tab 聚焦命令区后，esc 先退回输出/列表，enter 等不作用于列表。
+		switch s {
+		case "esc":
+			m.cmdFocus = false
+			m.refreshRunHeights()
+			return nil
+		case "enter", "shift+tab":
+			return nil
+		}
+	}
 	if m.outputFocus {
 		switch s {
 		case "esc":
 			m.leaveOutput()
 			return nil
-		case "enter", "tab", "shift+tab":
+		case "enter", "shift+tab":
 			return nil
 		}
 	}
@@ -468,6 +482,10 @@ func (m *model) handleMouse(msg tea.MouseWheelMsg) tea.Cmd {
 	case m.modal != nil:
 		return nil
 	case m.running || m.queueViewActive():
+		if m.cmdFocus {
+			m.cmdVp, cmd = m.cmdVp.Update(msg)
+			break
+		}
 		m.logVp, cmd = m.logVp.Update(msg)
 		m.logFollow = m.logVp.AtBottom()
 	}
@@ -639,6 +657,7 @@ func (m *model) refreshRunHeights() {
 	if h := m.narrowFilePaneH(); h > 0 {
 		inner = max(inner-h-1, 2)
 	}
+	m.cmdVp.SetHeight(m.pinCmdMaxLines())
 	if m.running || m.queueViewActive() {
 		m.logVp.SetHeight(max(inner-m.taskChromeH(), 2))
 	}
@@ -765,12 +784,15 @@ func (m *model) toggleItemAttempts(row rosterRow) {
 // leaveOutput 退出子任务输出查看，上下键恢复为移动左侧列表。
 func (m *model) leaveOutput() {
 	m.outputFocus = false
+	m.cmdFocus = false
+	m.refreshRunHeights()
 	m.setStatus("")
 }
 
 // openOutput 进入当前子任务的输出查看。
 func (m *model) openOutput() {
 	m.outputFocus = true
+	m.cmdFocus = false
 	m.fileFollow = false
 	m.logFollow = true
 	m.pinRosterCursor()
@@ -787,6 +809,46 @@ func (m *model) scrollOutput(delta int) {
 		m.logVp.ScrollDown(delta)
 	}
 	m.logFollow = m.logVp.AtBottom()
+}
+
+// toggleDetailPane 在命令区与输出区之间切换滚动焦点（Tab）。
+// 聚焦哪一侧，↑/↓/pgup/pgdn/滚轮就滚动哪一侧，聚焦侧的标题用 ▸ 标出。
+func (m *model) toggleDetailPane() {
+	if row, ok := m.focusedRosterRow(); ok && row.itemID == "" {
+		return // 主任务行没有命令区
+	}
+	if m.pinnedCmdText() == "" {
+		m.setStatus("当前没有命令区，输出直接滚动")
+		return
+	}
+	m.cmdFocus = !m.cmdFocus
+	m.refreshRunHeights()
+}
+
+// scrollCmdPane 滚动命令区（Tab 聚焦后 ↑/↓/pgup/pgdn 生效）。
+func (m *model) scrollCmdPane(delta int) {
+	if delta < 0 {
+		m.cmdVp.ScrollUp(-delta)
+	} else if delta > 0 {
+		m.cmdVp.ScrollDown(delta)
+	}
+}
+
+// syncCmdPane 按光标所在行刷新命令区内容与尺寸。
+// 命令变化时回到顶部；同一条命令保持滚动位置。
+func (m *model) syncCmdPane() {
+	m.cmdVp.SetWidth(max(m.rightW-4, 10))
+	m.cmdVp.SetHeight(m.pinCmdMaxLines())
+	cmd := m.pinnedCmdText()
+	wrapped := ""
+	if cmd != "" {
+		wrapped = wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10))
+	}
+	if wrapped != m.cmdContent {
+		m.cmdContent = wrapped
+		m.cmdVp.SetContent(wrapped)
+		m.cmdVp.GotoTop()
+	}
 }
 func (m *model) followRunningItem() {
 	m.outputFocus = false
@@ -829,6 +891,7 @@ func (m model) queueViewActive() bool {
 
 // 队列视图激活且未运行时，批次/子任务行显示该子任务的错误尾部；批次行为摘要。
 func (m *model) syncLogPane() {
+	m.syncCmdPane()
 	if len(m.roster) > 0 {
 		m.syncRosterLogPane()
 		return
@@ -1332,6 +1395,9 @@ func (m *model) syncRoster() {
 		if !rowOK {
 			m.outputFocus = false
 		}
+	}
+	if m.cmdFocus && m.pinnedCmdText() == "" {
+		m.cmdFocus = false
 	}
 	if m.width > 0 && (m.running || len(rows) > 0) {
 		m.refreshRunHeights()

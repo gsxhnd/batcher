@@ -465,39 +465,59 @@ func (m model) pinnedCmdText() string {
 }
 
 // pinnedCmdBlock 渲染执行中固定在主体内容最上方的完整 CLI 命令块：
-// 一行说明 + 按宽度折行的命令原文；过长时收起尾部并提示，完整命令仍可用 y 复制。
+// 一行说明 + 固定高度的命令区 + 状态行。命令过长时命令区可上下滚动（Tab 聚焦），
+// 完整命令仍可用 y 复制。
 func (m model) pinnedCmdBlock() string {
 	var b strings.Builder
-	b.WriteString("  " + sectionTitleStyle.Render("固定 · 当前任务完整命令（y 复制）") + "\n")
-	if lines := m.pinnedCmdLines(); len(lines) > 0 {
-		b.WriteString(strings.Join(lines, "\n") + "\n")
-	} else {
-		b.WriteString("  " + subtitleStyle.Render("等待任务开始…") + "\n")
-	}
+	b.WriteString("  " + m.cmdTitle() + "\n")
+	b.WriteString(m.cmdPaneBody())
 	b.WriteString(m.subtaskStatusLine())
 	return b.String()
 }
 
-// pinnedCmdLines 把置顶命令按宽度折行成显示行；超过上限时收起尾部并提示，
-// 保证下面的进度和输出区始终可见。runPinH 与本函数共用同一来源，行数必须一致。
-func (m model) pinnedCmdLines() []string {
+// cmdLines 把置顶命令按宽度折行成显示行。渲染与滚动共用同一来源。
+func (m model) cmdLines() []string {
 	cmd := m.pinnedCmdText()
 	if cmd == "" {
 		return nil
 	}
-	wrapped := strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n")
-	wrapped[0] = "  " + wrapped[0]
-	limit := m.pinCmdMaxLines()
-	if len(wrapped) <= limit {
-		return wrapped
-	}
-	shown := append([]string(nil), wrapped[:limit]...)
-	shown = append(shown, "  "+descStyle.Render(fmt.Sprintf("……（命令共 %d 行，超出部分已收起，按 y 复制完整命令）", len(wrapped))))
-	return shown
+	lines := strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n")
+	lines[0] = "  " + lines[0]
+	return lines
 }
 
-// pinCmdMaxLines 置顶命令最多显示的行数。窗口越矮给得越少，命令过长时收起尾部，
-// 避免长命令把进度和输出区挤出详情面板。
+// cmdTitle 命令区标题：Tab 聚焦时用 ▸ 高亮标出，命令超长时提示可以上下翻。
+func (m model) cmdTitle() string {
+	title := "固定 · 当前任务完整命令（y 复制）"
+	if m.cmdOverflow() {
+		title = "固定 · 当前任务完整命令（y 复制 · Tab 后可上下翻）"
+	}
+	if m.cmdFocus {
+		return sectionTitleStyle.Render("▸ " + title)
+	}
+	return descStyle.Render(title)
+}
+
+// cmdPaneBody 命令区正文：固定高度（pinCmdMaxLines）内对折行后的完整命令开窗，
+// 窗口位置来自 cmdVp 的滚动偏移。命令为空时显示等待提示。
+func (m model) cmdPaneBody() string {
+	lines := m.cmdLines()
+	if len(lines) == 0 {
+		return "  " + subtitleStyle.Render("等待任务开始…") + "\n"
+	}
+	h := m.pinCmdMaxLines()
+	start := clamp(m.cmdVp.YOffset(), 0, max(len(lines)-h, 0))
+	end := min(start+h, len(lines))
+	return strings.Join(lines[start:end], "\n") + "\n"
+}
+
+// cmdOverflow 报告命令折行后是否超出命令区的固定高度。
+func (m model) cmdOverflow() bool {
+	return len(m.cmdLines()) > m.pinCmdMaxLines()
+}
+
+// pinCmdMaxLines 命令区的固定高度。窗口越矮给得越少，命令过长时在高度内滚动，
+// 保证下面的进度和输出区始终可见。
 func (m model) pinCmdMaxLines() int {
 	inner := max(m.bodyH()-2, 2)
 	if h := m.narrowFilePaneH(); h > 0 {
@@ -509,13 +529,18 @@ func (m model) pinCmdMaxLines() int {
 }
 
 // outputDivider 把子任务的固定信息和下面的输出区隔开，固定一行。
+// Tab 聚焦命令区时输出分隔线变暗，表示滚动键当前不在输出区。
 func (m model) outputDivider() string {
 	title := "── 输出 ──"
 	width := max(m.rightW-2, lipgloss.Width(title))
 	pad := max(width-lipgloss.Width(title), 0)
 	left, right := pad/2, pad-pad/2
 	line := strings.Repeat("─", left) + title + strings.Repeat("─", right)
-	return sectionTitleStyle.Render(truncateText(line, width)) + "\n"
+	style := sectionTitleStyle
+	if m.cmdFocus {
+		style = descStyle
+	}
+	return style.Render(truncateText(line, width)) + "\n"
 }
 
 // batchBody 是主任务自己的主体：状态、进度和子任务列表，没有输出区。
@@ -600,17 +625,16 @@ func (m model) batchOverviewBlock(row rosterRow) string {
 		line("输出: "+snap.OutputDir)
 }
 
-// runPinH 置顶区域占用的行数：主任务行为总览，子任务行为完整命令。
-// 行数必须与 pinnedCmdBlock 的实际渲染一致。
+// runPinH 置顶区域占用的行数：主任务行为总览，子任务行为固定高度的命令区。
+// 行数必须与 pinnedCmdBlock 的实际渲染一致：标题 + 命令区 + 状态行。
 func (m model) runPinH() int {
 	if _, ok := m.focusedBatchRow(); ok {
 		return 4
 	}
-	lines := 2 // 说明行 + 等待提示
 	if cmd := m.pinnedCmdText(); cmd != "" {
-		lines = 1 + len(m.pinnedCmdLines())
+		return 1 + m.pinCmdMaxLines() + 1 // 说明行 + 固定高度命令区 + 状态行
 	}
-	return lines + 1 // 命令区再加一行状态
+	return 3 // 说明行 + 等待提示 + 状态行
 }
 
 // taskProgressBlock 在子任务和单次执行上显示这一次的 ffmpeg 进度。
@@ -908,8 +932,10 @@ func (m model) footer() string {
 				hints = []string{"↑/↓ 选择", "a 空白新建", "c 复制", "e 编辑", "d 删除", "J/K 排序", "esc 关闭"}
 			}
 		}
+	case m.cmdFocus:
+		hints = []string{"↑/↓ 翻命令", "Tab 切回输出", "esc 返回", "y 复制"}
 	case m.outputFocus:
-		hints = []string{"↑/↓ 滚动输出", "esc 返回", "y 复制", "q 退出"}
+		hints = []string{"↑/↓ 滚动输出", "Tab 翻命令", "esc 返回", "y 复制", "q 退出"}
 	case m.running || m.queueViewActive():
 		hints = []string{"↑/↓ 切换", "r 重试", "d 删除", "c 取消", "s 跳过", "x 中止", "y 复制", "f 跟随"}
 		if m.canOverwriteFocused() {

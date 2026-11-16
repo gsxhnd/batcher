@@ -87,6 +87,10 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case "up", "k":
+		if m.cmdFocus {
+			m.scrollCmdPane(-1)
+			return nil
+		}
 		if m.outputFocus {
 			m.scrollOutput(-1)
 			return nil
@@ -94,6 +98,10 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		m.moveFilePane(-1)
 		return nil
 	case "down", "j":
+		if m.cmdFocus {
+			m.scrollCmdPane(1)
+			return nil
+		}
 		if m.outputFocus {
 			m.scrollOutput(1)
 			return nil
@@ -105,6 +113,13 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 			m.leaveOutput()
 			return nil
 		}
+	case "tab":
+		// Tab 在命令区与输出区之间切换滚动焦点；没有命令区的界面不消费。
+		if m.running || m.queueViewActive() {
+			m.toggleDetailPane()
+			return nil
+		}
+		return nil
 	}
 	// 队列视图的任务操作键：按光标所在行分发（子任务/批次行）。
 	if consumed, cmd := m.runTaskKeys(key.String()); consumed {
@@ -139,7 +154,11 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
 		if m.running || m.queueViewActive() {
 			var cmd tea.Cmd
-			m.logVp, cmd = m.logVp.Update(msg) // 视口自带 pgup/pgdn/半页滚动键位
+			if m.cmdFocus {
+				m.cmdVp, cmd = m.cmdVp.Update(msg) // 视口自带 pgup/pgdn/半页滚动键位
+				return cmd
+			}
+			m.logVp, cmd = m.logVp.Update(msg)
 			// 手动滚动后按是否处于底部决定是否继续跟随新输出。
 			m.logFollow = m.logVp.AtBottom()
 			return cmd
@@ -147,12 +166,20 @@ func (m *model) updateRunPanel(msg tea.Msg) tea.Cmd {
 		return nil
 	case "home":
 		if m.running || m.queueViewActive() {
+			if m.cmdFocus {
+				m.cmdVp.GotoTop()
+				return nil
+			}
 			m.logVp.GotoTop()
 			m.logFollow = m.logVp.AtBottom()
 		}
 		return nil
 	case "end":
 		if m.running || m.queueViewActive() {
+			if m.cmdFocus {
+				m.cmdVp.GotoBottom()
+				return nil
+			}
 			m.logVp.GotoBottom()
 			m.logFollow = true
 		}
