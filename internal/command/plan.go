@@ -20,6 +20,9 @@ type Job struct {
 	Input  string
 	Output string
 	Args   []string
+	// SubtitleNotes 记录规划时没有配上的字幕及原因（未找到、匹配到多个），按字幕组顺序。
+	// 为空表示表单里的每条字幕都写进了命令；入队确认用它提示“没有字幕”。
+	SubtitleNotes []string
 }
 
 // BatchPlan 保存配置与任务快照；调用方应只读使用 Jobs。
@@ -195,7 +198,8 @@ func (p *planner) subtitleEntries() []SubtitleOption {
 // 即一次处理即可完成转码 + 加多条字幕 + 加字体，无需跑多遍。
 //
 // 添加字幕支持多条：每条字幕是一个独立输入（-i <字幕> -map <n>），流序号从
-// InputSubNo 开始递增。字幕文件按 <视频名>.<后缀> 或 <视频名>.<标记>.<后缀> 匹配。
+// InputSubNo 开始递增。字幕文件按 <视频名>.<后缀> 或 <视频名>.<标记>.<后缀> 匹配；
+// 没匹配到的字幕不阻断创建，命令里跳过并记入 Job.SubtitleNotes。
 func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
 	if err := p.checkPlanInputs(sel); err != nil {
 		return nil, err
@@ -294,6 +298,7 @@ func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsPar
 		}
 		cmd := []string{"-nostdin", "-n", "-i", videoPath}
 		var subtitleOutput []string
+		var subNotes []string
 		if sel.AddSubtitle {
 			dir := filepath.Dir(videoPath)
 			info, ok := dirs[dir]
@@ -305,14 +310,25 @@ func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsPar
 				info = &dirInfo{names: names, stems: videoStems(videos, dir)}
 				dirs[dir] = info
 			}
+			var matched []subtitleInput
 			for _, sub := range subs {
 				name, err := resolveSubtitle(info.names, media.Stem(videoPath), sub.Suffix, info.stems)
 				if err != nil {
-					return nil, fmt.Errorf("匹配 %s 的字幕: %w", filepath.Base(videoPath), err)
+					// 没找到或匹配到多个都不阻断创建：这条命令跳过该字幕，
+					// 原因记入 Job，由入队确认弹窗提示给用户。
+					subNotes = append(subNotes, err.Error())
+					continue
 				}
+				matched = append(matched, subtitleInput{SubtitleOption: sub.SubtitleOption, streamNo: p.option.InputSubNo + len(matched)})
 				cmd = append(cmd, "-sub_charenc", "UTF-8", "-i", filepath.Join(dir, name))
 			}
-			subtitleOutput = p.subtitleOutputArgs(subs)
+			if len(matched) > 0 {
+				// 只映射配上的字幕，流序号按本条命令实际带上的字幕重新分配。
+				subtitleOutput = p.subtitleOutputArgs(matched)
+			} else {
+				// 一条都没配上：退化为纯封装，保留视频原有流（含原有字幕）。
+				cmd = append(cmd, "-map", "0")
+			}
 		} else {
 			cmd = append(cmd, "-map", "0")
 		}
@@ -326,7 +342,7 @@ func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsPar
 		}
 		cmd = append(cmd, fontsParams...)
 		cmd = append(cmd, outputs[videoPath])
-		jobs = append(jobs, Job{Input: videoPath, Output: outputs[videoPath], Args: cmd})
+		jobs = append(jobs, Job{Input: videoPath, Output: outputs[videoPath], Args: cmd, SubtitleNotes: subNotes})
 	}
 	return jobs, nil
 }

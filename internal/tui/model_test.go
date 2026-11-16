@@ -856,6 +856,35 @@ func TestEnqueueConfirmListsFilesAndFonts(t *testing.T) {
 	assert.NotContains(t, text, "字体")
 }
 
+// TestEnqueueConfirmMarksMissingSubtitles 入队确认里提示字幕匹配结果：
+// 全部没配上的子任务标出“没有字幕”，只缺一部分时逐条给出原因。
+func TestEnqueueConfirmMarksMissingSubtitles(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 40
+	plan := &command.BatchPlan{Jobs: []command.Job{
+		// 一条字幕都没配上：展开正文标出“没有字幕”，折行摘要同样可见。
+		{Input: "/v/a.mkv", Args: []string{"-i", "/v/a.mkv", "/out/a.mkv"},
+			SubtitleNotes: []string{"未找到 a.chi.ass"}},
+		// 只缺一条：正文提示缺的那条，不标“没有字幕”。
+		{Input: "/v/b.mkv", Args: []string{"-i", "/v/b.mkv", "-sub_charenc", "UTF-8", "-i", "/v/b.chi.ass", "/out/b.mkv"},
+			SubtitleNotes: []string{"未找到 b.eng.srt"}},
+		// 全部配上：不额外占行。
+		{Input: "/v/c.mkv", Args: []string{"-i", "/v/c.mkv", "-sub_charenc", "UTF-8", "-i", "/v/c.chi.ass", "/out/c.mkv"}},
+	}}
+	m.openEnqueueConfirm(plan, nil)
+	shown := m.modalView()
+	assert.Contains(t, shown, "没有字幕", "全部没配上的子任务要标出“没有字幕”")
+	assert.Contains(t, shown, "未找到 a.chi.ass")
+	assert.Contains(t, shown, "未找到 b.eng.srt（已跳过）")
+	assert.Equal(t, 1, strings.Count(shown, "没有字幕"), "只缺一部分的子任务不标“没有字幕”")
+
+	// 收起第一条后，折行摘要仍提示“没有字幕”，正文里的原因不再显示。
+	press(&m, "enter")
+	folded := m.modalView()
+	assert.Contains(t, folded, "没有字幕")
+	assert.NotContains(t, folded, "未找到 a.chi.ass")
+}
+
 func TestEnqueueConfirmScrollsToFocusedJob(t *testing.T) {
 	args := []string{"-i", "/v/a.mkv"}
 	for i := 0; i < 12; i++ {

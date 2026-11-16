@@ -156,6 +156,45 @@ func TestMouseWheelPausesFollow(t *testing.T) {
 	assert.True(t, m.logFollow, "滚轮回到底部后应恢复跟随")
 }
 
+// TestPinnedCmdCollapsesWhenTooLong 命令过长时置顶区收起并提示：
+// 主体不超出盒子、输出视口保留可读行数，完整命令仍可用 y 复制。
+func TestPinnedCmdCollapsesWhenTooLong(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 24
+	m.resizePanes()
+	m.focus = panelRun
+	m.running = true
+	m.total = 1
+	m.current = "ffmpeg -i a.mkv " + strings.Repeat("-metadata a=b ", 200) + "out/a.mkv"
+	m.roster = []rosterRow{{batchID: "b", itemID: "001", title: "a.mkv", cmd: m.current, state: fileRunning}}
+	m.fileCursor = 0
+	m.refreshRunHeights()
+	m.syncLogPane()
+
+	// 高度计算与渲染一致，主体不超出盒子。
+	body := m.taskDetail()
+	limit := m.bodyH() - 2
+	assert.LessOrEqual(t, len(strings.Split(strings.TrimSuffix(body, "\n"), "\n")), limit)
+	// 收起提示出现；输出视口保留多行；y 复制的仍是完整命令。
+	assert.Contains(t, m.render(), "超出部分已收起")
+	assert.Greater(t, m.logVp.Height(), 2, "长命令不应把输出区挤到最少行数")
+	assert.Equal(t, m.current, m.pinnedCmdText(), "y 复制的仍是完整命令")
+
+	// 命令不超过上限时不收起，尾部保持可见。
+	m2 := newModel()
+	m2.width, m2.height = 100, 34
+	m2.resizePanes()
+	m2.focus = panelRun
+	m2.running = true
+	m2.total = 1
+	m2.current = "ffmpeg -i a.mkv -c copy out/a.mkv"
+	m2.roster = []rosterRow{{batchID: "b", itemID: "001", title: "a.mkv", cmd: m2.current, state: fileRunning}}
+	m2.refreshRunHeights()
+	assert.NotContains(t, m2.taskDetail(), "超出部分已收起")
+	assert.Contains(t, m2.taskDetail(), "out/a.mkv")
+}
+
 func TestSubtaskDetailFitsTheBox(t *testing.T) {
 	isolatePresets(t)
 	m := newModel()

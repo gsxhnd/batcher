@@ -465,18 +465,47 @@ func (m model) pinnedCmdText() string {
 }
 
 // pinnedCmdBlock 渲染执行中固定在主体内容最上方的完整 CLI 命令块：
-// 一行说明 + 按宽度折行的命令原文，长命令不会被截断。
+// 一行说明 + 按宽度折行的命令原文；过长时收起尾部并提示，完整命令仍可用 y 复制。
 func (m model) pinnedCmdBlock() string {
-	cmd := m.pinnedCmdText()
 	var b strings.Builder
 	b.WriteString("  " + sectionTitleStyle.Render("固定 · 当前任务完整命令（y 复制）") + "\n")
-	if cmd == "" {
-		b.WriteString("  " + subtitleStyle.Render("等待任务开始…") + "\n")
+	if lines := m.pinnedCmdLines(); len(lines) > 0 {
+		b.WriteString(strings.Join(lines, "\n") + "\n")
 	} else {
-		b.WriteString("  " + wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)) + "\n")
+		b.WriteString("  " + subtitleStyle.Render("等待任务开始…") + "\n")
 	}
 	b.WriteString(m.subtaskStatusLine())
 	return b.String()
+}
+
+// pinnedCmdLines 把置顶命令按宽度折行成显示行；超过上限时收起尾部并提示，
+// 保证下面的进度和输出区始终可见。runPinH 与本函数共用同一来源，行数必须一致。
+func (m model) pinnedCmdLines() []string {
+	cmd := m.pinnedCmdText()
+	if cmd == "" {
+		return nil
+	}
+	wrapped := strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n")
+	wrapped[0] = "  " + wrapped[0]
+	limit := m.pinCmdMaxLines()
+	if len(wrapped) <= limit {
+		return wrapped
+	}
+	shown := append([]string(nil), wrapped[:limit]...)
+	shown = append(shown, "  "+descStyle.Render(fmt.Sprintf("……（命令共 %d 行，超出部分已收起，按 y 复制完整命令）", len(wrapped))))
+	return shown
+}
+
+// pinCmdMaxLines 置顶命令最多显示的行数。窗口越矮给得越少，命令过长时收起尾部，
+// 避免长命令把进度和输出区挤出详情面板。
+func (m model) pinCmdMaxLines() int {
+	inner := max(m.bodyH()-2, 2)
+	if h := m.narrowFilePaneH(); h > 0 {
+		inner = max(inner-h-1, 2)
+	}
+	// 内区高度扣掉命令标题、状态行和进度/分隔区后，命令与输出平分剩余空间；3–8 行。
+	budget := inner - m.runBarH() - m.statusBlockH() - 3
+	return max(3, min(8, budget/2))
 }
 
 // outputDivider 把子任务的固定信息和下面的输出区隔开，固定一行。
@@ -572,14 +601,14 @@ func (m model) batchOverviewBlock(row rosterRow) string {
 }
 
 // runPinH 置顶区域占用的行数：主任务行为总览，子任务行为完整命令。
+// 行数必须与 pinnedCmdBlock 的实际渲染一致。
 func (m model) runPinH() int {
 	if _, ok := m.focusedBatchRow(); ok {
 		return 4
 	}
-	cmd := m.pinnedCmdText()
-	lines := 2
-	if cmd != "" {
-		lines = 1 + len(strings.Split(wrapText(cmdPinStyle.Render(cmd), max(m.rightW-4, 10)), "\n"))
+	lines := 2 // 说明行 + 等待提示
+	if cmd := m.pinnedCmdText(); cmd != "" {
+		lines = 1 + len(m.pinnedCmdLines())
 	}
 	return lines + 1 // 命令区再加一行状态
 }

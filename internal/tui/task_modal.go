@@ -418,6 +418,10 @@ type enqueueJob struct {
 	name  string
 	files []string
 	fonts []string
+	// subNotes 是这条命令没配上的字幕提示（未找到、匹配到多个）；非空说明对应字幕已跳过。
+	subNotes []string
+	// noSub 表示勾选了添加字幕但这条命令一条字幕都没配上，确认时标出“没有字幕”。
+	noSub bool
 }
 
 // jobSpan 是一条子任务在确认列表里占用的行，含标题，不含它前面的空行。
@@ -462,6 +466,10 @@ func enqueueJobs(plan *command.BatchPlan) (header string, shared []string, jobs 
 			name = fmt.Sprintf("任务 %d", i+1)
 		}
 		jobs[i] = enqueueJob{name: name, files: jobInputs(job)}
+		// 勾选了添加字幕的任务里，命令没有 -sub_charenc 就是一条字幕都没配上。
+		// 没勾字幕的计划没有字幕输入也没有提示，不会误标。
+		jobs[i].subNotes = job.SubtitleNotes
+		jobs[i].noSub = len(job.SubtitleNotes) > 0 && len(cliFlagValues(job.Args, "-sub_charenc")) == 0
 		if showJobFonts {
 			jobs[i].fonts = fontSets[i]
 		}
@@ -536,10 +544,31 @@ func enqueueConfirmLines(md *modal, width int) ([]string, []jobSpan) {
 			if md.showJobFonts {
 				lines = append(lines, pathSection(job.fonts, "字体", width)...)
 			}
+			lines = append(lines, subtitleNoticeLines(job, width)...)
 		}
 		spans[i] = jobSpan{start: start, end: max(len(lines)-1, start)}
 	}
 	return lines, spans
+}
+
+// subtitleNoticeLines 提示这条子任务的字幕匹配结果：一条都没配上时标出“没有字幕”，
+// 只缺一部分时逐条给出原因。字幕全部配上的子任务不额外占行。
+func subtitleNoticeLines(job enqueueJob, width int) []string {
+	if !job.noSub && len(job.subNotes) == 0 {
+		return nil
+	}
+	var lines []string
+	add := func(s string) {
+		lines = append(lines, wrapLines(s, width)...)
+	}
+	add("  " + sectionTitleStyle.Render("字幕"))
+	if job.noSub {
+		add("    " + errorStyle.Render("没有字幕"))
+	}
+	for _, note := range job.subNotes {
+		add("    " + errorStyle.Render("· "+note+"（已跳过）"))
+	}
+	return lines
 }
 
 func jobHeaderLine(job enqueueJob, index int, open, focused, showFonts bool) string {
@@ -565,6 +594,11 @@ func jobFoldSummary(job enqueueJob, showFonts bool) string {
 	parts := []string{countPhrase(len(job.files), "文件")}
 	if showFonts {
 		parts = append(parts, countPhrase(len(job.fonts), "字体"))
+	}
+	if job.noSub {
+		parts = append(parts, "没有字幕")
+	} else if len(job.subNotes) > 0 {
+		parts = append(parts, fmt.Sprintf("缺 %d 条字幕", len(job.subNotes)))
 	}
 	return strings.Join(parts, " · ")
 }
