@@ -882,7 +882,11 @@ func (m model) footer() string {
 			hints = []string{"↑/↓ 滚动", "esc 关闭"}
 		case modalConfirm:
 			if len(m.modal.jobs) > 0 {
-				hints = []string{"↑/↓ 选择", "enter 展开/收起", "ctrl+s 加入队列", "esc 返回修改"}
+				confirm := "ctrl+s 加入队列"
+				if m.modal.editBatchID != "" {
+					confirm = "ctrl+s 保存修改"
+				}
+				hints = []string{"↑/↓ 选择", "enter 展开/收起", confirm, "esc 返回修改"}
 				break
 			}
 			hints = []string{"enter 确认", "esc 取消", "? 快捷键"}
@@ -893,7 +897,11 @@ func (m model) footer() string {
 			hints = []string{"↑/↓/Tab 切换", "enter 下一项/保存", "esc 取消", "? 快捷键"}
 			switch m.modal.kind {
 			case modalTask:
-				hints = []string{"↑/↓ 切换", "space 勾选", "ctrl+n 加字幕", "ctrl+s 创建", "esc 取消"}
+				create := "ctrl+s 创建"
+				if m.modal.editBatchID != "" {
+					create = "ctrl+s 保存修改"
+				}
+				hints = []string{"↑/↓ 切换", "space 勾选", "ctrl+n 加字幕", create, "esc 取消"}
 			case modalRename:
 				hints = []string{"enter 保存", "esc 取消"}
 			case modalPresetList:

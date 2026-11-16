@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/gsxhnd/batcher/internal/presets"
 	"github.com/gsxhnd/batcher/internal/store"
 	"github.com/gsxhnd/batcher/internal/task"
+	"github.com/gsxhnd/batcher/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1095,6 +1098,242 @@ func TestRenameHistoryTask(t *testing.T) {
 	saved, err := db.LoadTask(batch.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "历史任务改名", saved.Name, "历史任务改名直接落盘")
+}
+
+// editFixturePlan 用占位文件生成一份真实计划，供编辑测试预填与入队。
+func editFixturePlan(t *testing.T, fx testutil.Fixture, subs []command.SubtitleOption) (*command.BatchPlan, command.Selection) {
+	t.Helper()
+	opt := command.DefaultOption()
+	opt.InputPath, opt.InputFormat = fx.Dir1, "mp4"
+	opt.OutputPath = fx.Out
+	opt.OutputFormat = "mkv"
+	opt.Subtitles = subs
+	sel := command.Selection{Convert: true, AddSubtitle: len(subs) > 0}
+	plan, err := command.BuildPlan(context.Background(), &opt, sel)
+	require.NoError(t, err)
+	return plan, sel
+}
+
+// TestEditTaskOpensPrefilledForm 主任务行按 e 重新编辑：表单预填任务保存的配置、
+// 字幕组和队列名称；esc 关闭后再次打开内容不变；子任务行没有编辑入口。
+func TestEditTaskOpensPrefilledForm(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	testQueue(t, &m)
+
+	fx := testutil.NewFixture(t)
+	plan, sel := editFixturePlan(t, fx, []command.SubtitleOption{
+		{Suffix: "ass", Lang: "chi", Title: "简体中文", Default: true},
+	})
+	plan.Name = "我的队列"
+	batch, err := m.queue.Enqueue(plan, sel)
+	require.NoError(t, err)
+	m.syncRoster()
+	require.Empty(t, m.roster[0].itemID, "光标应停在主任务行")
+
+	press(&m, "e")
+	require.NotNil(t, m.modal)
+	require.Equal(t, modalTask, m.modal.kind)
+	assert.Equal(t, "编辑任务", m.modal.title)
+	assert.Equal(t, batch.ID, m.modal.editBatchID)
+	assert.Contains(t, m.modalView(), "保存修改", "编辑表单的提示文案应区别于新建")
+
+	value := func(key string) string {
+		f, ok := findField(&m.modal.fields, key)
+		require.True(t, ok, "字段 %s 应存在", key)
+		return f.Value()
+	}
+	checked := func(key string) bool {
+		f, ok := findField(&m.modal.fields, key)
+		require.True(t, ok, "字段 %s 应存在", key)
+		return f.checked
+	}
+	assert.Equal(t, "我的队列", value("batch_name"))
+	assert.Equal(t, fx.Dir1, value("input_path"))
+	assert.Equal(t, "mp4", value("input_format"))
+	assert.Equal(t, fx.Out, value("output_path"))
+	assert.Equal(t, "mkv", value("output_format"))
+	assert.Equal(t, "ass", value("sub_suffix"))
+	assert.Equal(t, "chi", value("sub_lang"))
+	assert.Equal(t, "简体中文", value("sub_title"))
+	assert.True(t, checked("op_convert"))
+	assert.True(t, checked("op_subtitle"))
+	assert.True(t, checked("sub_default"), "默认字幕流的勾选应恢复")
+	assert.False(t, checked("op_fonts"))
+	assert.False(t, checked("recursive"))
+
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+	press(&m, "e")
+	require.Equal(t, modalTask, m.modal.kind)
+	assert.Equal(t, "ass", value("sub_suffix"), "再次打开仍预填任务参数")
+	press(&m, "esc")
+
+	// 子任务行不支持编辑
+	press(&m, "enter")
+	require.Greater(t, len(m.roster), 1)
+	m.fileCursor = 1
+	press(&m, "e")
+	assert.Nil(t, m.modal, "子任务行没有编辑入口")
+}
+
+// TestEditTaskAppliesReplacement 编辑确认后用新计划替换原任务：队列副本、列表
+// 标题与落盘记录同步更新，状态回到等待；esc 可回到编辑表单继续改参数。
+func TestEditTaskAppliesReplacement(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	testQueue(t, &m)
+
+	fx := testutil.NewFixture(t)
+	plan, sel := editFixturePlan(t, fx, nil)
+	batch, err := m.queue.Enqueue(plan, sel)
+	require.NoError(t, err)
+	m.syncRoster()
+
+	press(&m, "e")
+	require.Equal(t, modalTask, m.modal.kind)
+	// 输入用绝对路径构造：NewBatch 会把参数里的输入输出换成绝对路径。
+	base := t.TempDir()
+	input := filepath.Join(base, "a.mkv")
+	output := filepath.Join(base, "a-out.mkv")
+	newPlan := &command.BatchPlan{Name: "编辑后的队列", Jobs: []command.Job{{
+		Input:  input,
+		Output: output,
+		Args:   []string{"-nostdin", "-n", "-i", input, output},
+	}}}
+	m.createSel = command.Selection{Convert: true}
+	m.createSeq = 1
+	next, _ := m.Update(createPlanMsg{seq: 1, plan: newPlan, name: "编辑后的队列"})
+	m = next.(model)
+	require.Equal(t, modalConfirm, m.modal.kind)
+	shown := m.modalView()
+	assert.Contains(t, shown, "确认更新任务")
+	assert.Contains(t, shown, "原有执行记录会被替换")
+
+	// esc 回到编辑表单继续改参数；再 esc 才关闭。
+	press(&m, "esc")
+	require.Equal(t, modalTask, m.modal.kind)
+	require.Equal(t, batch.ID, m.modal.editBatchID)
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
+
+	press(&m, "e")
+	require.Equal(t, batch.ID, m.modal.editBatchID)
+	m.createSeq = 2
+	next, _ = m.Update(createPlanMsg{seq: 2, plan: newPlan, name: "编辑后的队列"})
+	m = next.(model)
+	press(&m, "ctrl+s")
+
+	got, ok := m.queue.BatchCopy(batch.ID)
+	require.True(t, ok, "编辑不产生新任务，原 ID 保留")
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, newPlan.Jobs[0].Args, got.Items[0].PlanArgs)
+	assert.Equal(t, "编辑后的队列", got.Name)
+	assert.Equal(t, task.StatusPending, got.Status, "替换后回到等待，按 x 开始")
+	assert.Contains(t, m.statusMsg, "已更新任务")
+	assert.Contains(t, m.roster[0].title, "编辑后的队列", "列表标题同步更新")
+
+	// 落盘记录同步替换。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if saved, err := task.LoadTask(batch.ID); err == nil && saved.Name == "编辑后的队列" && len(saved.Items) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	saved, err := task.LoadTask(batch.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "编辑后的队列", saved.Name)
+	require.Len(t, saved.Items, 1)
+}
+
+// TestEditHistoryTaskUpdatesStore 不在队列里的历史任务编辑后按同 ID 重建记录写库。
+func TestEditHistoryTaskUpdatesStore(t *testing.T) {
+	isolatePresets(t)
+	dir := t.TempDir()
+	db, err := store.OpenDir(dir)
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+	m := newModel()
+	m.db = db
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	testQueue(t, &m)
+
+	fx := testutil.NewFixture(t)
+	plan, sel := editFixturePlan(t, fx, nil)
+	batch := task.NewBatch("history-1", plan, sel, time.Now())
+	require.NoError(t, batch.Save())
+	m.syncRosterFromStore()
+	require.NotEmpty(t, m.roster)
+	require.Empty(t, m.roster[0].itemID)
+
+	press(&m, "e")
+	require.Equal(t, modalTask, m.modal.kind)
+	require.Equal(t, "history-1", m.modal.editBatchID)
+	f, ok := findField(&m.modal.fields, "input_path")
+	require.True(t, ok)
+	assert.Equal(t, fx.Dir1, f.Value(), "历史任务的参数也应预填")
+
+	newPlan := testPlanOut(t, "a.mkv")
+	newPlan.Name = "历史任务改名"
+	m.createSel = command.Selection{Convert: true}
+	m.createSeq = 1
+	next, _ := m.Update(createPlanMsg{seq: 1, plan: newPlan, name: "历史任务改名"})
+	m = next.(model)
+	require.Equal(t, modalConfirm, m.modal.kind)
+	press(&m, "ctrl+s")
+
+	assert.Contains(t, m.statusMsg, "已更新任务")
+	assert.Contains(t, m.roster[0].title, "历史任务改名")
+	saved, err := task.LoadTask("history-1")
+	require.NoError(t, err)
+	assert.Equal(t, "历史任务改名", saved.Name)
+	require.Len(t, saved.Items, 1)
+	assert.Equal(t, task.StatusPending, saved.Status)
+}
+
+// TestEditTaskRefusedWhenRunningOrPaused 运行中或暂停中的批次不能编辑；
+// 子任务行没有编辑入口。
+func TestEditTaskRefusedWhenRunningOrPaused(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	testQueue(t, &m)
+	m.roster = []rosterRow{
+		{batchID: "b1", title: "主任务"},
+		{batchID: "b1", itemID: "001", title: "a.mkv"},
+	}
+	m.liveBatches = map[string]*task.Batch{
+		"b1": {ID: "b1", Name: "主任务", Status: task.StatusRunning},
+	}
+	m.fileCursor = 0
+
+	press(&m, "e")
+	assert.Nil(t, m.modal)
+	assert.Contains(t, m.statusMsg, "无法编辑")
+
+	m.liveBatches["b1"].Status = task.StatusPaused
+	press(&m, "e")
+	assert.Nil(t, m.modal)
+	assert.Contains(t, m.statusMsg, "无法编辑")
+
+	// 等待中的批次可以打开编辑表单。
+	m.liveBatches["b1"].Status = task.StatusPending
+	press(&m, "e")
+	require.Equal(t, modalTask, m.modal.kind)
+	press(&m, "esc")
+	assert.Nil(t, m.modal)
 }
 
 func TestSavedTaskRemainsAfterRestart(t *testing.T) {

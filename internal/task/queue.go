@@ -324,6 +324,33 @@ func resetForRetry(b *Batch) {
 	b.FinishedAt = time.Time{}
 }
 
+// ReplacePlan 用新计划替换主任务的配置与子任务列表（重新编辑任务详情）。
+// 等待中的批次原地更新；已结束的批次替换后重置为等待，原有执行记录被覆盖；
+// 运行中或暂停中的批次返回错误。批次 ID 与创建时间保持不变，
+// 名称沿用计划里填写的队列名称（留空取输入文件夹名）。替换后不自动开始，按 x 才执行。
+func (q *Queue) ReplacePlan(batchID string, plan *command.BatchPlan, sel command.Selection) error {
+	q.mu.Lock()
+	b, _ := q.findLocked(batchID)
+	if b == nil {
+		q.mu.Unlock()
+		return fmt.Errorf("未找到任务 %s", batchID)
+	}
+	switch b.Status {
+	case StatusPending, StatusDone, StatusFailed, StatusCanceled, StatusInterrupted:
+	default:
+		q.mu.Unlock()
+		return errors.New("任务正在执行或暂停中，无法编辑")
+	}
+	updated := NewBatch(b.ID, plan, sel, b.CreatedAt)
+	// 原地改写字段而不是换指针：消费者可能已经拿到这个批次准备执行，
+	// 换指针会让它按旧参数跑完。状态仍是等待时消费者按新参数执行，符合编辑预期。
+	*b = *updated
+	delete(q.armed, b.ID)
+	q.mu.Unlock()
+	q.persist(b)
+	return nil
+}
+
 // Discard 从队列删除主任务：pending 与终态批次直接移除（列表消失），
 // paused 批次把剩余子任务标为取消、状态记 canceled 后再移除，运行中的批次不可删除。
 // 任务记录文件保留，仅从队列列表中删除。

@@ -263,6 +263,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		plan := msg.plan
 		plan.Name = msg.name
 		sel := m.createSel
+		if editID := m.modal.editBatchID; editID != "" {
+			// 编辑已有任务：确认后用新计划替换原任务，而不是再入队一个新任务。
+			m.openEditEnqueueConfirm(plan, editID, func(m *model) tea.Cmd {
+				return m.applyTaskEdit(editID, plan, sel)
+			})
+			return m, nil
+		}
 		m.openEnqueueConfirm(plan, func(m *model) tea.Cmd {
 			return m.enqueue(plan, sel)
 		})

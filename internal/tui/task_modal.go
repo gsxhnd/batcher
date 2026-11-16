@@ -12,11 +12,31 @@ import (
 	"github.com/gsxhnd/batcher/internal/command"
 	"github.com/gsxhnd/batcher/internal/commandline"
 	"github.com/gsxhnd/batcher/internal/presets"
+	"github.com/gsxhnd/batcher/internal/task"
 )
 
 // openTaskModal 打开新建任务弹窗。转码、字幕、字体和路径都在这一个表单里，没有分步。
 func (m *model) openTaskModal() tea.Cmd {
-	d := command.DefaultOption()
+	return m.openTaskForm(command.DefaultOption(), command.Selection{}, "", "")
+}
+
+// openEditTaskModal 打开编辑主任务的表单：预填任务保存的配置、字幕组和队列名称。
+// 旧版本记录没有字幕列表时，回退到旧版单字幕字段。
+func (m *model) openEditTaskModal(b *task.Batch) tea.Cmd {
+	opt := b.Option
+	if len(opt.Subtitles) == 0 && opt.InputSubSuffix != "" {
+		opt.Subtitles = []command.SubtitleOption{{
+			Suffix: opt.InputSubSuffix,
+			Lang:   opt.InputSubLang,
+			Title:  opt.InputSubTitle,
+		}}
+	}
+	return m.openTaskForm(opt, b.Selection, b.Name, b.ID)
+}
+
+// openTaskForm 打开新建/编辑任务共用的表单。editID 非空表示编辑已有任务：
+// 字段预填任务保存的参数，标题与提示文案随之变化；否则按默认值显示灰色占位。
+func (m *model) openTaskForm(opt command.VideoBatchOption, sel command.Selection, name, editID string) tea.Cmd {
 	defs := []fieldDef{
 		{key: "op_convert", label: "视频转码", kind: fieldBool},
 		{key: "op_subtitle", label: "添加字幕", kind: fieldBool},
@@ -34,14 +54,27 @@ func (m *model) openTaskModal() tea.Cmd {
 	fields := make([]field, 0, len(defs)+len(subFieldDefs))
 	for _, def := range defs {
 		nf := newField(def)
-		nf.applyDefaults(&d)
+		nf.applyDefaults(&opt)
 		if def.kind == fieldChoice {
 			nf.options, nf.choiceArgs = m.presetChoices()
 		}
 		fields = append(fields, nf)
 	}
-	m.modal = &modal{kind: modalTask, title: "新建任务", fields: fields}
-	m.appendSubtitleFields(subtitleDefaults())
+	title := "新建任务"
+	var subs []command.SubtitleOption
+	if editID != "" {
+		title = "编辑任务"
+		applyTaskValues(fields, opt, sel, name)
+		subs = opt.Subtitles
+	}
+	m.modal = &modal{kind: modalTask, title: title, fields: fields, editBatchID: editID}
+	if editID != "" {
+		for _, sub := range subs {
+			m.appendSubtitleFields(sub)
+		}
+	} else {
+		m.appendSubtitleFields(subtitleDefaults())
+	}
 	m.syncTaskDefaults()
 	return focusField(m.modal.fields, 0)
 }
@@ -125,6 +158,9 @@ func (m model) presetChoices() (labels, args []string) {
 func (m model) taskModalHint() string {
 	if m.modal != nil && m.modal.picking {
 		return "↑/↓ 选择预设 · enter 确定 · esc 返回"
+	}
+	if m.modal != nil && m.modal.editBatchID != "" {
+		return "↑/↓ 切换 · enter 下一项 · ctrl+s 保存修改 · ctrl+n / ctrl+d 增删字幕"
 	}
 	return "↑/↓ 切换 · enter 下一项 · ctrl+s 确认创建 · ctrl+n / ctrl+d 增删字幕"
 }
@@ -296,6 +332,45 @@ func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatc
 	}
 	opt.Subtitles = subs
 	return sel, opt, name, nil, true
+}
+
+// applyTaskValues 把任务保存的参数回填到编辑表单：有值的直接写入输入框并显示为
+// 灰色占位（清空后仍会采用该值），没有值的字段保留默认提示；勾选项按任务记录恢复。
+// 高级参数与某条预设完全一致时选中该预设，否则停在「手动输入」。
+func applyTaskValues(fields []field, opt command.VideoBatchOption, sel command.Selection, name string) {
+	set := func(key, v string) {
+		f, _ := fieldByKey(fields, key)
+		if f == nil || strings.TrimSpace(v) == "" {
+			return
+		}
+		f.input.SetValue(v)
+		f.useDefault(v)
+	}
+	set("batch_name", name)
+	set("input_path", opt.InputPath)
+	set("input_format", opt.InputFormat)
+	set("output_path", opt.OutputPath)
+	set("output_format", opt.OutputFormat)
+	set("advance", opt.Advance)
+	set("fonts_path", opt.FontsPath)
+	check := func(key string, on bool) {
+		f, _ := fieldByKey(fields, key)
+		if f != nil {
+			f.checked = on
+		}
+	}
+	check("op_convert", sel.Convert)
+	check("op_subtitle", sel.AddSubtitle)
+	check("op_fonts", sel.AddFonts)
+	check("recursive", opt.Recursive)
+	if f, _ := fieldByKey(fields, "preset"); f != nil {
+		for i, args := range f.choiceArgs {
+			if args != "" && strings.TrimSpace(args) == strings.TrimSpace(opt.Advance) {
+				f.choice = i
+				break
+			}
+		}
+	}
 }
 
 // readSubtitleGroups 从字段里收集操作勾选、路径和字幕组。空白字幕组会被丢掉。
@@ -633,6 +708,64 @@ func fitLine(s string, width int) string {
 	return truncateText(s, width)
 }
 
+// openEditEnqueueConfirm 打开编辑任务后的确认弹窗：标题与提示改为「更新任务」，
+// 说明会用新参数替换原有执行记录；ctrl+s 应用修改，esc 回到编辑表单继续改参数。
+func (m *model) openEditEnqueueConfirm(plan *command.BatchPlan, editID string, onConfirm func(*model) tea.Cmd) {
+	m.openEnqueueConfirm(plan, onConfirm)
+	md := m.modal
+	if md == nil {
+		return
+	}
+	md.title = "确认更新任务"
+	md.editBatchID = editID
+	if name := strings.TrimSpace(plan.Name); name != "" {
+		md.prompt = fmt.Sprintf("确认用新参数更新任务「%s」？原有执行记录会被替换，更新后回到等待，按 x 开始", name)
+	} else {
+		md.prompt = "确认用新参数更新任务？原有执行记录会被替换，更新后回到等待，按 x 开始"
+	}
+	m.layoutConfirm()
+}
+
+// applyTaskEdit 确认后用新计划替换主任务的配置与子任务：队列里的批次经
+// Queue.ReplacePlan 原地更新（状态校验与落盘都在队列层）；不在队列里的历史任务
+// 直接按同 ID 重建记录写库。成功后刷新列表并提示到等待中按 x 开始。
+func (m *model) applyTaskEdit(id string, plan *command.BatchPlan, sel command.Selection) tea.Cmd {
+	if m.queue != nil {
+		if _, inQueue := m.queue.BatchCopy(id); inQueue {
+			if err := m.queue.ReplacePlan(id, plan, sel); err != nil {
+				m.setStatus("× 更新任务失败: " + err.Error())
+				return nil
+			}
+			m.syncRoster()
+			m.notifyTaskUpdated(plan)
+			return nil
+		}
+	}
+	b, ok := m.batchByID(id)
+	if !ok {
+		m.setStatus("× 未找到任务，无法更新")
+		return nil
+	}
+	updated := task.NewBatch(id, plan, sel, b.CreatedAt)
+	if err := updated.Save(); err != nil {
+		m.setStatus("× 更新任务失败: " + err.Error())
+		return nil
+	}
+	m.syncRosterFromStore()
+	m.notifyTaskUpdated(plan)
+	return nil
+}
+
+// notifyTaskUpdated 提示任务已按新参数更新，等待按 x 开始。
+func (m *model) notifyTaskUpdated(plan *command.BatchPlan) {
+	name := strings.TrimSpace(plan.Name)
+	if name == "" {
+		m.setStatus(fmt.Sprintf("已更新任务（%d 个子任务），在该任务上按 x 开始", len(plan.Jobs)))
+		return
+	}
+	m.setStatus(fmt.Sprintf("已更新任务「%s」（%d 个子任务），在该任务上按 x 开始", name, len(plan.Jobs)))
+}
+
 func jobInputs(job command.Job) []string {
 	inputs := cliInputs(job.Args)
 	if len(inputs) == 0 && job.Input != "" {
@@ -856,8 +989,11 @@ func (m model) taskModalView() string {
 		b.WriteString(ln)
 	}
 	title := "新建任务"
+	if md.title != "" {
+		title = md.title
+	}
 	if len(lines) > window {
-		title = fmt.Sprintf("新建任务  %d–%d / %d", start+1, end, len(lines))
+		title = fmt.Sprintf("%s  %d–%d / %d", title, start+1, end, len(lines))
 	}
 	return drawBox(w, title, true, true, b.String(), contentH)
 }

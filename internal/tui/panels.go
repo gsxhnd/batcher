@@ -190,6 +190,8 @@ func (m *model) runTaskKeys(key string) (bool, tea.Cmd) {
 	switch key {
 	case "n":
 		return m.renameFocused(row)
+	case "e":
+		return m.editFocused(row)
 	case "c":
 		return m.cancelFocused(row), nil
 	case "d":
@@ -221,6 +223,24 @@ func (m *model) renameFocused(row rosterRow) (bool, tea.Cmd) {
 		return true, nil
 	}
 	return true, m.openRenameModal(b)
+}
+
+// editFocused 重新编辑光标所在主任务的创建参数。子任务行和某一次的行不支持；
+// 运行中或暂停中的批次不能编辑，先中止或等它结束再按 e。
+func (m *model) editFocused(row rosterRow) (bool, tea.Cmd) {
+	if row.itemID != "" {
+		return false, nil
+	}
+	b, ok := m.batchByID(row.batchID)
+	if !ok {
+		m.setStatus("× 未找到任务，无法编辑")
+		return true, nil
+	}
+	if b.Status == task.StatusRunning || b.Status == task.StatusPaused {
+		m.setStatus("× 任务正在执行或暂停中，无法编辑")
+		return true, nil
+	}
+	return true, m.openEditTaskModal(b)
 }
 
 // renameBatch 修改主任务名称并持久化。队列中的任务经队列改名（异步落盘，列表实时刷新）；

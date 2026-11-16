@@ -720,6 +720,79 @@ func TestQueueRename(t *testing.T) {
 	assert.ErrorContains(t, q.Rename("nope", "x"), "未找到任务")
 }
 
+// TestQueueReplacePlan 重新编辑任务详情：等待中的批次原地替换计划；
+// 已结束的批次替换后回到等待；运行中/暂停中拒绝；替换结果随异步保存落盘。
+func TestQueueReplacePlan(t *testing.T) {
+	plan1, fx := fixturePlan(t)
+	opt2 := command.DefaultOption()
+	opt2.InputPath, opt2.InputFormat = fx.Dir1, "mkv"
+	opt2.OutputPath = filepath.Join(t.TempDir(), "新输出")
+	opt2.Subtitles = []command.SubtitleOption{{Suffix: "ass", Lang: "chi", Title: "简体中文"}}
+	plan2, err := command.BuildPlan(context.Background(), &opt2, command.Selection{Convert: true, AddSubtitle: true})
+	require.NoError(t, err)
+	plan2.Name = "改名后的队列"
+	sel2 := command.Selection{Convert: true, AddSubtitle: true}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	q, col := newTestQueue(ctx)
+	defer q.Stop()
+
+	b, err := q.Enqueue(plan1, command.Selection{Convert: true})
+	require.NoError(t, err)
+	createdAt := b.CreatedAt
+
+	// 等待中的批次原地替换：ID 与创建时间不变，配置、名称和子任务按新计划重建。
+	require.NoError(t, q.ReplacePlan(b.ID, plan2, sel2))
+	got, ok := q.BatchCopy(b.ID)
+	require.True(t, ok)
+	assert.Equal(t, "改名后的队列", got.Name)
+	assert.Equal(t, createdAt, got.CreatedAt, "编辑不改创建时间")
+	assert.Equal(t, StatusPending, got.Status)
+	assert.Equal(t, sel2, got.Selection)
+	assert.Equal(t, opt2.InputPath, got.Option.InputPath)
+	require.Len(t, got.Option.Subtitles, 1)
+	require.Len(t, got.Items, len(plan2.Jobs))
+	for i, it := range got.Items {
+		assert.Equal(t, plan2.Jobs[i].Args, it.PlanArgs)
+		assert.Equal(t, StatusPending, it.Status)
+	}
+
+	// 替换结果随异步保存落盘。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if saved, err := LoadTask(b.ID); err == nil && saved.Name == "改名后的队列" && len(saved.Items) == len(plan2.Jobs) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	saved, err := LoadTask(b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "改名后的队列", saved.Name, "替换后的记录已持久化")
+
+	// 暂停中的批次拒绝编辑。
+	paused, err := q.Enqueue(singlePlan(t), command.Selection{Convert: true})
+	require.NoError(t, err)
+	require.NoError(t, q.Start(paused.ID))
+	waitPaused(t, col)
+	assert.ErrorContains(t, q.ReplacePlan(paused.ID, plan2, sel2), "无法编辑")
+
+	// 跳过后收尾为 done；已结束的批次替换后重置为等待，原执行记录被覆盖。
+	q.Decide(DecisionSkip)
+	done := waitBatchTerminal(t, q, paused.ID, 10*time.Second)
+	require.Equal(t, StatusDone, done.Status)
+	require.NoError(t, q.ReplacePlan(done.ID, plan2, sel2))
+	again, ok := q.BatchCopy(done.ID)
+	require.True(t, ok)
+	assert.Equal(t, StatusPending, again.Status, "已结束批次替换后回到等待")
+	require.Len(t, again.Items, len(plan2.Jobs))
+	for _, it := range again.Items {
+		assert.Equal(t, StatusPending, it.Status)
+	}
+
+	assert.ErrorContains(t, q.ReplacePlan("nope", plan2, sel2), "未找到任务")
+}
+
 func TestQueueSkipsDoneItems(t *testing.T) {
 	plan, _ := fixturePlan(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

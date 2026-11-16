@@ -60,6 +60,9 @@ type modal struct {
 	taskForm *modal
 	// renameID 是重命名弹窗要修改的主任务 ID。
 	renameID string
+	// editBatchID 是编辑主任务详情时要更新的任务 ID；空表示新建流程。
+	// 任务表单与编辑后的入队确认都带它，确认弹窗据此把文案换成「更新任务」。
+	editBatchID string
 }
 
 // openPresetModal 打开转码参数编辑弹窗。index=-1 表示新增，p 为表单初始值。
@@ -248,6 +251,7 @@ func helpText() string {
 	row("enter", "折叠/展开主任务或某一次；进入输出后 esc 返回")
 	row("y", "复制当前子任务的命令（主任务行=整个任务全部命令）")
 	row("n", "重命名主任务（弹窗里改名称，enter 保存）")
+	row("e", "重新编辑主任务的创建参数，确认后替换原任务并回到等待")
 	row("r", "重试失败的子任务；已结束或历史任务重新排队")
 	row("o", "输出已存在时覆盖。确认一次后重试")
 	row("d", "删除子任务，或把主任务从列表和数据库移除")
