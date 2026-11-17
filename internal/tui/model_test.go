@@ -1524,3 +1524,44 @@ func TestRemoveSubtitleFieldsByFocus(t *testing.T) {
 		assert.Equal(t, []string{"a", "b", "c"}, suffixOrder(m))
 	})
 }
+
+// 编辑一个已经执行过、且正在详情区查看的批次后，详情不能残留上一次的执行记录：
+// 子任务按新计划重建，旧次数、旧失败计数、旧输出都清掉，状态回到等待。
+func TestEditExecutedBatchResetsDetail(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.resizePanes()
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
+	require.NoError(t, err)
+	id := batch.ID
+
+	// 模拟这个批次执行过且失败：详情区留着两次执行记录与失败计数。
+	m.filesBatch = id
+	m.total, m.failed = 1, 1
+	m.files = []fileItem{{
+		input: "a.mkv", state: fileFailed,
+		attempts: []attemptLog{
+			{n: 1, status: fileFailed, lines: []string{"boom"}},
+			{n: 2, status: fileFailed, lines: []string{"boom2"}},
+		},
+	}}
+	m.logs = []string{"旧日志"}
+
+	newPlan := testPlanOut(t, "b.mkv", "c.mkv")
+	m.applyTaskEdit(id, newPlan, queueSelection())
+
+	snap, ok := m.queue.BatchCopy(id)
+	require.True(t, ok)
+	require.Equal(t, task.StatusPending, snap.Status, "编辑后批次回到等待")
+
+	require.Len(t, m.files, 2, "详情区子任务应与新计划一致")
+	require.Zero(t, m.failed, "旧失败计数应清零")
+	require.Equal(t, 2, m.total)
+	for _, f := range m.files {
+		assert.Empty(t, f.attempts, "不应残留上一个任务的执行次数")
+		assert.Equal(t, filePending, f.state, "新子任务都是等待")
+	}
+	assert.Empty(t, m.logs, "旧输出日志应清空")
+}

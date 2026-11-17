@@ -508,7 +508,14 @@ func (m model) cmdPaneBody() string {
 	h := m.pinCmdMaxLines()
 	start := clamp(m.cmdVp.YOffset(), 0, max(len(lines)-h, 0))
 	end := min(start+h, len(lines))
-	return strings.Join(lines[start:end], "\n") + "\n"
+	// 命令区是固定高度：折行后不足 pinCmdMaxLines 行时补空行，
+	// 与 runPinH 的「标题 + pinCmdMaxLines + 状态行」对账，否则输出视口会被算矮、底部留白。
+	body := make([]string, 0, h)
+	body = append(body, lines[start:end]...)
+	for len(body) < h {
+		body = append(body, "")
+	}
+	return strings.Join(body, "\n") + "\n"
 }
 
 // cmdOverflow 报告命令折行后是否超出命令区的固定高度。

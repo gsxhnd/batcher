@@ -659,7 +659,9 @@ func (m *model) refreshRunHeights() {
 	}
 	m.cmdVp.SetHeight(m.pinCmdMaxLines())
 	if m.running || m.queueViewActive() {
-		m.logVp.SetHeight(max(inner-m.taskChromeH(), 2))
+		// 视口取固定区之外的剩余行数；空间紧张时给 1 行而不是强行撑高，
+		// 否则「固定区 + 视口」会超出 inner，详情面板底部被顶出盒子。
+		m.logVp.SetHeight(max(inner-m.taskChromeH(), 1))
 	}
 }
 

@@ -261,3 +261,38 @@ func TestSubtaskDetailFitsTheBox(t *testing.T) {
 	m.fileCursor = 0
 	check("主任务")
 }
+
+// TestRunPinHMatchesPinnedCmdBlock 回归：runPinH 必须等于 pinnedCmdBlock 的实际渲染行数，
+// 否则 refreshRunHeights 算出的输出视口高度会与渲染不符（底部留白或顶出盒子）。
+// 覆盖命令为空、短命令（不足固定高度，需补空行）、超长命令，以及多种窗口宽度。
+func TestRunPinHMatchesPinnedCmdBlock(t *testing.T) {
+	isolatePresets(t)
+	longCmd := "ffmpeg -nostdin -n -i /very/long/path/to/video.mkv -map 0 -map -0:s? " +
+		strings.Repeat("-metadata:s:s:0 title=Chinese ", 20) + "/out/result.mkv"
+	cmds := []struct {
+		name string
+		cmd  string
+	}{
+		{"空命令", ""},
+		{"短命令", "ffmpeg -i a.mkv -c copy out/a.mkv"},
+		{"长命令", longCmd},
+	}
+	for _, width := range []int{80, 100, 140, 200} {
+		for _, tc := range cmds {
+			t.Run(fmt.Sprintf("%d/%s", width, tc.name), func(t *testing.T) {
+				m := newModel()
+				m.width, m.height = width, 34
+				m.resizePanes()
+				m.running = true
+				m.activeBatch = "b1"
+				m.roster = []rosterRow{{batchID: "b1", itemID: "001", title: "a.mkv", cmd: tc.cmd, state: fileRunning}}
+				m.fileCursor = 0
+				m.files = []fileItem{{cmd: tc.cmd, state: fileRunning}}
+				m.filesBatch = "b1"
+
+				rendered := strings.Count(strings.TrimSuffix(m.pinnedCmdBlock(), "\n"), "\n") + 1
+				assert.Equal(t, rendered, m.runPinH(), "runPinH 应与实际渲染行数一致")
+			})
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -737,6 +738,7 @@ func (m *model) applyTaskEdit(id string, plan *command.BatchPlan, sel command.Se
 				return nil
 			}
 			m.syncRoster()
+			m.resetEditedBatchView(id)
 			m.notifyTaskUpdated(plan)
 			return nil
 		}
@@ -752,8 +754,33 @@ func (m *model) applyTaskEdit(id string, plan *command.BatchPlan, sel command.Se
 		return nil
 	}
 	m.syncRosterFromStore()
+	m.resetEditedBatchView(id)
 	m.notifyTaskUpdated(plan)
 	return nil
+}
+
+// resetEditedBatchView 编辑当前正在查看的批次后，把详情区按「全新未执行」重建：
+// 子任务换成新计划，清空上一次执行的次数、日志与计数，避免残留旧任务的输出和失败数。
+// 编辑的不是当前查看的批次时什么也不做。
+func (m *model) resetEditedBatchView(id string) {
+	if m.filesBatch != id {
+		return
+	}
+	snap, ok := m.batchByID(id)
+	if !ok {
+		return
+	}
+	m.files = buildQueueItems(snap.Items)
+	m.total = snap.Counts().Total
+	m.done, m.failed, m.canceled, m.skipped = 0, 0, 0, 0
+	m.runIdx = -1
+	m.current = ""
+	m.logs = nil
+	m.elapsed = 0
+	m.startAt = time.Time{}
+	m.logFollow = true
+	m.refreshRunHeights()
+	m.syncLogPane()
 }
 
 // notifyTaskUpdated 提示任务已按新参数更新，等待按 x 开始。
