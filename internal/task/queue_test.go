@@ -950,9 +950,15 @@ func TestExistingOutputFailsWithoutDeletingAndRetryCounts(t *testing.T) {
 	snap, ok := q.BatchCopy(b.ID)
 	require.True(t, ok)
 	assert.True(t, snap.Items[0].Overwrite)
-	assert.Contains(t, snap.Items[0].PlanArgs, "-y")
-	assert.NotContains(t, snap.Items[0].PlanArgs, "-n")
+	assert.Contains(t, snap.Items[0].PlanArgs, "-n")
+	assert.NotContains(t, snap.Items[0].PlanArgs, "-y", "覆盖授权不得永久改写计划参数")
 
+	q.Decide(DecisionRetry)
+	snap = waitAttempt(3)
+	assert.False(t, snap.Items[0].Overwrite, "一次失败后覆盖授权已消费")
+	data, err = os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(data))
 	q.Decide(DecisionAbort)
 }
 
@@ -1114,6 +1120,7 @@ func TestEmptyDecisionKeepsWaiting(t *testing.T) {
 	require.NoError(t, q.Start(b.ID))
 	waitPaused(t, col)
 	q.Decide("")
+	q.Decide(PauseDecision("未知决策"))
 	time.Sleep(200 * time.Millisecond)
 	status, ok := q.BatchStatus(b.ID)
 	require.True(t, ok)

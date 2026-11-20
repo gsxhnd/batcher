@@ -159,15 +159,47 @@ func (p *planner) fontsParams(ctx context.Context) ([]string, error) {
 	return fontsCmdList, nil
 }
 
-// advanceArgs 解析输出侧的高级参数，不允许额外输入或覆盖输出文件。
+// forbiddenAdvanceOptions 是会劫持进度通道、提前成功退出或另写文件的明确选项。
+// 这里只列危险项，不维护庞大的 ffmpeg 参数数据库。
+var forbiddenAdvanceOptions = map[string]struct{}{
+	"-i": {}, "-y": {}, "-stdin": {}, "-progress": {},
+	"-L": {}, "-h": {}, "-?": {}, "-help": {}, "--help": {},
+	"-version": {}, "-buildconf": {}, "-formats": {}, "-muxers": {}, "-demuxers": {},
+	"-devices": {}, "-codecs": {}, "-decoders": {}, "-encoders": {}, "-bsfs": {},
+	"-protocols": {}, "-filters": {}, "-pix_fmts": {}, "-layouts": {}, "-sample_fmts": {},
+	"-dispositions": {}, "-colors": {}, "-sources": {}, "-sinks": {}, "-hwaccels": {},
+	"-report": {}, "-print_graphs_file": {}, "-vstats": {}, "-vstats_file": {}, "-sdp_file": {},
+}
+
+// advanceFlagOptions 是常见的无参数开关，用于识别紧跟其后的额外输出文件。
+var advanceFlagOptions = map[string]struct{}{
+	"-an": {}, "-vn": {}, "-sn": {}, "-dn": {}, "-shortest": {}, "-bitexact": {},
+	"-copyinkf": {}, "-autorotate": {}, "-autoscale": {}, "-stats": {}, "-nostats": {},
+	"-qphist": {}, "-psnr": {}, "-re": {},
+}
+
+// advanceArgs 解析输出侧的高级参数，不允许额外输入、覆盖输出文件或提前退出。
 func (p *planner) advanceArgs() ([]string, error) {
 	args, err := commandline.Parse(p.option.Advance)
 	if err != nil {
 		return nil, fmt.Errorf("解析高级参数: %w", err)
 	}
-	for _, arg := range args {
-		if arg == "-i" || arg == "-y" || arg == "-stdin" {
+	for i, arg := range args {
+		_, forbidden := forbiddenAdvanceOptions[arg]
+		if forbidden || arg == "-dump_attachment" || strings.HasPrefix(arg, "-dump_attachment:") {
 			return nil, fmt.Errorf("高级参数不允许使用 %s", arg)
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		// ffmpeg 选项至多接收一个 argv 值；连续裸参数不会是合法的单个选项值。
+		// 对无参数开关也做一次防御，避免把意外文件名交给 ffmpeg 当成第二输出。
+		previousIsFlag := false
+		if i > 0 {
+			_, previousIsFlag = advanceFlagOptions[args[i-1]]
+		}
+		if i == 0 || !strings.HasPrefix(args[i-1], "-") || previousIsFlag {
+			return nil, fmt.Errorf("高级参数不能包含额外输出文件: %s", arg)
 		}
 	}
 	return args, nil
@@ -197,7 +229,7 @@ func (p *planner) subtitleEntries() []SubtitleOption {
 //
 // 即一次处理即可完成转码 + 加多条字幕 + 加字体，无需跑多遍。
 //
-// 添加字幕支持多条：每条字幕是一个独立输入（-i <字幕> -map <n>），流序号从
+// 添加字幕支持多条：每条字幕是一个独立输入（-i <字幕> -map <n>:s:0），流序号从
 // InputSubNo 开始递增。字幕文件按 <视频名>.<后缀> 或 <视频名>.<标记>.<后缀> 匹配；
 // 没匹配到的字幕不阻断创建，命令里跳过并记入 Job.SubtitleNotes。
 func (p *planner) planJobs(ctx context.Context, sel Selection) ([]Job, error) {
@@ -280,18 +312,25 @@ func (p *planner) planExtras(ctx context.Context, sel Selection) (fontsParams, a
 	return fontsParams, advance, subs, nil
 }
 
-// dirInfo 缓存一个视频目录的文件列表与视频主文件名，规划期间只计算一次。
+// dirInfo 缓存一个视频目录的文件列表与视频主文件名集合，规划期间只计算一次。
 type dirInfo struct {
 	names []string
-	stems []string
+	owned map[string]struct{}
 }
 
 func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsParams, advance []string, subs []subtitleInput) ([]Job, error) {
 	outputs := media.OutputPaths(videos, p.option.OutputPath, p.option.OutputFormat)
 	jobs := make([]Job, 0, len(videos))
-	// 每个视频目录只读取一次，目录文件列表与视频主文件名都只算一遍，
-	// 避免多视频、多字幕反复扫描同一目录或重复遍历全部视频。
-	dirs := make(map[string]*dirInfo)
+	// 先按目录收集视频主文件名，再在每个目录第一次出现时建立缓存，
+	// 避免多视频、多字幕反复扫描目录、遍历全部视频或重建所有权集合。
+	stems := make(map[string][]string)
+	if sel.AddSubtitle {
+		for _, videoPath := range videos {
+			dir := filepath.Dir(videoPath)
+			stems[dir] = append(stems[dir], media.Stem(videoPath))
+		}
+	}
+	dirs := make(map[string]*dirInfo, len(stems))
 	for _, videoPath := range videos {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -307,12 +346,12 @@ func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsPar
 				if err != nil {
 					return nil, err
 				}
-				info = &dirInfo{names: names, stems: videoStems(videos, dir)}
+				info = &dirInfo{names: names, owned: stemOwners(stems[dir])}
 				dirs[dir] = info
 			}
 			var matched []subtitleInput
 			for _, sub := range subs {
-				name, err := resolveSubtitle(info.names, media.Stem(videoPath), sub.Suffix, info.stems)
+				name, err := resolveSubtitleOwned(info.names, media.Stem(videoPath), sub.Suffix, info.owned)
 				if err != nil {
 					// 没找到或匹配到多个都不阻断创建：这条命令跳过该字幕，
 					// 原因记入 Job，由入队确认弹窗提示给用户。
@@ -347,29 +386,34 @@ func (p *planner) buildJobs(ctx context.Context, sel Selection, videos, fontsPar
 	return jobs, nil
 }
 
-func videoStems(videos []string, dir string) []string {
-	stems := make([]string, 0, len(videos))
-	for _, video := range videos {
-		if filepath.Dir(video) == dir {
-			stems = append(stems, media.Stem(video))
-		}
+func stemOwners(stems []string) map[string]struct{} {
+	owned := make(map[string]struct{}, len(stems))
+	for _, stem := range stems {
+		owned[strings.ToLower(stem)] = struct{}{}
 	}
-	return stems
+	return owned
 }
 
 // resolveSubtitle 对缺失或歧义给出明确错误，不把问题留到 ffmpeg 执行时才发现。
 // stems 是同一目录里的视频主文件名。更长的视频名（Movie 与 Movie.Extended）不会抢走对方的字幕。
 func resolveSubtitle(names []string, base, suffix string, stems []string) (string, error) {
+	return resolveSubtitleOwned(names, base, suffix, stemOwners(stems))
+}
+
+func resolveSubtitleOwned(names []string, base, suffix string, owned map[string]struct{}) (string, error) {
 	suffix = strings.TrimLeft(strings.TrimSpace(suffix), ".")
 	exact := base + "." + suffix
-	owned := make(map[string]struct{}, len(stems))
-	for _, stem := range stems {
-		owned[strings.ToLower(stem)] = struct{}{}
+	// 先找逐字节精确名，不能因目录顺序让 EqualFold 候选抢走真正精确的文件。
+	for _, name := range names {
+		if name == exact {
+			return name, nil
+		}
 	}
 	var matches []string
 	for _, name := range names {
 		if strings.EqualFold(name, exact) {
-			return name, nil
+			matches = append(matches, name)
+			continue
 		}
 		// 前缀 <base>. 与后缀 .<suffix> 在名字里不能重叠，否则下面取标记段会越界。
 		if len(name) < len(base)+len(suffix)+2 ||
@@ -377,7 +421,7 @@ func resolveSubtitle(names []string, base, suffix string, stems []string) (strin
 			continue
 		}
 		middle := name[len(base)+1 : len(name)-len(suffix)-1]
-		if _, ok := owned[strings.ToLower(base+"."+middle)]; ok {
+		if ownedSubtitleStem(base, middle, owned) {
 			continue
 		}
 		matches = append(matches, name)
@@ -390,6 +434,20 @@ func resolveSubtitle(names []string, base, suffix string, stems []string) (strin
 	default:
 		return "", fmt.Errorf("后缀 %s 匹配到多个字幕，请用完整后缀", suffix)
 	}
+}
+
+// ownedSubtitleStem 判断标记段本身或它的某个前缀是否是更长的视频名。
+// 例如 Movie.Extended.chi.ass 只属于 Movie.Extended，不能再归 Movie 所有。
+func ownedSubtitleStem(base, middle string, owned map[string]struct{}) bool {
+	for i := 0; i <= len(middle); i++ {
+		if i < len(middle) && middle[i] != '.' {
+			continue
+		}
+		if _, ok := owned[strings.ToLower(base+"."+middle[:i])]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func hasFoldPrefix(s, prefix string) bool {
@@ -434,7 +492,8 @@ func (p *planner) subtitleOutputArgs(subs []subtitleInput) []string {
 		args = append(args, "-map", "-0:s?")
 	}
 	for i := range subs {
-		args = append(args, "-map", strconv.Itoa(i+1))
+		// 只取字幕输入的第一条字幕流，避免 MKV 字幕容器把视频、音频等全部流带入输出。
+		args = append(args, "-map", strconv.Itoa(i+1)+":s:0")
 	}
 	if p.option.InputSubNo == 0 {
 		args = append(args, "-map", "0:s?")

@@ -58,12 +58,15 @@ func Run() error {
 	final, err := p.Run()
 	canceled := ctx.Err() != nil
 	cancel()
+	var cleanupErr error
 	if final, ok := final.(model); ok {
 		// 停止任务队列并等待消费者退出：已启动的子任务完成取消与资源回收，记录落盘。
-		final.quitCleanup()
+		cleanupErr = final.quitCleanup()
 	}
+	var runErr error
 	if err != nil && (!errors.Is(err, tea.ErrProgramKilled) || !canceled || errors.Is(err, tea.ErrProgramPanic)) {
-		return fmt.Errorf("运行终端界面: %w", err)
+		runErr = fmt.Errorf("运行终端界面: %w", err)
 	}
-	return nil
+	// 界面错误和停止时的最终保存错误都要返回，不能因其中一项而丢掉另一项。
+	return errors.Join(runErr, cleanupErr)
 }

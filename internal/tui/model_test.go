@@ -58,7 +58,7 @@ func pressCmd(m *model, s string) tea.Cmd {
 		key = tea.KeyPressMsg{Code: tea.KeyRight}
 	case "pgup":
 		key = tea.KeyPressMsg{Code: tea.KeyPgUp}
-	case "pgdown":
+	case "pgdown", "pgdn":
 		key = tea.KeyPressMsg{Code: tea.KeyPgDown}
 	case "end":
 		key = tea.KeyPressMsg{Code: tea.KeyEnd}
@@ -758,8 +758,8 @@ func TestOverwriteConfirmsOnce(t *testing.T) {
 	press(&m, "enter")
 	assert.Nil(t, m.modal)
 	assert.True(t, b.Items[0].Overwrite)
-	assert.Contains(t, b.Items[0].PlanArgs, "-y")
-	assert.NotContains(t, b.Items[0].PlanArgs, "-n")
+	assert.Contains(t, b.Items[0].PlanArgs, "-n", "覆盖标记不应提前改写计划参数")
+	assert.NotContains(t, b.Items[0].PlanArgs, "-y")
 }
 
 func TestCreateTaskListsInputsBeforeEnqueue(t *testing.T) {
@@ -1076,7 +1076,7 @@ func TestRenameHistoryTask(t *testing.T) {
 	again := newModel()
 	again.db = db
 	again.initQueue(make(chan tea.Msg, 8))
-	t.Cleanup(again.queue.Stop)
+	t.Cleanup(func() { _ = again.queue.Stop() })
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		again.syncRosterFromStore()
@@ -1227,6 +1227,7 @@ func TestEditTaskAppliesReplacement(t *testing.T) {
 	next, _ = m.Update(createPlanMsg{seq: 2, plan: newPlan, name: "编辑后的队列"})
 	m = next.(model)
 	press(&m, "ctrl+s")
+	assert.Nil(t, m.modal, "编辑成功后才关闭确认框")
 
 	got, ok := m.queue.BatchCopy(batch.ID)
 	require.True(t, ok, "编辑不产生新任务，原 ID 保留")
@@ -1357,7 +1358,7 @@ func TestSavedTaskRemainsAfterRestart(t *testing.T) {
 	again := newModel()
 	again.db = db
 	again.initQueue(make(chan tea.Msg, 8))
-	t.Cleanup(again.queue.Stop)
+	t.Cleanup(func() { _ = again.queue.Stop() })
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		again.syncRosterFromStore()
@@ -1523,6 +1524,18 @@ func TestRemoveSubtitleFieldsByFocus(t *testing.T) {
 		}
 		assert.Equal(t, []string{"a", "b", "c"}, suffixOrder(m))
 	})
+
+	t.Run("删除唯一组后跳过隐藏字体路径", func(t *testing.T) {
+		isolatePresets(t)
+		m := newModel()
+		press(&m, "a")
+		m.modal.fields[1].checked = true // 展开字幕，保持字体操作未勾选
+		m.modal.focus = len(m.modal.fields) - 1
+		press(&m, "ctrl+d")
+		require.NotEmpty(t, m.modal.fields)
+		assert.Equal(t, "advance", m.modal.fields[m.modal.focus].def.key)
+		assert.True(t, taskFieldReachable(m.modal.fields, m.modal.focus, m.modal.focus))
+	})
 }
 
 // 编辑一个已经执行过、且正在详情区查看的批次后，详情不能残留上一次的执行记录：
@@ -1548,6 +1561,9 @@ func TestEditExecutedBatchResetsDetail(t *testing.T) {
 		},
 	}}
 	m.logs = []string{"旧日志"}
+	m.runErr = errors.New("旧失败")
+	m.pausedBatch = id
+	m.pausedAt = time.Now()
 
 	newPlan := testPlanOut(t, "b.mkv", "c.mkv")
 	m.applyTaskEdit(id, newPlan, queueSelection())
@@ -1564,4 +1580,58 @@ func TestEditExecutedBatchResetsDetail(t *testing.T) {
 		assert.Equal(t, filePending, f.state, "新子任务都是等待")
 	}
 	assert.Empty(t, m.logs, "旧输出日志应清空")
+	assert.NoError(t, m.runErr, "编辑后的全新任务不能残留旧失败")
+	assert.Empty(t, m.pausedBatch, "编辑后要清掉暂停批次")
+	assert.True(t, m.pausedAt.IsZero(), "编辑后要清掉暂停计时")
+}
+
+func TestEditTaskCanClearAdvance(t *testing.T) {
+	isolatePresets(t)
+	opt := command.DefaultOption()
+	opt.Advance = "-c:v libx265 -crf 26"
+	batch := &task.Batch{ID: "edit-advance", Option: opt, Selection: command.Selection{Convert: true}}
+	m := newModel()
+	m.openEditTaskModal(batch)
+	advance, ok := findField(&m.modal.fields, "advance")
+	require.True(t, ok)
+	assert.Equal(t, opt.Advance, advance.Value())
+	assert.NotEqual(t, opt.Advance, advance.fallback, "旧高级参数不能作为清空后的回退值")
+	input, ok := findField(&m.modal.fields, "input_path")
+	require.True(t, ok)
+	assert.Equal(t, opt.InputPath, input.fallback, "路径字段仍保留需要的默认回退值")
+
+	advance.input.SetValue("")
+	_, got, _, _, ok := m.collectTaskForm(m.modal)
+	require.True(t, ok)
+	assert.Empty(t, got.Advance, "清空高级参数后应真正保存为空")
+}
+
+// 编辑确认失败时确认框和它保存的表单都不能提前关闭，esc 返回后用户修改仍在。
+func TestEditConfirmFailureKeepsTaskForm(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 30
+	opt := command.DefaultOption()
+	m.openTaskForm(opt, command.Selection{Convert: true}, "原名称", "missing")
+	form := m.modal
+	name, ok := findField(&form.fields, "batch_name")
+	require.True(t, ok)
+	name.input.SetValue("用户修改")
+	m.createSel = command.Selection{Convert: true}
+	m.createSeq = 1
+	plan := testPlanOut(t, "a.mkv")
+	next, _ := m.Update(createPlanMsg{seq: 1, plan: plan, name: "用户修改"})
+	m = next.(model)
+	require.Equal(t, modalConfirm, m.modal.kind)
+	confirm := m.modal
+	require.Same(t, form, confirm.taskForm)
+
+	press(&m, "ctrl+s")
+	assert.Same(t, confirm, m.modal, "更新失败时确认框保持打开")
+	assert.Contains(t, m.statusMsg, "未找到任务")
+	press(&m, "esc")
+	assert.Same(t, form, m.modal)
+	name, ok = findField(&m.modal.fields, "batch_name")
+	require.True(t, ok)
+	assert.Equal(t, "用户修改", name.Value())
 }

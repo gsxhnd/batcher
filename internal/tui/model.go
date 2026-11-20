@@ -121,6 +121,7 @@ type model struct {
 	evCh                chan tea.Msg   // 状态、日志与结束结果有序传递
 	eventing            bool
 	runErr              error
+	storeErr            error // 队列落盘错误独立保留，普通完成提示不能把它覆盖
 	runID               int
 	logDirty            bool
 	logRefreshScheduled bool
@@ -247,19 +248,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case createPlanMsg:
 		if msg.seq != m.createSeq {
+			// 旧扫描不能取消或清理后一次扫描的状态。
 			return m, nil
 		}
 		m.creating = false
+		if m.createCancel != nil {
+			m.createCancel()
+			m.createCancel = nil
+		}
 		if m.modal == nil || m.modal.kind != modalTask {
 			return m, nil
 		}
+		m.modal.info = ""
 		if msg.err != nil {
-			m.modal.info = ""
 			m.setStatus("× " + msg.err.Error())
 			return m, nil
 		}
 		if msg.plan == nil || len(msg.plan.Jobs) == 0 {
-			m.modal.info = ""
 			m.setStatus("× 未找到匹配的视频文件")
 			return m, nil
 		}
@@ -824,6 +829,11 @@ func (m *model) toggleDetailPane() {
 		return
 	}
 	m.cmdFocus = !m.cmdFocus
+	if !m.cmdFocus {
+		// 从列表按 Tab 切到命令、再切回来时，输出也必须接管滚动键。
+		// 进入命令区时不清 outputFocus，esc 才能先退命令、再退输出查看。
+		m.outputFocus = true
+	}
 	m.refreshRunHeights()
 }
 
@@ -1189,14 +1199,26 @@ func itemStateText(s task.Status) string {
 	}
 }
 
-// quitCleanup 退出前取消仍在执行的批处理并停止队列。
-func (m model) quitCleanup() {
+// quitCleanup 退出前停止队列并等待最终落盘，再删除还没来得及处理移除事件的任务。
+// 删除后立即退出时事件可能仍留在通道里，这里必须直接清库，避免重启后任务复活。
+func (m model) quitCleanup() error {
 	if m.createCancel != nil {
 		m.createCancel()
 	}
+	var errs []error
 	if m.queue != nil {
-		m.queue.Stop()
+		if err := m.queue.Stop(); err != nil {
+			errs = append(errs, fmt.Errorf("停止任务队列: %w", err))
+		}
 	}
+	if m.db != nil {
+		for id := range m.forget {
+			if err := m.db.DeleteTask(id); err != nil {
+				errs = append(errs, fmt.Errorf("删除任务记录 %s: %w", id, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // itemState 把子任务状态转成文件列表标记所用的常量。
@@ -1322,8 +1344,13 @@ func (m *model) syncRosterFromStore() {
 // syncRoster 从队列快照和已保存的任务重建左侧列表（含展开的子任务行），
 // 并尽量把光标恢复到钉住的行。队列里的状态优先于数据库里的副本。
 func (m *model) syncRoster() {
+	m.syncRosterSnapshot(m.refreshLiveBatches())
+}
+
+// syncRosterSnapshot 用调用方已取得的一份队列快照重建列表，避免一次事件重复 Copies。
+func (m *model) syncRosterSnapshot(live []*task.Batch) {
 	rows := make([]rosterRow, 0, 8)
-	for _, b := range m.rosterBatches() {
+	for _, b := range m.rosterBatchesSnapshot(live) {
 		c := b.Counts()
 		settled := c.Done + c.Skipped + c.Canceled
 		title := fmt.Sprintf("%s（%s %d/%d）", b.Name, batchStateText(b.Status), settled, c.Total)
@@ -1426,6 +1453,10 @@ func (m *model) handleDone(err error) tea.Cmd {
 	default:
 		m.setStatus("✔ 批处理完成")
 	}
+	if m.storeErr != nil {
+		// 落盘失败独立粘住，不能被这次批处理的普通完成结果覆盖。
+		m.setStatus("× 保存任务记录失败: " + m.storeErr.Error())
+	}
 	m.current = ""
 	m.runIdx = -1
 	m.activeBatch = ""
@@ -1442,9 +1473,20 @@ func (m *model) handleDone(err error) tea.Cmd {
 func (m model) progressNumbers() (settled, failed, skipped, canceled, total int, paused bool) {
 	if snap, ok := m.focusedSnapshot(); ok {
 		c := snap.Counts()
-		return c.Done + c.Skipped + c.Canceled, c.Failed, c.Skipped, c.Canceled, c.Total, snap.Status == task.StatusPaused
+		paused = m.running && snap.ID == m.activeBatch && snap.Status == task.StatusPaused
+		return c.Done + c.Skipped + c.Canceled, c.Failed, c.Skipped, c.Canceled, c.Total, paused
 	}
 	return m.done + m.skipped + m.canceled, m.failed, m.skipped, m.canceled, m.total, m.pausedBatch != ""
+}
+
+// focusedBatchRunning 只有光标所在的 active batch 才使用全局执行态和实时计时。
+// 执行 A 时查看 B，B 必须按自己的快照画完成状态与耗时。
+func (m model) focusedBatchRunning() bool {
+	if !m.running {
+		return false
+	}
+	snap, ok := m.focusedSnapshot()
+	return !ok || snap.ID == m.activeBatch
 }
 
 // liveItemProgress 返回光标所在、且正在执行的那一次的 ffmpeg 进度。
@@ -1547,7 +1589,13 @@ func (m *model) refreshLiveBatches() []*task.Batch {
 // rosterBatches 返回列表要显示的主任务：队列里的实时副本在前，库里没出现在队列中的历史任务在后。
 // 队列副本与 liveBatches 取自同一份快照，界面读取和这次建列表看到的内容一致。
 func (m *model) rosterBatches() []*task.Batch {
-	out := m.refreshLiveBatches()
+	return m.rosterBatchesSnapshot(m.refreshLiveBatches())
+}
+
+// rosterBatchesSnapshot 合并已经刷进 liveBatches 的队列快照与历史任务。
+func (m *model) rosterBatchesSnapshot(live []*task.Batch) []*task.Batch {
+	out := make([]*task.Batch, 0, len(live)+len(m.savedList))
+	out = append(out, live...)
 	for _, b := range m.savedList {
 		if b == nil {
 			continue
@@ -1689,11 +1737,11 @@ func buildQueueItems(items []*task.Item) []fileItem {
 // 起停状态仍由队列子任务事件驱动，避免和进度快照重复计数。
 func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 	if e.Type == task.QueueStoreError {
-		msg := "保存任务记录失败"
-		if e.Err != nil {
-			msg += ": " + e.Err.Error()
+		m.storeErr = e.Err
+		if m.storeErr == nil {
+			m.storeErr = errors.New("未知错误")
 		}
-		m.setStatus("× " + msg)
+		m.setStatus("× 保存任务记录失败: " + m.storeErr.Error())
 		return nil
 	}
 	// ffmpeg 日志与进度事件不改变任务和子任务状态，不必为它们逐条深拷贝整个队列；
@@ -1717,7 +1765,7 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 			return nil
 		}
 	}
-	m.refreshLiveBatches()
+	live := m.refreshLiveBatches()
 	// 入队、开始、删除、取消以及子任务删除都要在空闲时刷新列表。
 	// 正在执行的批次的结束事件仍走下面的收尾；其他批次的结束只刷新列表。
 	if !m.running && !queueEventWhenIdle(e.Type) {
@@ -1800,10 +1848,10 @@ func (m *model) handleQueueEvent(e task.QueueEvent) tea.Cmd {
 	}
 	if e.Type == task.QueueBatchRemoved {
 		m.dropForgotten(e.BatchID)
-		m.syncRosterFromStore()
-	} else {
-		m.syncRoster()
+		m.reloadSaved()
 	}
+	// 状态处理与列表重建共用上面的 live 快照；batchByID 仍可为缺失 ID 回退查询队列/数据库。
+	m.syncRosterSnapshot(live)
 	m.syncLogPane()
 	return cmd
 }
@@ -1848,7 +1896,11 @@ func (m *model) applyBatchStart(batchID string) tea.Cmd {
 	m.fileCursor = 0
 	m.filesBatch = batchID
 	m.fileFollow = true
-	m.startAt = time.Now()
+	m.startAt = snap.StartedAt
+	if m.startAt.IsZero() {
+		// 兼容旧记录和测试里的手工事件；正常队列快照一定带真实开始时间。
+		m.startAt = time.Now()
+	}
 	m.elapsed = 0
 	m.appendLog(fmt.Sprintf("▶ 开始执行批次，共 %d 个任务", m.total), logLineInfoStyle)
 	m.setFocus(panelRun)

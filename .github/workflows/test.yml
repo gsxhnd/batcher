@@ -23,7 +23,7 @@ jobs:
     name: Test
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out code into the Go module directory
@@ -43,6 +43,12 @@ jobs:
       - name: Install ffmpeg
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y
+
+      - name: Install ffmpeg
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg
+          ffmpeg -version
 
       - name: Test
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./internal/... ./cmd/batcher/...

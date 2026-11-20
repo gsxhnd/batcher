@@ -275,9 +275,20 @@ func (m *model) removeSubtitleFields() {
 		return
 	}
 	md.fields = slices.Delete(md.fields, start, start+n)
-	if md.focus >= len(md.fields) {
-		md.focus = max(len(md.fields)-1, 0)
+	// 优先落到删除位置之后的可达字段；删的是末尾组则向前找，跳过隐藏的字体路径。
+	for i := min(start, len(md.fields)-1); i < len(md.fields); i++ {
+		if i >= 0 && taskFieldReachable(md.fields, i, i) {
+			md.focus = i
+			return
+		}
 	}
+	for i := min(start-1, len(md.fields)-1); i >= 0; i-- {
+		if taskFieldReachable(md.fields, i, i) {
+			md.focus = i
+			return
+		}
+	}
+	md.focus = 0
 }
 
 // saveTaskModal 校验弹窗里的全部字段，扫描目录并创建任务。失败时弹窗保持打开。
@@ -335,8 +346,8 @@ func (m *model) collectTaskForm(md *modal) (command.Selection, command.VideoBatc
 	return sel, opt, name, nil, true
 }
 
-// applyTaskValues 把任务保存的参数回填到编辑表单：有值的直接写入输入框并显示为
-// 灰色占位（清空后仍会采用该值），没有值的字段保留默认提示；勾选项按任务记录恢复。
+// applyTaskValues 把任务保存的参数回填到编辑表单：路径等需要默认值的字段同时保留
+// 灰色回退值；高级参数是可真正清空的选项，只预填正文，不把旧值设为回退值。
 // 高级参数与某条预设完全一致时选中该预设，否则停在「手动输入」。
 func applyTaskValues(fields []field, opt command.VideoBatchOption, sel command.Selection, name string) {
 	set := func(key, v string) {
@@ -352,7 +363,9 @@ func applyTaskValues(fields []field, opt command.VideoBatchOption, sel command.S
 	set("input_format", opt.InputFormat)
 	set("output_path", opt.OutputPath)
 	set("output_format", opt.OutputFormat)
-	set("advance", opt.Advance)
+	if f, _ := fieldByKey(fields, "advance"); f != nil {
+		f.input.SetValue(opt.Advance)
+	}
 	set("fonts_path", opt.FontsPath)
 	check := func(key string, on bool) {
 		f, _ := fieldByKey(fields, key)
@@ -739,6 +752,7 @@ func (m *model) applyTaskEdit(id string, plan *command.BatchPlan, sel command.Se
 			}
 			m.syncRoster()
 			m.resetEditedBatchView(id)
+			m.modal = nil
 			m.notifyTaskUpdated(plan)
 			return nil
 		}
@@ -755,6 +769,7 @@ func (m *model) applyTaskEdit(id string, plan *command.BatchPlan, sel command.Se
 	}
 	m.syncRosterFromStore()
 	m.resetEditedBatchView(id)
+	m.modal = nil
 	m.notifyTaskUpdated(plan)
 	return nil
 }
@@ -778,6 +793,9 @@ func (m *model) resetEditedBatchView(id string) {
 	m.logs = nil
 	m.elapsed = 0
 	m.startAt = time.Time{}
+	m.runErr = nil
+	m.pausedBatch = ""
+	m.pausedAt = time.Time{}
 	m.logFollow = true
 	m.refreshRunHeights()
 	m.syncLogPane()

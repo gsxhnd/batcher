@@ -43,7 +43,7 @@ func TestMultiSubtitleCommand(t *testing.T) {
 	assert.True(t, contains(cmd, []string{"-sub_charenc", "UTF-8", "-i", filepath.Join(tmp, "1.chi.ass")}))
 	assert.True(t, contains(cmd, []string{"-sub_charenc", "UTF-8", "-i", filepath.Join(tmp, "1.eng.ass")}))
 	// 保留主视频流 + 两条字幕流
-	assert.True(t, contains(cmd, []string{"-map", "0", "-map", "1", "-map", "2"}))
+	assert.True(t, contains(cmd, []string{"-map", "0", "-map", "1:s:0", "-map", "2:s:0"}))
 	// 流序号从 InputSubNo=1 开始递增，跳过空后缀条目
 	assert.True(t, contains(cmd, []string{"-metadata:s:s:1", "language=chi"}))
 	assert.True(t, contains(cmd, []string{"-metadata:s:s:1", "title=简体中文"}))
@@ -98,6 +98,8 @@ func TestSubtitleResolutionErrors(t *testing.T) {
 		err    string
 	}{
 		{"精确优先", []string{"a.ass", "a.chi.ass", "a.eng.ass"}, "ass", "a.ass", ""},
+		{"逐字节精确不依赖顺序", []string{"A.ASS", "a.ass"}, "ass", "a.ass", ""},
+		{"多个大小写精确候选歧义", []string{"A.ASS", "a.Ass"}, "ass", "", "多个字幕"},
 		{"唯一候选", []string{"a.chi.ass"}, "ass", "a.chi.ass", ""},
 		{"完整后缀", []string{"a.chi.ass", "a.eng.ass"}, "eng.ass", "a.eng.ass", ""},
 		{"缺失", nil, "ass", "", "未找到"},
@@ -144,6 +146,49 @@ func TestResolveSubtitleSkipsLongerVideoName(t *testing.T) {
 	assert.Equal(t, "Movie.Extended.ass", got)
 }
 
+func TestResolveSubtitleMarkedFileBelongsToLongestStem(t *testing.T) {
+	names := []string{"Movie.Extended.chi.ass"}
+	stems := []string{"Movie", "Movie.Extended"}
+
+	got, err := resolveSubtitle(names, "Movie", "ass", stems)
+	require.ErrorContains(t, err, "未找到")
+	assert.Empty(t, got, "带语言标记也不能让短主文件名抢占字幕")
+
+	got, err = resolveSubtitle(names, "Movie.Extended", "ass", stems)
+	require.NoError(t, err)
+	assert.Equal(t, "Movie.Extended.chi.ass", got)
+}
+
+func TestBuildPlanAssignsMarkedSubtitleToLongestStem(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"Movie.mp4", "Movie.Extended.mp4", "Movie.Extended.chi.ass"} {
+		testutil.WriteFile(t, filepath.Join(dir, name), "")
+	}
+	opt := &VideoBatchOption{
+		InputPath:    dir,
+		InputFormat:  "mp4",
+		OutputPath:   t.TempDir(),
+		OutputFormat: "mkv",
+		Subtitles:    []SubtitleOption{{Suffix: "ass", Lang: "chi"}},
+	}
+	plan, err := BuildPlan(context.Background(), opt, Selection{AddSubtitle: true})
+	require.NoError(t, err)
+	require.Len(t, plan.Jobs, 2)
+	for _, job := range plan.Jobs {
+		switch mediaStem := filepath.Base(job.Input); mediaStem {
+		case "Movie.mp4":
+			require.Len(t, job.SubtitleNotes, 1)
+			assert.NotContains(t, job.Args, "-sub_charenc")
+		case "Movie.Extended.mp4":
+			assert.Empty(t, job.SubtitleNotes)
+			assert.True(t, contains(job.Args, []string{"-sub_charenc", "UTF-8", "-i", filepath.Join(dir, "Movie.Extended.chi.ass")}))
+			assert.True(t, contains(job.Args, []string{"-map", "1:s:0"}))
+		default:
+			t.Fatalf("意外输入: %s", mediaStem)
+		}
+	}
+}
+
 func TestRejectsMultipleDefaultSubtitles(t *testing.T) {
 	fx := testutil.NewFixture(t)
 	opt := fixtureOption(fx)
@@ -181,7 +226,7 @@ func TestBuildPlanSkipsMissingSubtitles(t *testing.T) {
 	assert.Empty(t, plan.Jobs[0].SubtitleNotes)
 	assert.True(t, contains(cmd1, []string{"-sub_charenc", "UTF-8", "-i", filepath.Join(dir, "1.chi.ass")}))
 	assert.True(t, contains(cmd1, []string{"-sub_charenc", "UTF-8", "-i", filepath.Join(dir, "1.eng.srt")}))
-	assert.True(t, contains(cmd1, []string{"-map", "1", "-map", "2"}))
+	assert.True(t, contains(cmd1, []string{"-map", "1:s:0", "-map", "2:s:0"}))
 	assert.True(t, contains(cmd1, []string{"-metadata:s:s:0", "language=chi"}))
 	assert.True(t, contains(cmd1, []string{"-metadata:s:s:1", "language=eng"}))
 
@@ -191,8 +236,8 @@ func TestBuildPlanSkipsMissingSubtitles(t *testing.T) {
 	assert.Contains(t, plan.Jobs[1].SubtitleNotes[0], "未找到 2.eng.srt")
 	assert.True(t, contains(cmd2, []string{"-sub_charenc", "UTF-8", "-i", filepath.Join(dir, "2.chi.ass")}))
 	assert.False(t, contains(cmd2, []string{filepath.Join(dir, "2.eng.srt")}))
-	assert.True(t, contains(cmd2, []string{"-map", "1"}))
-	assert.False(t, contains(cmd2, []string{"-map", "2"}))
+	assert.True(t, contains(cmd2, []string{"-map", "1:s:0"}))
+	assert.False(t, contains(cmd2, []string{"-map", "2:s:0"}))
 	assert.True(t, contains(cmd2, []string{"-metadata:s:s:0", "language=chi"}))
 	assert.False(t, contains(cmd2, []string{"language=eng"}))
 }

@@ -28,17 +28,17 @@ func Videos(ctx context.Context, inputPath, outputPath, format string, recursive
 		}
 		return nil, fmt.Errorf("检查输入路径: %w", err)
 	}
-	input, err := filepath.Abs(inputPath)
+	input, err := canonicalPath(inputPath)
 	if err != nil {
 		return nil, fmt.Errorf("解析输入目录: %w", err)
 	}
-	output, err := filepath.Abs(outputPath)
+	output, err := canonicalPath(outputPath)
 	if err != nil {
 		return nil, fmt.Errorf("解析输出目录: %w", err)
 	}
 	exclude := ""
-	if input != output {
-		exclude = output
+	if !samePath(input, output) && !sameExistingFile(input, output) {
+		exclude = outputPath
 	}
 	return WalkFiles(ctx, inputPath, exclude, recursive, func(name string) bool {
 		return strings.EqualFold(filepath.Ext(name), "."+format)
@@ -56,11 +56,21 @@ func Fonts(ctx context.Context, dir string) ([]string, error) {
 // recursive 为真时递归全部子目录，为假时只看第一层（root 本身是文件时仍会匹配）。
 // 根目录本身是符号链接时会跟着走。名为 ._ 或其它点开头的文件和目录会被跳过。
 func WalkFiles(ctx context.Context, root, exclude string, recursive bool, match func(name string) bool) ([]string, error) {
+	// 只有根本身是符号链接时才改变返回路径；规范化祖先仅用于比较，
+	// 避免 macOS 上普通的 /var 临时目录无故变成 /private/var。
 	if target, ok := symlinkDir(root); ok {
 		root = target
 	}
+	excludeKey := ""
+	var err error
+	if exclude != "" {
+		excludeKey, err = canonicalPath(exclude)
+		if err != nil {
+			return nil, fmt.Errorf("解析排除目录: %w", err)
+		}
+	}
 	files := make([]string, 0)
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -76,11 +86,11 @@ func WalkFiles(ctx context.Context, root, exclude string, recursive bool, match 
 			return nil
 		}
 		if entry.IsDir() {
-			abs, err := filepath.Abs(path)
+			key, err := canonicalPath(path)
 			if err != nil {
 				return fmt.Errorf("解析路径 %s: %w", path, err)
 			}
-			if abs == exclude {
+			if samePath(key, excludeKey) || exclude != "" && sameExistingFile(path, exclude) {
 				return filepath.SkipDir
 			}
 			if !recursive && path != root {
@@ -132,6 +142,52 @@ func symlinkDir(path string) (string, bool) {
 	return target, true
 }
 
+// canonicalPath 解析已有部分的符号链接；路径尚不存在时，从最近存在的父目录拼回剩余部分。
+// 这样输入根目录和排除目录可以统一比较，输出目录还没创建也不影响规划。
+func canonicalPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	current := abs
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			parts := []string{resolved}
+			for i := len(missing) - 1; i >= 0; i-- {
+				parts = append(parts, missing[i])
+			}
+			return filepath.Join(parts...), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return abs, nil
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func sameExistingFile(a, b string) bool {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bInfo, err := os.Stat(b)
+	return err == nil && os.SameFile(aInfo, bInfo)
+}
+
 func regularFile(path string, entry fs.DirEntry) bool {
 	if entry.Type().IsRegular() {
 		return true
@@ -173,6 +229,7 @@ func OutputPaths(inputs []string, outputDir, format string) map[string]string {
 // checkExisting 为真时，已存在的输出文件同样视为错误（只有执行前才检查）。
 func CheckPaths(ctx context.Context, inputs, outputs []string, checkExisting bool) error {
 	inputKeys := make(map[string]bool, len(inputs))
+	inputInfos := make([]os.FileInfo, 0, len(inputs))
 	for _, input := range inputs {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -182,8 +239,15 @@ func CheckPaths(ctx context.Context, inputs, outputs []string, checkExisting boo
 			return err
 		}
 		inputKeys[key] = true
+		info, err := os.Stat(input)
+		if err == nil {
+			inputInfos = append(inputInfos, info)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("检查输入文件 %s: %w", input, err)
+		}
 	}
 	seen := make(map[string]bool, len(outputs))
+	seenInfos := make([]os.FileInfo, 0, len(outputs))
 	for _, output := range outputs {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -198,6 +262,23 @@ func CheckPaths(ctx context.Context, inputs, outputs []string, checkExisting boo
 		if seen[key] {
 			return fmt.Errorf("多个任务指向同一输出文件: %s", output)
 		}
+		outputInfo, statErr := os.Stat(output)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return fmt.Errorf("检查输出文件 %s: %w", output, statErr)
+		}
+		if statErr == nil {
+			for _, inputInfo := range inputInfos {
+				if os.SameFile(inputInfo, outputInfo) {
+					return fmt.Errorf("输出路径与输入文件重合: %s", output)
+				}
+			}
+			for _, seenInfo := range seenInfos {
+				if os.SameFile(seenInfo, outputInfo) {
+					return fmt.Errorf("多个任务指向同一输出文件: %s", output)
+				}
+			}
+			seenInfos = append(seenInfos, outputInfo)
+		}
 		seen[key] = true
 		if checkExisting {
 			if _, err := os.Lstat(output); err == nil {
@@ -211,12 +292,9 @@ func CheckPaths(ctx context.Context, inputs, outputs []string, checkExisting boo
 }
 
 func pathKey(path string) (string, error) {
-	abs, err := filepath.Abs(path)
+	abs, err := canonicalPath(path)
 	if err != nil {
 		return "", fmt.Errorf("解析文件路径 %s: %w", path, err)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
 	}
 	if runtime.GOOS == "windows" {
 		abs = strings.ToLower(abs)

@@ -58,9 +58,11 @@ type Item struct {
 	Attempts int `json:"attempts"`
 	// Removed 为真时子任务已从队列列表删除：执行会跳过，计数与界面不再统计。
 	Removed bool `json:"removed,omitempty"`
-	// PartialOutput 在子任务启动前置真、成功后置回假：崩溃后据此判断输出是不是半成品。
+	// PartialOutput 在子任务启动前置真、成功提交正式输出后置回假：崩溃后据此清理半成品。
 	PartialOutput bool `json:"partialOutput"`
-	// Overwrite 为真时允许替换已有输出。只在界面确认后置位。
+	// PartialPath 记录本次尝试的同目录临时输出。旧记录没有此字段时不能贸然删除正式输出。
+	PartialPath string `json:"partialPath,omitempty"`
+	// Overwrite 为真时只允许下一次尝试替换已有输出。开始尝试时立即消费并清零。
 	Overwrite  bool     `json:"overwrite,omitempty"`
 	DurationMs int64    `json:"durationMs"`
 	Error      string   `json:"error,omitempty"`
@@ -133,7 +135,7 @@ type Counts struct {
 func (b *Batch) Counts() Counts {
 	c := Counts{}
 	for _, it := range b.Items {
-		if it.Removed {
+		if it == nil || it.Removed {
 			continue
 		}
 		c.Total++

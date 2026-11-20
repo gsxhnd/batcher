@@ -131,6 +131,44 @@ func TestVideosExcludeOutputsAndAcceptUppercase(t *testing.T) {
 	assert.ElementsMatch(t, append(slices.Clone(fx.MP4s), uppercase), got)
 }
 
+func TestVideosExcludeCanonicalOutputDirectory(t *testing.T) {
+	root := t.TempDir()
+	realOutput := filepath.Join(root, "实际输出")
+	require.NoError(t, os.Mkdir(realOutput, 0o755))
+	input := filepath.Join(root, "输入.mp4")
+	oldOutput := filepath.Join(realOutput, "旧结果.mp4")
+	testutil.WriteFile(t, input, "")
+	testutil.WriteFile(t, oldOutput, "")
+
+	links := t.TempDir()
+	rootLink := filepath.Join(links, "输入链接")
+	outputLink := filepath.Join(links, "输出链接")
+	require.NoError(t, os.Symlink(root, rootLink))
+	require.NoError(t, os.Symlink(realOutput, outputLink))
+
+	got, err := Videos(context.Background(), rootLink, outputLink, "mp4", true)
+	require.NoError(t, err)
+	wantInput, err := filepath.EvalSymlinks(input)
+	require.NoError(t, err)
+	assert.Equal(t, []string{wantInput}, got, "根目录和输出目录的符号链接都必须按真实路径比较")
+}
+
+func TestCanonicalPathResolvesMissingOutputFromExistingParent(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "真实目录")
+	require.NoError(t, os.Mkdir(realParent, 0o755))
+	link := filepath.Join(root, "目录链接")
+	require.NoError(t, os.Symlink(realParent, link))
+	missing := filepath.Join(link, "尚未创建", "输出")
+
+	got, err := canonicalPath(missing)
+	require.NoError(t, err)
+	resolvedParent, err := filepath.EvalSymlinks(realParent)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(resolvedParent, "尚未创建", "输出"), got)
+	assert.NoDirExists(t, filepath.Join(realParent, "尚未创建"), "规范化路径不能创建目录")
+}
+
 func TestListFiles(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(tmp, "1.mp4"), "video")
@@ -178,4 +216,51 @@ func TestCheckPaths(t *testing.T) {
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	assert.ErrorIs(t, CheckPaths(canceled, []string{input}, []string{fresh}, false), context.Canceled)
+}
+
+func TestCheckPathsRejectsHardLinkAliases(t *testing.T) {
+	ctx := context.Background()
+	t.Run("输入与输出", func(t *testing.T) {
+		root := t.TempDir()
+		input := filepath.Join(root, "输入.mp4")
+		output := filepath.Join(root, "输出.mkv")
+		testutil.WriteFile(t, input, "video")
+		require.NoError(t, os.Link(input, output))
+		assert.ErrorContains(t, CheckPaths(ctx, []string{input}, []string{output}, false), "输入文件重合")
+	})
+
+	t.Run("多个输出", func(t *testing.T) {
+		root := t.TempDir()
+		input := filepath.Join(root, "输入.mp4")
+		first := filepath.Join(root, "输出一.mkv")
+		second := filepath.Join(root, "输出二.mkv")
+		testutil.WriteFile(t, input, "video")
+		testutil.WriteFile(t, first, "old")
+		require.NoError(t, os.Link(first, second))
+		assert.ErrorContains(t, CheckPaths(ctx, []string{input}, []string{first, second}, false), "同一输出文件")
+	})
+}
+
+func TestCheckPathsRejectsCaseAliasWhenSameFile(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "Movie.mp4")
+	alias := filepath.Join(root, "movie.MP4")
+	testutil.WriteFile(t, input, "video")
+	inputInfo, err := os.Stat(input)
+	require.NoError(t, err)
+	aliasInfo, err := os.Stat(alias)
+	if err != nil || !os.SameFile(inputInfo, aliasInfo) {
+		t.Skip("当前文件系统区分大小写，两个名称不是同一文件")
+	}
+	assert.ErrorContains(t, CheckPaths(context.Background(), []string{input}, []string{alias}, false), "输入文件重合")
+
+	output := filepath.Join(root, "Result.mkv")
+	outputAlias := filepath.Join(root, "result.MKV")
+	testutil.WriteFile(t, output, "old")
+	outputInfo, err := os.Stat(output)
+	require.NoError(t, err)
+	outputAliasInfo, err := os.Stat(outputAlias)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(outputInfo, outputAliasInfo))
+	assert.ErrorContains(t, CheckPaths(context.Background(), []string{input}, []string{output, outputAlias}, false), "同一输出文件")
 }

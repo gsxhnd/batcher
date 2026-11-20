@@ -45,6 +45,10 @@ func TestPresetBoundaryActions(t *testing.T) {
 	}
 }
 
+type failTaskSaveStore struct{ task.BatchStore }
+
+func (failTaskSaveStore) SaveTask(*task.Batch) error { return errors.New("模拟任务落盘失败") }
+
 type failPresetStore struct{}
 
 func (failPresetStore) LoadPresets() ([]presets.Preset, error) { return nil, nil }
@@ -99,7 +103,7 @@ func testQueue(t *testing.T, m *model) {
 	t.Helper()
 	m.evCh = make(chan tea.Msg, 256)
 	m.initQueue(m.evCh)
-	t.Cleanup(m.queue.Stop)
+	t.Cleanup(func() { _ = m.queue.Stop() })
 }
 
 // queueSelection 返回队列测试使用的选择组合。
@@ -923,4 +927,246 @@ func TestRosterBatchesMergeQueueAndSaved(t *testing.T) {
 	assert.Equal(t, history.ID, got[1].ID, "历史任务排在队列任务之后")
 	assert.Contains(t, m.liveBatches, queued.ID)
 	assert.NotContains(t, m.liveBatches, history.ID, "liveBatches 只含队列里的任务")
+}
+
+// 重启后 pending 历史任务只在数据库里，实际按 x 应先 Requeue 再进入执行流程。
+func TestStartStoredPendingTaskWithX(t *testing.T) {
+	db, err := store.OpenDir(t.TempDir())
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	stored := task.NewBatch("history-pending", testPlanOut(t, "a.mkv"), queueSelection(), time.Now())
+	require.NoError(t, stored.Save())
+	m := newModel()
+	m.db = db
+	testQueue(t, &m)
+	m.syncRosterFromStore()
+	require.Len(t, m.roster, 1)
+	assert.True(t, m.canStartFocused(), "历史 pending 任务应显示可按 x 开始")
+
+	press(&m, "x")
+	waitBatchEvent(t, &m, task.QueueBatchStarted)
+	assert.Equal(t, stored.ID, m.activeBatch)
+	assert.Contains(t, m.statusMsg, "已开始执行")
+	queued, ok := m.queue.BatchCopy(stored.ID)
+	require.True(t, ok)
+	assert.Equal(t, stored.ID, queued.ID, "重新入队必须保留历史任务 ID")
+}
+
+// 删除后不移除事件喂给 Update 就直接退出，quitCleanup 仍要删掉数据库记录。
+func TestQuitCleanupDeletesForgottenBeforeEvents(t *testing.T) {
+	db, err := store.OpenDir(t.TempDir())
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	m := newModel()
+	m.db = db
+	m.initQueue(make(chan tea.Msg, 16))
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = m.queue.Stop()
+		}
+	})
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
+	require.NoError(t, err)
+	m.syncRoster()
+	press(&m, "d")
+	require.Contains(t, m.forget, batch.ID)
+
+	require.NoError(t, m.quitCleanup())
+	stopped = true
+	_, err = db.LoadTask(batch.ID)
+	assert.Error(t, err, "退出时未处理的 forget 也必须从数据库删除")
+}
+
+func TestQuitCleanupReportsFinalDeleteError(t *testing.T) {
+	db, err := store.OpenDir(t.TempDir())
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	m := newModel()
+	m.db = db
+	m.initQueue(make(chan tea.Msg, 16))
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = m.queue.Stop()
+		}
+	})
+	_, err = m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
+	require.NoError(t, err)
+	m.syncRoster()
+	press(&m, "d")
+	require.NoError(t, db.Close())
+
+	err = m.quitCleanup()
+	stopped = true
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "删除任务记录")
+}
+
+func TestDeleteAfterSaveFailureStillRemovesStoredRecord(t *testing.T) {
+	db, err := store.OpenDir(t.TempDir())
+	require.NoError(t, err)
+	task.BindStore(db)
+	presets.Bind(db)
+	t.Cleanup(func() {
+		_ = db.Close()
+		task.BindStore(nil)
+		presets.Bind(nil)
+	})
+
+	m := newModel()
+	m.db = db
+	testQueue(t, &m)
+	batch, err := m.queue.Enqueue(testPlanOut(t, "a.mkv"), queueSelection())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, loadErr := db.LoadTask(batch.ID)
+		return loadErr == nil
+	}, 5*time.Second, 10*time.Millisecond, "先确保初始任务记录已经成功落盘")
+
+	// 后续快照失败时，Discard 会移除批次并返回旧快照错误；删除意图仍必须保留。
+	task.BindStore(failTaskSaveStore{BatchStore: db})
+	require.NoError(t, m.queue.Rename(batch.ID, "触发失败"))
+	waitBatchEvent(t, &m, task.QueueStoreError)
+	m.syncRoster()
+	m.fileCursor = 0
+	press(&m, "d")
+	require.Contains(t, m.forget, batch.ID, "批次已移出队列时不能撤销 forget")
+	removed := waitBatchEvent(t, &m, task.QueueBatchRemoved)
+	require.Error(t, removed.evt.Err)
+	_, err = db.LoadTask(batch.ID)
+	assert.Error(t, err, "即使此前快照保存失败，移除事件也必须删除旧数据库记录")
+}
+
+func TestStoreErrorSurvivesBatchCompletion(t *testing.T) {
+	m := newModel()
+	m.running = true
+	m.startAt = time.Now()
+	m.handleQueueEvent(task.QueueEvent{Type: task.QueueStoreError, Err: errors.New("磁盘写入失败")})
+	m.handleDone(nil)
+	require.Error(t, m.storeErr)
+	assert.Contains(t, m.statusMsg, "磁盘写入失败")
+	assert.NotContains(t, m.statusMsg, "✔ 批处理完成")
+}
+
+// 执行 A 查看 B 时，B 的完成状态与耗时只取自己的快照，不能沿用 A 的实时执行态。
+func TestFocusedBatchUsesOwnSnapshotWhileAnotherRuns(t *testing.T) {
+	now := time.Now()
+	a := &task.Batch{
+		ID: "a", Status: task.StatusRunning, StartedAt: now.Add(-40 * time.Second),
+		Items: []*task.Item{{ID: "001", Status: task.StatusRunning}},
+	}
+	b := &task.Batch{
+		ID: "b", Status: task.StatusDone, StartedAt: now.Add(-20 * time.Second), FinishedAt: now.Add(-5 * time.Second),
+		Items: []*task.Item{{ID: "001", Status: task.StatusDone}},
+	}
+	m := newModel()
+	m.width, m.height, m.rightW = 100, 30, 80
+	m.running, m.activeBatch, m.startAt = true, a.ID, a.StartedAt
+	m.liveBatches = map[string]*task.Batch{a.ID: a, b.ID: b}
+	m.roster = []rosterRow{{batchID: a.ID}, {batchID: b.ID}}
+	m.fileCursor = 1
+
+	block := m.progressBlock()
+	assert.Contains(t, block, "进度: 1/1 完成")
+	assert.Contains(t, block, "耗时 15s")
+	assert.Equal(t, 1, m.runBarH(), "已完成的 B 不画 A 的实时进度条")
+
+	m.fileCursor = 0
+	assert.True(t, m.focusedBatchRunning())
+	assert.Contains(t, m.progressHint(), "40s", "只有切回 active batch 才使用全局实时耗时")
+}
+
+func TestApplyBatchStartUsesSnapshotStartTime(t *testing.T) {
+	started := time.Now().Add(-12 * time.Second)
+	m := newModel()
+	m.liveBatches = map[string]*task.Batch{
+		"a": {ID: "a", Status: task.StatusRunning, StartedAt: started, Items: []*task.Item{{ID: "001"}}},
+	}
+	m.applyBatchStart("a")
+	assert.Equal(t, started, m.startAt, "事件积压时仍应从队列记录的真实开始时刻计时")
+}
+
+func TestCreatePlanResultReleasesCurrentScan(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		msg     createPlanMsg
+		success bool
+	}{
+		{name: "成功", success: true, msg: createPlanMsg{seq: 1, plan: &command.BatchPlan{Jobs: []command.Job{{Input: "a.mkv"}}}}},
+		{name: "失败", msg: createPlanMsg{seq: 1, err: errors.New("扫描失败")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatePresets(t)
+			m := newModel()
+			m.openTaskModal()
+			m.createSeq, m.creating = 1, true
+			m.modal.info = "正在扫描并生成任务…"
+			canceled := false
+			m.createCancel = func() { canceled = true }
+
+			next, _ := m.Update(tc.msg)
+			m = next.(model)
+			assert.True(t, canceled, "当前扫描结束后应释放 cancel")
+			assert.Nil(t, m.createCancel)
+			assert.False(t, m.creating)
+			require.NotNil(t, m.modal)
+			if tc.success {
+				require.Equal(t, modalConfirm, m.modal.kind)
+				require.NotNil(t, m.modal.taskForm)
+				assert.Empty(t, m.modal.taskForm.info, "返回表单时不能残留旧扫描提示")
+			} else {
+				assert.Empty(t, m.modal.info)
+			}
+		})
+	}
+
+	t.Run("旧序号不取消新扫描", func(t *testing.T) {
+		isolatePresets(t)
+		m := newModel()
+		m.openTaskModal()
+		m.createSeq, m.creating = 2, true
+		m.modal.info = "新扫描中"
+		canceled := false
+		m.createCancel = func() { canceled = true }
+		next, _ := m.Update(createPlanMsg{seq: 1, err: errors.New("旧失败")})
+		m = next.(model)
+		assert.False(t, canceled)
+		assert.NotNil(t, m.createCancel)
+		assert.True(t, m.creating)
+		assert.Equal(t, "新扫描中", m.modal.info)
+	})
+}
+
+// 单事件重建列表必须使用调用方传入的同一份快照，不能再取 Copies 覆盖 liveBatches。
+func TestSyncRosterSnapshotUsesProvidedCopies(t *testing.T) {
+	live := &task.Batch{ID: "b", Name: "队列新状态", Status: task.StatusPending}
+	m := newModel()
+	m.liveBatches = map[string]*task.Batch{live.ID: live}
+	m.savedList = []*task.Batch{{ID: live.ID, Name: "数据库旧状态", Status: task.StatusPending}}
+	m.syncRosterSnapshot([]*task.Batch{live})
+	require.Len(t, m.roster, 1)
+	assert.Contains(t, m.roster[0].title, "队列新状态")
+	assert.Same(t, live, m.liveBatches[live.ID])
 }

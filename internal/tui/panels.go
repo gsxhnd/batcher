@@ -390,7 +390,18 @@ func (m *model) startFocused(row rosterRow) bool {
 		return false
 	}
 	busy := m.running || m.pausedBatch != ""
-	if err := m.queue.Start(row.batchID); err != nil {
+	if _, inQueue := m.queue.BatchCopy(row.batchID); !inQueue {
+		// 重启后 pending 历史任务只存在数据库里；Requeue 会按原 ID 放回队列并启动。
+		snap, ok := m.batchByID(row.batchID)
+		if !ok {
+			m.setStatus("× 开始失败: 未找到任务 " + row.batchID)
+			return true
+		}
+		if err := m.queue.Requeue(snap); err != nil {
+			m.setStatus("× 开始失败: " + err.Error())
+			return true
+		}
+	} else if err := m.queue.Start(row.batchID); err != nil {
 		m.setStatus("× 开始失败: " + err.Error())
 		return true
 	}
@@ -465,8 +476,13 @@ func (m *model) deleteFocused(row rosterRow) bool {
 		}
 		m.forget[row.batchID] = struct{}{}
 		if err := m.queue.Discard(row.batchID); err != nil {
-			delete(m.forget, row.batchID)
-			m.setStatus("× 删除失败: " + err.Error())
+			if _, inQueue := m.queue.BatchCopy(row.batchID); inQueue {
+				// 只有拒绝移除才撤销删除意图；已移除但旧快照落盘失败时仍要删掉库中记录。
+				delete(m.forget, row.batchID)
+				m.setStatus("× 删除失败: " + err.Error())
+				return true
+			}
+			m.setStatus("× 任务已移出队列，等待删除记录；落盘错误: " + err.Error())
 			return true
 		}
 		if m.pausedBatch == row.batchID {

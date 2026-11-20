@@ -235,6 +235,13 @@ func decodeTask(id string, data []byte) (*task.Batch, error) {
 	}
 	if b.ID == "" {
 		b.ID = id
+	} else if b.ID != id {
+		return nil, fmt.Errorf("任务记录 ID %s 与存储键 %s 不一致", b.ID, id)
+	}
+	for i, item := range b.Items {
+		if item == nil {
+			return nil, fmt.Errorf("任务 %s 的第 %d 个子任务为空", id, i+1)
+		}
 	}
 	return &b, nil
 }

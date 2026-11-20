@@ -80,7 +80,9 @@ type Queue struct {
 
 	savePending map[string]saveSnap // 每个主任务只保留最新一份待写入快照
 	saveSeq     map[string]uint64
-	saveAck     map[string]uint64
+	saveAck     map[string]uint64 // 最新成功写入的序号；失败不能伪装成已保存
+	saveSettled map[string]uint64 // 最新已得到结果的序号，失败也会推进以唤醒等待方
+	saveErr     map[string]error  // 最新一次落盘结果的错误；后续成功会清除
 	saveSig     chan struct{}
 	saveStop    bool
 	saveExited  bool       // 落盘协程已退出；等待落盘的调用方据此不再等
@@ -109,6 +111,8 @@ func NewQueue(ctx context.Context, onEvent func(QueueEvent)) *Queue {
 		savePending:  map[string]saveSnap{},
 		saveSeq:      map[string]uint64{},
 		saveAck:      map[string]uint64{},
+		saveSettled:  map[string]uint64{},
+		saveErr:      map[string]error{},
 		saveSig:      make(chan struct{}, 1),
 		saveDone:     make(chan struct{}),
 	}
@@ -120,7 +124,8 @@ func NewQueue(ctx context.Context, onEvent func(QueueEvent)) *Queue {
 }
 
 // Stop 停止队列，取消当前正在执行的子任务，并等待消费者、落盘和事件分发都退出。
-func (q *Queue) Stop() {
+// 返回最终刷盘时仍未成功的错误；每份待写快照只尝试一次，不会在停止时无限重试。
+func (q *Queue) Stop() error {
 	q.cancel()
 	<-q.done
 	q.mu.Lock()
@@ -130,9 +135,28 @@ func (q *Queue) Stop() {
 	<-q.saveDone
 	q.mu.Lock()
 	q.dispatchStop = true
+	var ids []string
+	for id := range q.saveSeq {
+		if !q.persistedLocked(id) {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	var errs []error
+	for _, id := range ids {
+		err := q.saveErr[id]
+		if err == nil {
+			err = errors.New("落盘协程退出前未得到写入结果")
+		}
+		errs = append(errs, fmt.Errorf("任务 %s 最终刷盘失败: %w", id, err))
+	}
 	q.mu.Unlock()
 	q.signalDispatch()
 	<-q.dispatchDone
+	if len(errs) > 0 {
+		return fmt.Errorf("停止队列: %w", errors.Join(errs...))
+	}
+	return nil
 }
 
 // CancelCurrent 取消当前正在执行的主任务；主任务标为 canceled。
@@ -205,8 +229,16 @@ func (q *Queue) Requeue(src *Batch) error {
 	b := copyBatch(src)
 	switch b.Status {
 	case StatusFailed, StatusCanceled, StatusInterrupted, StatusPaused, StatusRunning:
-		resetForRetry(b)
+		if err := resetForRetry(b); err != nil {
+			q.mu.Unlock()
+			return err
+		}
 	case StatusPending:
+		for _, it := range b.Items {
+			if it != nil {
+				it.Overwrite = false
+			}
+		}
 	case StatusDone:
 		q.mu.Unlock()
 		return errors.New("任务已完成，无需重试")
@@ -289,7 +321,10 @@ func (q *Queue) RetryBatch(batchID string) error {
 		q.Decide(DecisionRetry)
 		return nil
 	case StatusFailed, StatusCanceled, StatusInterrupted:
-		resetForRetry(b)
+		if err := resetForRetry(b); err != nil {
+			q.mu.Unlock()
+			return err
+		}
 	default:
 		q.mu.Unlock()
 		switch status {
@@ -310,18 +345,34 @@ func (q *Queue) RetryBatch(batchID string) error {
 	return nil
 }
 
-// resetForRetry 把未完成且未删除的子任务重置为等待执行。调用方需持有队列锁。
-func resetForRetry(b *Batch) {
+// resetForRetry 清理已记录的半成品，再把未完成且未删除的子任务重置为等待执行。
+// 调用方需持有队列锁；任一清理失败时保留该标记并返回错误，不改成可执行状态。
+func resetForRetry(b *Batch) error {
 	for _, it := range b.Items {
+		if it == nil {
+			continue
+		}
+		it.Overwrite = false // 即使清理失败，重置操作也不能留下覆盖授权。
+		if it.Removed || it.Status == StatusDone || it.Status == StatusSkipped {
+			continue
+		}
+		if err := cleanupPartialOutputLocked(it); err != nil {
+			return fmt.Errorf("清理子任务 %s 的半成品: %w", it.ID, err)
+		}
+	}
+	for _, it := range b.Items {
+		if it == nil {
+			continue
+		}
 		if it.Removed || it.Status == StatusDone || it.Status == StatusSkipped {
 			continue
 		}
 		it.Status = StatusPending
-		it.PartialOutput = false
 		it.Error = ""
 	}
 	b.Status = StatusPending
 	b.FinishedAt = time.Time{}
+	return nil
 }
 
 // ReplacePlan 用新计划替换主任务的配置与子任务列表（重新编辑任务详情）。
@@ -353,6 +404,7 @@ func (q *Queue) ReplacePlan(batchID string, plan *command.BatchPlan, sel command
 
 // Discard 从队列删除主任务：pending 与终态批次直接移除（列表消失），
 // paused 批次把剩余子任务标为取消、状态记 canceled 后再移除，运行中的批次不可删除。
+// pending 与终态批次会同步等待落盘并返回错误；paused 批次异步收尾，落盘错误随 QueueBatchRemoved.Err 上报。
 // 任务记录文件保留，仅从队列列表中删除。
 func (q *Queue) Discard(batchID string) error {
 	q.mu.Lock()
@@ -379,10 +431,11 @@ func (q *Queue) Discard(batchID string) error {
 		return nil
 	}
 	q.batches = append(q.batches[:idx], q.batches[idx+1:]...)
+	delete(q.armed, batchID)
 	q.mu.Unlock()
-	q.waitPersisted(batchID)
-	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: batchID})
-	return nil
+	err := q.waitPersisted(batchID)
+	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: batchID, Err: err})
+	return err
 }
 
 // discardRequested 报告用户是否删除了该批次。
@@ -412,8 +465,8 @@ func (q *Queue) completeDiscard(b *Batch) bool {
 	delete(q.discard, b.ID)
 	q.mu.Unlock()
 	q.persist(b)
-	q.waitPersisted(b.ID)
-	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: b.ID})
+	err := q.waitPersisted(b.ID)
+	q.emit(QueueEvent{Type: QueueBatchRemoved, BatchID: b.ID, Err: err})
 	return true
 }
 
@@ -424,6 +477,9 @@ func copyBatch(src *Batch) *Batch {
 	cp := *src
 	cp.Items = make([]*Item, len(src.Items))
 	for i, it := range src.Items {
+		if it == nil {
+			continue
+		}
 		item := *it
 		if it.StderrTail != nil {
 			item.StderrTail = make([]string, len(it.StderrTail))
@@ -487,6 +543,10 @@ func (q *Queue) CancelBatch(batchID string) error {
 		return nil
 	case StatusPending:
 		for _, it := range b.Items {
+			if it == nil {
+				continue
+			}
+			it.Overwrite = false
 			if !it.Status.Terminal() {
 				it.Status = StatusCanceled
 			}
@@ -677,15 +737,22 @@ func (q *Queue) persistedLocked(id string) bool {
 	return !waiting && q.saveAck[id] >= q.saveSeq[id]
 }
 
-// waitPersisted 阻塞到该主任务已排队的快照都写完；落盘协程已退出时不再等。
+// waitPersisted 阻塞到该主任务已排队的快照得到写入结果；失败会返回错误而不是永久等待。
 // 主任务被移除前必须先等它：界面收到移除事件就会删库，
 // 此时还在排队或正在写的快照会把刚删掉的记录写回去。
-func (q *Queue) waitPersisted(id string) {
+func (q *Queue) waitPersisted(id string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for !q.persistedLocked(id) && !q.saveExited {
+	for !q.persistedLocked(id) && q.saveSettled[id] < q.saveSeq[id] && !q.saveExited {
 		q.saveCond.Wait()
 	}
+	if q.persistedLocked(id) {
+		return nil
+	}
+	if err := q.saveErr[id]; err != nil {
+		return fmt.Errorf("等待任务 %s 落盘: %w", id, err)
+	}
+	return fmt.Errorf("等待任务 %s 落盘: 落盘协程已退出且没有成功结果", id)
 }
 
 func (q *Queue) saveLoop() {
@@ -714,11 +781,20 @@ func (q *Queue) saveLoop() {
 			<-q.saveSig
 			continue
 		}
-		if err := snap.b.Save(); err != nil {
+		err := snap.b.Save()
+		if err != nil {
 			q.emit(QueueEvent{Type: QueueStoreError, BatchID: id, Err: err})
 		}
 		q.mu.Lock()
-		if snap.gen >= q.saveAck[id] {
+		if snap.gen >= q.saveSettled[id] {
+			q.saveSettled[id] = snap.gen
+			if err != nil {
+				q.saveErr[id] = err
+			} else {
+				q.saveErr[id] = nil
+			}
+		}
+		if err == nil && snap.gen >= q.saveAck[id] {
 			q.saveAck[id] = snap.gen
 		}
 		q.mu.Unlock()
@@ -749,7 +825,14 @@ func (q *Queue) run(ctx context.Context) {
 
 // runPending 取出下一个已经手动开始的 pending 主任务并执行；返回 false 表示应退出。
 func (q *Queue) runPending(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	q.mu.Lock()
+	if ctx.Err() != nil {
+		q.mu.Unlock()
+		return false
+	}
 	var next *Batch
 	for _, b := range q.batches {
 		if b.Status != StatusPending {
@@ -764,24 +847,33 @@ func (q *Queue) runPending(ctx context.Context) bool {
 	}
 	q.mu.Unlock()
 	if next == nil {
-		return true
+		return ctx.Err() == nil
 	}
 	return q.runBatch(ctx, next)
 }
 
 // runBatch 顺序执行主任务的全部子任务，子任务失败时暂停并等待决策。
 func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	bctx, cancelBatch := context.WithCancel(ctx)
 	q.mu.Lock()
-	q.batchCancel = cancelBatch
-	if b.Status != StatusPending {
-		// 入队后、真正开跑前被取消：不要覆盖成执行中。
-		q.batchCancel = nil
+	current, _ := q.findLocked(b.ID)
+	_, discarded := q.discard[b.ID]
+	if ctx.Err() != nil {
+		q.mu.Unlock()
+		cancelBatch()
+		return false
+	}
+	if current != b || b.Status != StatusPending || discarded {
+		// 选中后、真正开跑前可能已被删除或取消；原指针不能再被复活成执行中。
 		q.mu.Unlock()
 		cancelBatch()
 		q.wake()
 		return true
 	}
+	q.batchCancel = cancelBatch
 	b.Status = StatusRunning
 	b.StartedAt = time.Now()
 	q.mu.Unlock()
@@ -813,6 +905,7 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 	}
 
 	for _, it := range b.Items {
+	attempts:
 		for {
 			if bctx.Err() != nil {
 				q.cancelRemainingItems(b)
@@ -820,7 +913,7 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 				return true
 			}
 			q.mu.Lock()
-			settled := it.Removed || it.Status.Terminal()
+			settled := it == nil || it.Removed || it.Status.Terminal()
 			q.mu.Unlock()
 			if settled {
 				break
@@ -834,21 +927,27 @@ func (q *Queue) runBatch(ctx context.Context, b *Batch) bool {
 			if !failed {
 				break
 			}
-			decision, cont := q.pauseForItem(bctx, b, it, finish)
-			if !cont {
-				return true
+			for {
+				decision, cont := q.pauseForItem(bctx, b, it, finish)
+				if !cont {
+					return true
+				}
+				again, stop, resolved := q.takePauseDecision(b, it, decision)
+				if stop {
+					q.cancelRemainingItems(b)
+					finish(StatusFailed)
+					return true
+				}
+				if !resolved {
+					// 半成品清理失败或决策无效：保留失败状态，继续等下一次明确决策。
+					continue
+				}
+				if again {
+					continue attempts
+				}
+				q.persist(b)
+				break attempts
 			}
-			again, stop := q.takePauseDecision(b, it, decision)
-			if stop {
-				q.cancelRemainingItems(b)
-				finish(StatusFailed)
-				return true
-			}
-			if again {
-				continue
-			}
-			q.persist(b)
-			break
 		}
 	}
 	q.mu.Lock()
@@ -895,43 +994,60 @@ func (q *Queue) pauseForItem(bctx context.Context, b *Batch, it *Item, finish fu
 	return decision, true
 }
 
-// takePauseDecision 应用一次暂停决策。again 表示还要再跑这个子任务，stop 表示整批结束。
-func (q *Queue) takePauseDecision(b *Batch, it *Item, decision PauseDecision) (again, stop bool) {
+// takePauseDecision 应用一次暂停决策。again 表示重跑，stop 表示整批结束，
+// resolved 为假表示决策无效或半成品清理失败，必须继续等待而不能推进到后续子任务。
+func (q *Queue) takePauseDecision(b *Batch, it *Item, decision PauseDecision) (again, stop, resolved bool) {
+	if decision == DecisionAbort {
+		q.mu.Lock()
+		it.Overwrite = false
+		q.mu.Unlock()
+		return false, true, true
+	}
+	if decision != DecisionRetry && decision != DecisionSkip && decision != DecisionDrop {
+		return false, false, false
+	}
+
+	q.mu.Lock()
+	if err := cleanupPartialOutputLocked(it); err != nil {
+		it.Status = StatusFailed
+		it.Error = err.Error()
+		it.AppendAttemptLog(it.Error)
+		it.Overwrite = false
+		b.Status = StatusPaused
+		q.mu.Unlock()
+		return false, false, false
+	}
 	switch decision {
 	case DecisionRetry:
-		q.mu.Lock()
 		it.Status = StatusPending
-		it.PartialOutput = false
 		it.Error = ""
 		b.Status = StatusRunning
-		q.mu.Unlock()
-		q.emit(QueueEvent{Type: QueueItemRetry, BatchID: b.ID, ItemID: it.ID})
-		return true, false
 	case DecisionSkip:
-		q.mu.Lock()
 		it.Status = StatusSkipped
+		it.Overwrite = false
 		b.Status = StatusRunning
-		q.mu.Unlock()
-		q.emit(QueueEvent{Type: QueueItemSkipped, BatchID: b.ID, ItemID: it.ID})
 	case DecisionDrop:
-		q.mu.Lock()
 		it.Status = StatusCanceled
 		it.Removed = true
-		it.PartialOutput = false
+		it.Overwrite = false
 		b.Status = StatusRunning
-		q.mu.Unlock()
-		q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID})
-	case DecisionAbort:
-		return false, true
-	default:
-		// 空决策或无法识别的决策继续等待，不能擅自跳过失败的子任务。
-		return true, false
 	}
-	return false, false
+	q.mu.Unlock()
+
+	switch decision {
+	case DecisionRetry:
+		q.emit(QueueEvent{Type: QueueItemRetry, BatchID: b.ID, ItemID: it.ID})
+		return true, false, true
+	case DecisionSkip:
+		q.emit(QueueEvent{Type: QueueItemSkipped, BatchID: b.ID, ItemID: it.ID})
+	case DecisionDrop:
+		q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID})
+	}
+	return false, false, true
 }
 
-// PrepareOverwrite 在确认之后，允许这个失败的子任务替换已有输出。
-// 只改参数，不开始执行；调用方接着发重试决策。
+// PrepareOverwrite 在确认之后，只允许这个失败子任务的下一次尝试替换已有输出。
+// 不修改计划参数，也不开始执行；调用方接着发重试决策。
 func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -944,7 +1060,7 @@ func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
 	}
 	var it *Item
 	for _, item := range b.Items {
-		if itemID != "" && item.ID != itemID {
+		if item == nil || itemID != "" && item.ID != itemID {
 			continue
 		}
 		if item.Status == StatusFailed && IsOutputExists(item.Error) {
@@ -956,39 +1072,123 @@ func (q *Queue) PrepareOverwrite(batchID, itemID string) error {
 		return errors.New("当前失败不是输出文件已存在")
 	}
 	it.Overwrite = true
-	it.PlanArgs = overwriteArgs(it.PlanArgs)
 	return nil
 }
 
-// overwriteArgs 把禁止覆盖的 -n 换成 -y。没有 -n 时在参数开头补上 -y。
-func overwriteArgs(args []string) []string {
-	out := slices.Clone(args)
-	for i, arg := range out {
-		if arg == "-n" {
-			out[i] = "-y"
-			return out
+// temporaryOutputArgs 让 ffmpeg 只写本次临时文件。临时文件由本进程独占创建，
+// 因此无论旧计划里残留 -n 还是 -y，都统一用 -y 写临时文件；正式输出是否可替换由提交步骤单独控制。
+func temporaryOutputArgs(args []string, output, partial string) ([]string, error) {
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "-y")
+	replaced := 0
+	for _, arg := range args {
+		if arg == "-n" || arg == "-y" {
+			continue
 		}
+		if arg == output {
+			arg = partial
+			replaced++
+		}
+		out = append(out, arg)
 	}
-	if slices.Contains(out, "-y") {
-		return out
+	if replaced == 0 {
+		return nil, errors.New("计划参数中未找到正式输出路径，已停止执行以保护已有文件")
 	}
-	return append([]string{"-y"}, out...)
+	return out, nil
+}
+
+// cleanupPartialOutputLocked 清理记录明确的半成品。调用方需持有队列锁。
+// 旧记录没有 PartialPath，无法区分完整输出与半成品时宁可保留正式输出并报告。
+func cleanupPartialOutputLocked(it *Item) error {
+	if it == nil || !it.PartialOutput {
+		return nil
+	}
+	partial := it.PartialPath
+	if partial == "" {
+		if _, err := os.Lstat(it.Output); err != nil {
+			if os.IsNotExist(err) {
+				it.PartialOutput = false
+				return nil
+			}
+			return fmt.Errorf("检查旧记录的输出文件: %w", err)
+		}
+		return errors.New("旧记录未记录临时输出路径，为避免误删正式输出，请先手动确认")
+	}
+	if filepath.Clean(partial) == filepath.Clean(it.Output) || filepath.Clean(partial) == filepath.Clean(it.Input) {
+		return errors.New("半成品路径与正式输入或输出重合，已拒绝删除")
+	}
+	if filepath.Clean(filepath.Dir(partial)) != filepath.Clean(filepath.Dir(it.Output)) {
+		return errors.New("半成品不在正式输出目录内，已拒绝删除")
+	}
+	if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除临时输出 %s: %w", partial, err)
+	}
+	it.PartialOutput = false
+	it.PartialPath = ""
+	return nil
 }
 
 // runItem 执行单个子任务；返回 false 仅当 ctx 已取消。
 func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
+	if ctx.Err() != nil || it == nil {
+		return ctx.Err() == nil
+	}
 	now := time.Now()
 	q.mu.Lock()
+	if ctx.Err() != nil {
+		q.mu.Unlock()
+		return false
+	}
+	if it.Removed || it.Status.Terminal() || it.Status != StatusPending {
+		q.mu.Unlock()
+		return true
+	}
 	it.Status = StatusRunning
 	it.Attempts++
 	it.BeginAttemptLog()
 	overwrite := it.Overwrite
-	args := slices.Clone(it.PlanArgs)
+	it.Overwrite = false // 覆盖确认只授权这一次尝试，失败或崩溃恢复都不能继续沿用。
 	q.mu.Unlock()
-	if overwrite {
-		args = overwriteArgs(args)
-	}
 	q.emit(QueueEvent{Type: QueueItemStarted, BatchID: b.ID, ItemID: it.ID})
+	q.persist(b) // 尽快留下 running 与覆盖授权已消费的记录，崩溃恢复不会沿用旧授权。
+
+	q.mu.Lock()
+	cleanupErr := cleanupPartialOutputLocked(it)
+	q.mu.Unlock()
+	if cleanupErr != nil {
+		q.failItem(b, it, now, cleanupErr)
+		return true
+	}
+	if err := media.CheckPaths(ctx, []string{it.Input}, []string{it.Output}, false); err != nil {
+		err = fmt.Errorf("校验输入输出路径: %w", err)
+		if ctx.Err() != nil {
+			return q.finishItem(ctx, b, it, now, overwrite, err)
+		}
+		q.failItem(b, it, now, err)
+		return true
+	}
+
+	partial, err := q.prepareOutput(it.Output, overwrite)
+	if err != nil {
+		q.failItem(b, it, now, err)
+		return true
+	}
+	q.mu.Lock()
+	it.PartialPath = partial
+	it.PartialOutput = true
+	q.mu.Unlock()
+	q.persist(b)
+	args, err := temporaryOutputArgs(it.PlanArgs, it.Output, partial)
+	if err != nil {
+		q.mu.Lock()
+		cleanupErr = cleanupPartialOutputLocked(it)
+		q.mu.Unlock()
+		if cleanupErr != nil {
+			err = fmt.Errorf("%w；%w", err, cleanupErr)
+		}
+		q.failItem(b, it, now, err)
+		return true
+	}
 
 	runner := &ffmpeg.Runner{OnEvent: func(e ffmpeg.Event) {
 		evt := e
@@ -1000,7 +1200,7 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 		q.emit(QueueEvent{Type: QueueFFmpeg, BatchID: b.ID, ItemID: it.ID, FFmpegEvt: &evt})
 	}}
 	idx := 0
-	if n, err := strconv.Atoi(strings.TrimSpace(it.ID)); err == nil && n > 0 {
+	if n, convErr := strconv.Atoi(strings.TrimSpace(it.ID)); convErr == nil && n > 0 {
 		idx = n - 1
 	}
 	call := ffmpeg.Call{
@@ -1011,55 +1211,57 @@ func (q *Queue) runItem(ctx context.Context, b *Batch, it *Item) bool {
 		Input:   it.Input,
 	}
 
-	if err := q.prepareOutput(it.Output, overwrite); err != nil {
-		q.failItem(b, it, now, err)
-		return true
-	}
-
-	q.mu.Lock()
-	it.PartialOutput = true
-	q.mu.Unlock()
-	q.persist(b)
-
-	return q.finishItem(ctx, b, it, now, runner.Run(ctx, call))
+	return q.finishItem(ctx, b, it, now, overwrite, runner.Run(ctx, call))
 }
 
-// prepareOutput 创建输出目录，并在不允许覆盖时拒绝已有文件。
-// 已有文件不能删：它是上一次的结果，不是这次的半成品。
-func (q *Queue) prepareOutput(output string, overwrite bool) error {
+// prepareOutput 创建输出目录和本次尝试的同目录临时文件，保留原扩展名。
+// 未授权覆盖时，已有正式文件直接报错且绝不删除。
+func (q *Queue) prepareOutput(output string, overwrite bool) (string, error) {
 	if err := media.MakeDir(filepath.Dir(output)); err != nil {
-		return fmt.Errorf("创建输出目录: %w", err)
+		return "", fmt.Errorf("创建输出目录: %w", err)
 	}
-	if overwrite {
-		return nil
+	if !overwrite {
+		if _, err := os.Lstat(output); err == nil {
+			return "", fmt.Errorf("输出文件已存在: %s", output)
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("检查输出文件: %w", err)
+		}
 	}
-	if _, err := os.Lstat(output); err == nil {
-		return fmt.Errorf("输出文件已存在: %s", output)
-	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("检查输出文件: %w", err)
-	}
-	return nil
+	// 不重复完整视频名，避免正式文件名接近 NAME_MAX 时临时文件反而超长。
+	return createPartialOutput(output)
 }
 
-// finishItem 记录一条命令的结果。取消时返回 false，调用方应停止本批剩余子任务。
-func (q *Queue) finishItem(ctx context.Context, b *Batch, it *Item, start time.Time, err error) bool {
+// finishItem 校验并提交临时输出，记录命令结果。取消时返回 false，调用方停止本批剩余子任务。
+func (q *Queue) finishItem(ctx context.Context, b *Batch, it *Item, start time.Time, overwrite bool, err error) bool {
 	elapsed := time.Since(start)
+	if err == nil && ctx.Err() != nil {
+		err = fmt.Errorf("任务已取消: %w", ctx.Err())
+	}
+	if err == nil {
+		q.mu.Lock()
+		partial := it.PartialPath
+		q.mu.Unlock()
+		err = commitPartialOutput(partial, it.Output, overwrite)
+		if err != nil && errors.Is(err, os.ErrExist) {
+			err = fmt.Errorf("输出文件已存在: %s: %w", it.Output, err)
+		}
+	}
 	if err != nil {
+		q.mu.Lock()
+		cleanupErr := cleanupPartialOutputLocked(it)
+		if cleanupErr != nil {
+			err = fmt.Errorf("%w；%w", err, cleanupErr)
+		}
+		it.Overwrite = false
+		q.mu.Unlock()
 		if ctx.Err() != nil {
-			// 取消：删除半成品
-			_ = os.Remove(it.Output)
 			q.mu.Lock()
 			it.Status = StatusCanceled
-			it.PartialOutput = false
 			it.DurationMs = elapsed.Milliseconds()
 			q.mu.Unlock()
-			q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID})
+			q.emit(QueueEvent{Type: QueueItemCanceled, BatchID: b.ID, ItemID: it.ID, Err: err})
 			q.persist(b)
 			return false
-		}
-		// 输出已存在时保留原文件。其余失败删除这次写出的半成品。
-		if !ffmpeg.IsOutputExists(err) && !IsOutputExists(err.Error()) {
-			_ = os.Remove(it.Output)
 		}
 		q.failItem(b, it, start, err)
 		return true
@@ -1069,6 +1271,8 @@ func (q *Queue) finishItem(ctx context.Context, b *Batch, it *Item, start time.T
 	it.Status = StatusDone
 	it.Error = ""
 	it.PartialOutput = false
+	it.PartialPath = ""
+	it.Overwrite = false
 	it.DurationMs = elapsed.Milliseconds()
 	q.mu.Unlock()
 	q.emit(QueueEvent{Type: QueueItemDone, BatchID: b.ID, ItemID: it.ID})
@@ -1083,7 +1287,7 @@ func (q *Queue) failItem(b *Batch, it *Item, start time.Time, err error) {
 	}
 	q.mu.Lock()
 	it.Status = StatusFailed
-	it.PartialOutput = false
+	it.Overwrite = false
 	it.Error = msg
 	it.AppendAttemptLog(msg)
 	it.DurationMs = time.Since(start).Milliseconds()
@@ -1094,6 +1298,10 @@ func (q *Queue) failItem(b *Batch, it *Item, start time.Time, err error) {
 func (q *Queue) cancelRemainingItems(b *Batch) {
 	q.mu.Lock()
 	for _, it := range b.Items {
+		if it == nil {
+			continue
+		}
+		it.Overwrite = false
 		if it.Status == StatusPending {
 			it.Status = StatusCanceled
 		}
@@ -1105,6 +1313,11 @@ func (q *Queue) finishBatch(b *Batch, status Status) {
 	q.mu.Lock()
 	b.Status = status
 	b.FinishedAt = time.Now()
+	for _, it := range b.Items {
+		if it != nil {
+			it.Overwrite = false
+		}
+	}
 	delete(q.discard, b.ID)
 	q.persistLocked(b)
 	q.mu.Unlock()
@@ -1140,10 +1353,13 @@ func (q *Queue) waitDecision(ctx context.Context) PauseDecision {
 		case <-ctx.Done():
 			return ""
 		case d := <-q.decision:
-			if d == "" {
+			switch d {
+			case DecisionRetry, DecisionSkip, DecisionAbort, DecisionDrop:
+				return d
+			default:
+				// 非法值不属于本次暂停的明确操作，继续等待。
 				continue
 			}
-			return d
 		case batchID := <-q.discardCh:
 			if q.discardRequested(batchID) {
 				return ""

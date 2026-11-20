@@ -469,6 +469,10 @@ func (m *model) updateEnqueueConfirm(key tea.KeyPressMsg, msg tea.Msg) tea.Cmd {
 	md := m.modal
 	switch key.String() {
 	case "ctrl+s", "y":
+		if md.editBatchID != "" && md.onConfirm != nil {
+			// 编辑可能落盘失败：确认框与 taskForm 先保留，applyTaskEdit 成功后才关闭。
+			return md.onConfirm(m)
+		}
 		m.modal = nil
 		if md.onConfirm != nil {
 			return md.onConfirm(m)

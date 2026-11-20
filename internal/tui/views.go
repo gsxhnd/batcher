@@ -398,7 +398,7 @@ func (m model) progressBlock() string {
 	if total <= 0 {
 		return "  " + subtitleStyle.Render("正在启动...") + "\n"
 	}
-	if !m.running && !paused {
+	if !m.focusedBatchRunning() && !paused {
 		head := fmt.Sprintf("进度: %d/%d 完成，耗时 %s", settled, total, m.focusedElapsed().Round(time.Second).String())
 		if failed > 0 {
 			head += fmt.Sprintf("，失败 %d", failed)
@@ -734,7 +734,7 @@ func (m model) runBarH() int {
 	if total <= 0 {
 		return 1
 	}
-	if !m.running && !paused {
+	if !m.focusedBatchRunning() && !paused {
 		return 1
 	}
 	return 2

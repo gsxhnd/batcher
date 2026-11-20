@@ -92,7 +92,7 @@ func RecoverStored() error {
 func (b *Batch) MarkInterrupted() bool {
 	changed := false
 	for _, it := range b.Items {
-		if it.Status == StatusRunning {
+		if it != nil && it.Status == StatusRunning {
 			it.Status = StatusInterrupted
 			changed = true
 		}

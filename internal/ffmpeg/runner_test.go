@@ -5,13 +5,24 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const existingOutputHelperEnv = "BATCHER_FFMPEG_TEST_EXISTING_OUTPUT"
+
+// TestMain 让测试二进制自身充当跨平台的 ffmpeg 替身，避免依赖 Windows 没有的 /bin/sh。
+func TestMain(m *testing.M) {
+	if os.Getenv(existingOutputHelperEnv) == "1" {
+		fmt.Fprintln(os.Stderr, "File '/tmp/1.mkv' already exists. Exiting.")
+		fmt.Fprintln(os.Stderr, "Error opening output file /tmp/1.mkv.")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func eventTypes(events []Event) []EventType {
 	types := make([]EventType, 0, len(events))
@@ -40,12 +51,9 @@ func TestRunnerEmitsLifecycleEvents(t *testing.T) {
 }
 
 func TestRunnerExistingOutputExitZeroIsFailure(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "ffmpeg")
-	body := "#!/bin/sh\necho \"File '/tmp/1.mkv' already exists. Exiting.\" >&2\necho \"Error opening output file /tmp/1.mkv.\" >&2\nexit 0\n"
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
+	t.Setenv(existingOutputHelperEnv, "1")
 	orig := ffmpegBin
-	ffmpegBin = script
+	ffmpegBin = os.Args[0]
 	t.Cleanup(func() { ffmpegBin = orig })
 
 	var events []Event

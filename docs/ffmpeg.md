@@ -44,13 +44,13 @@ ffmpeg -i INPUT.mp4 -c copy OUTPUT.mkv
 ## 添加字幕
 
 ```shell
-ffmpeg -i INPUT -sub_charenc UTF-8 -i INPUT.ass -map 0 -map '-0:s?' -map 1 -map '0:s?' -c copy \
+ffmpeg -i INPUT -sub_charenc UTF-8 -i INPUT.ass -map 0 -map '-0:s?' -map 1:s:0 -map '0:s?' -c copy \
   -metadata:s:s:0 language=chi -metadata:s:s:0 title="简体中文" OUTPUT
 ```
 
-batcher 组合流程会为每条字幕追加独立输入。默认先映射原视频的非字幕流，再映射新增字幕，最后保留原字幕，新增字幕序号因此从 0 开始且不依赖原字幕数量。
+batcher 组合流程会为每条字幕追加独立输入，并只取该输入的首条字幕流。默认先映射原视频的非字幕流，再映射新增字幕，最后保留原字幕，新增字幕序号因此从 0 开始且不依赖原字幕数量。
 
-高级参数中的空格需要正确引用，例如 `-metadata title="hello  world"` 会保留标题中的两个空格。输入参数 `-i` 与覆盖选项 `-y` 不允许写入高级参数。
+高级参数中的空格需要正确引用，例如 `-metadata title="hello  world"` 会保留标题中的两个空格。输入参数 `-i`、覆盖选项 `-y`、进度通道 `-progress`、提前显示信息并退出的选项，以及明显的额外输出/写文件选项不允许写入高级参数。
 
 ## 添加多个字体
 

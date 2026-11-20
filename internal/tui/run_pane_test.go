@@ -222,7 +222,7 @@ func TestPinnedCmdShortCommandNoScroll(t *testing.T) {
 	assert.False(t, m.cmdOverflow(), "短命令不超出固定高度")
 	assert.Contains(t, m.taskDetail(), "out/a.mkv", "短命令尾部完整显示")
 	press(&m, "tab")
-	press(&m, "pgdn")
+	press(&m, "pgdown")
 	assert.Equal(t, 0, m.cmdVp.YOffset(), "内容不超高度时滚动无效")
 }
 
@@ -295,4 +295,59 @@ func TestRunPinHMatchesPinnedCmdBlock(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Tab 从命令区切回输出后，行滚动与翻页都作用于输出；esc 仍逐层退出焦点。
+func TestTabRestoresOutputScrolling(t *testing.T) {
+	isolatePresets(t)
+	m := newModel()
+	m.width, m.height = 100, 24
+	m.focus = panelRun
+	m.running, m.total = true, 1
+	m.filesBatch = "b"
+	longCmd := "ffmpeg -i a.mkv " + strings.Repeat("-metadata a=b ", 80) + "out/a.mkv"
+	logs := make([]string, 30)
+	for i := range logs {
+		logs[i] = fmt.Sprintf("输出 %02d", i+1)
+	}
+	m.files = []fileItem{{
+		input: "a.mkv", cmd: longCmd, state: fileRunning,
+		attempts: []attemptLog{{n: 1, status: fileRunning, lines: logs}},
+	}}
+	m.roster = []rosterRow{{batchID: "b", itemID: "001", attempt: 1, title: "第 1 次", cmd: longCmd}}
+	m.fileCursor = 0
+	m.logFollow = false
+	m.resizePanes()
+	m.syncLogPane()
+	require.Positive(t, m.logVp.TotalLineCount())
+
+	press(&m, "tab")
+	require.True(t, m.cmdFocus)
+	press(&m, "down")
+	assert.Equal(t, 1, m.cmdVp.YOffset())
+	press(&m, "pgdown")
+	assert.Greater(t, m.cmdVp.YOffset(), 1)
+
+	press(&m, "tab")
+	assert.False(t, m.cmdFocus)
+	assert.True(t, m.outputFocus, "切回输出区必须设置 outputFocus")
+	cmdOffset := m.cmdVp.YOffset()
+	press(&m, "down")
+	assert.Equal(t, 1, m.logVp.YOffset(), "上下键应滚动输出而不是移动任务列表")
+	assert.Equal(t, 0, m.fileCursor)
+	assert.Equal(t, cmdOffset, m.cmdVp.YOffset())
+	press(&m, "pgdown")
+	assert.Greater(t, m.logVp.YOffset(), 1)
+	before := m.logVp.YOffset()
+	press(&m, "up")
+	assert.Less(t, m.logVp.YOffset(), before)
+
+	press(&m, "tab")
+	assert.True(t, m.cmdFocus)
+	assert.True(t, m.outputFocus, "命令焦点覆盖在输出查看之上")
+	press(&m, "esc")
+	assert.False(t, m.cmdFocus)
+	assert.True(t, m.outputFocus, "第一次 esc 只退出命令焦点")
+	press(&m, "esc")
+	assert.False(t, m.outputFocus, "第二次 esc 才退出输出查看")
 }

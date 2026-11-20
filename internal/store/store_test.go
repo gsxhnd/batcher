@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +156,35 @@ func TestListTasksSkipsBadRecords(t *testing.T) {
 
 // 界面在删除、重命名、任务移出队列时会反复读取任务列表；同一条损坏记录的提示只记一次，
 // 否则警告列表随操作次数无限增长。
+func TestListTasksRejectsSemanticallyCorruptRecords(t *testing.T) {
+	db, err := OpenDir(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	require.NoError(t, db.SaveTask(&task.Batch{Version: 1, ID: "good", Status: task.StatusPending}))
+	require.NoError(t, db.bolt.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketTasks)
+		if err := bucket.Put([]byte("bucket-id"), []byte(`{"version":1,"id":"record-id","items":[]}`)); err != nil {
+			return err
+		}
+		return bucket.Put([]byte("nil-item"), []byte(`{"version":1,"id":"nil-item","items":[null]}`))
+	}))
+
+	list, err := db.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "good", list[0].ID)
+	warnings := db.Warnings()
+	require.Len(t, warnings, 2)
+	assert.Contains(t, strings.Join(warnings, "\n"), "不一致")
+	assert.Contains(t, strings.Join(warnings, "\n"), "子任务为空")
+
+	_, err = db.LoadTask("bucket-id")
+	assert.ErrorContains(t, err, "不一致")
+	_, err = db.LoadTask("nil-item")
+	assert.ErrorContains(t, err, "子任务为空")
+}
+
 func TestListTasksRepeatedReadsDoNotGrowWarnings(t *testing.T) {
 	db, err := OpenDir(t.TempDir())
 	require.NoError(t, err)

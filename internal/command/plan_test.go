@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -204,7 +205,7 @@ func TestBuildPlanCombinedCommands(t *testing.T) {
 		opt.Advance = "-c:v h265 -crf 20"
 		return opt
 	}
-	subMaps := []string{"-map", "0", "-map", "-0:s?", "-map", "1", "-map", "0:s?"}
+	subMaps := []string{"-map", "0", "-map", "-0:s?", "-map", "1:s:0", "-map", "0:s?"}
 
 	// 字幕 + 字体（未转码）：一条命令同时带字幕参数、字体参数和 -c copy
 	t.Run("sub+fonts without convert", func(t *testing.T) {
@@ -349,6 +350,29 @@ func TestAdvancedArgumentsAndInputOrder(t *testing.T) {
 	}
 }
 
+func TestAdvancedArgumentsRejectEarlyExitAndExtraOutputs(t *testing.T) {
+	fx := testutil.NewFixture(t)
+	for _, args := range []string{
+		"-progress pipe:2", "-version", "-help full", "-formats", "-report",
+		"-print_graphs_file graph.json", "-dump_attachment:t font.ttf",
+		"unexpected.mkv", "-c:v libx264 unexpected.mkv", "-an unexpected.mkv",
+	} {
+		t.Run(args, func(t *testing.T) {
+			opt := fixtureOption(fx)
+			opt.Advance = args
+			_, err := BuildPlan(context.Background(), opt, buildSelection(true, false, false))
+			assert.Error(t, err)
+		})
+	}
+
+	opt := fixtureOption(fx)
+	opt.Advance = `-c:v libx264 -vf "drawtext=text='-version -progress'" -metadata title=movie.mkv -an`
+	cmds := planCommands(t, opt, buildSelection(true, false, false))
+	require.NotEmpty(t, cmds)
+	assert.Contains(t, cmds[0], "drawtext=text='-version -progress'")
+	assert.Contains(t, cmds[0], "title=movie.mkv")
+}
+
 func TestPlanningCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -384,5 +408,34 @@ func TestRejectsInvalidSuffix(t *testing.T) {
 			_, err := BuildPlan(context.Background(), opt, buildSelection(true, false, false))
 			assert.Error(t, err)
 		})
+	}
+}
+
+func BenchmarkBuildPlanManyVideos(b *testing.B) {
+	dir := b.TempDir()
+	const videoCount = 128
+	for i := 0; i < videoCount; i++ {
+		base := fmt.Sprintf("Movie.%03d", i)
+		for _, ext := range []string{".mp4", ".ass"} {
+			require.NoError(b, os.WriteFile(filepath.Join(dir, base+ext), nil, 0o644))
+		}
+	}
+	opt := &VideoBatchOption{
+		InputPath:    dir,
+		InputFormat:  "mp4",
+		OutputPath:   b.TempDir(),
+		OutputFormat: "mkv",
+		Subtitles:    []SubtitleOption{{Suffix: "ass", Lang: "chi"}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		plan, err := BuildPlan(context.Background(), opt, Selection{AddSubtitle: true})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(plan.Jobs) != videoCount {
+			b.Fatalf("任务数 = %d，期望 %d", len(plan.Jobs), videoCount)
+		}
 	}
 }

@@ -101,9 +101,14 @@ func TestNewBatchCopiesPlan(t *testing.T) {
 func TestBatchCounts(t *testing.T) {
 	b := &Batch{Items: []*Item{
 		{Status: StatusDone}, {Status: StatusDone}, {Status: StatusFailed}, {Status: StatusSkipped},
-		{Status: StatusRunning}, {Status: StatusPending}, {Status: StatusCanceled}, {Status: StatusInterrupted},
+		{Status: StatusRunning}, {Status: StatusPending}, {Status: StatusCanceled}, {Status: StatusInterrupted}, nil,
 	}}
 	assert.Equal(t, Counts{Total: 8, Pending: 1, Running: 1, Done: 2, Failed: 1, Skipped: 1, Canceled: 1, Interrupted: 1}, b.Counts())
+	assert.NotPanics(t, func() {
+		cp := copyBatch(b)
+		assert.Len(t, cp.Items, len(b.Items))
+		assert.Nil(t, cp.Items[len(cp.Items)-1])
+	})
 }
 
 func TestStatusTerminal(t *testing.T) {
