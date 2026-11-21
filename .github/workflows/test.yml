@@ -51,6 +51,11 @@ jobs:
           ffmpeg -version
 
       - name: Test
+        # Windows 默认 shell 是 pwsh，它会把 -coverprofile=coverage.out 按点号拆成
+        # 两个参数，go test 因此把 .out 当成不存在的包报
+        # "no required module provides package .out"（PowerShell/PowerShell#6291）。
+        # 三个平台统一固定 bash（Windows runner 自带 Git Bash）避开该解析问题。
+        shell: bash
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./internal/... ./cmd/batcher/...
 
       - name: Build and vet
